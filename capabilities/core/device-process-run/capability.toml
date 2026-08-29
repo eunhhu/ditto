@@ -1,0 +1,39 @@
+id = "device.process.run"
+version = "0.1.0"
+namespace = "device"
+kind = "tool"
+summary = "Run a structured process on a registered local or remote device."
+
+[runtime]
+type = "process"
+command = "ditto-device-runner"
+lazy = true
+idle_ttl_ms = 30000
+
+[placement]
+modes = ["local", "ssh"]
+requires = ["process"]
+
+[retrieval]
+intents = [
+  "run a command on another computer",
+  "restart a service on the home server",
+  "inspect logs on a registered device",
+]
+negative_examples = [
+  "send a message to another person",
+  "reboot the entire machine when only one service should restart",
+]
+aliases = ["remote command", "ssh command", "run process"]
+complements = ["artifact.read", "device.process.wait"]
+
+[effects]
+maximum = "privileged"
+resources = ["device:{device_id}", "path:{cwd}/**"]
+
+[policy]
+approval = "risk-based"
+secret_handles = ["device-credential:{device_id}"]
+
+[verification]
+default = "exit-code-and-expected-output"

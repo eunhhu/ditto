@@ -1,0 +1,34 @@
+id = "artifact.read"
+version = "0.1.0"
+namespace = "artifact"
+kind = "tool"
+summary = "Read a bounded range from a content-addressed artifact."
+
+[runtime]
+type = "builtin"
+lazy = true
+idle_ttl_ms = 30000
+
+[placement]
+modes = ["local"]
+requires = []
+
+[retrieval]
+intents = [
+  "inspect the full output of a previous command",
+  "read a bounded range from a large log or file",
+]
+negative_examples = ["modify a file"]
+aliases = ["read output", "open artifact"]
+complements = []
+
+[effects]
+maximum = "read"
+resources = ["artifact:{artifact_id}"]
+
+[policy]
+approval = "never"
+secret_handles = []
+
+[verification]
+default = "content-hash"
