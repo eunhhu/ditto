@@ -254,7 +254,10 @@ fn collect_manifests(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), 
         let path = entry.path();
         if path.is_dir() {
             collect_manifests(&path, output)?;
-        } else if path.file_name().is_some_and(|name| name == "capability.toml") {
+        } else if path
+            .file_name()
+            .is_some_and(|name| name == "capability.toml")
+        {
             output.push(path);
         }
     }
@@ -289,8 +292,8 @@ fn lexical_score(
     }
 
     if !query_tokens.is_empty() {
-        let overlap = query_tokens.intersection(&positive_tokens).count() as f32
-            / query_tokens.len() as f32;
+        let overlap =
+            query_tokens.intersection(&positive_tokens).count() as f32 / query_tokens.len() as f32;
         score += overlap * 4.0;
     }
 

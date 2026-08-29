@@ -77,13 +77,8 @@ pub struct ContextNode {
 
 impl ContextNode {
     pub fn is_valid_at(&self, now: DateTime<Utc>) -> bool {
-        self.valid_from
-            .as_ref()
-            .is_none_or(|start| start <= &now)
-            && self
-                .valid_until
-                .as_ref()
-                .is_none_or(|end| end > &now)
+        self.valid_from.as_ref().is_none_or(|start| start <= &now)
+            && self.valid_until.as_ref().is_none_or(|end| end > &now)
             && self.epistemic != EpistemicStatus::Disputed
     }
 }

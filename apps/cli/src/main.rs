@@ -158,11 +158,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn append(
-    client: &reqwest::Client,
-    api: &str,
-    event: &NewEvent,
-) -> anyhow::Result<Value> {
+async fn append(client: &reqwest::Client, api: &str, event: &NewEvent) -> anyhow::Result<Value> {
     client
         .post(format!("{api}/v1/events"))
         .json(event)
