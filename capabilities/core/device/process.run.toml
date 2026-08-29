@@ -1,0 +1,43 @@
+id = "device.process.run"
+version = "1.0.0"
+namespace = "device"
+kind = "tool"
+summary = "Run a structured process on a registered device."
+
+[runtime]
+type = "process"
+command = "workers/device-runner"
+lazy = true
+idle_ttl_ms = 30000
+
+[placement]
+modes = ["local", "ssh"]
+requires = ["process"]
+
+[retrieval]
+aliases = ["run command", "start process", "명령 실행", "프로세스 실행", "홈서버 로그"]
+intents = [
+  "run a command on another computer",
+  "restart a service on the home server",
+  "inspect remote logs",
+  "다른 컴퓨터에서 명령을 실행",
+  "홈서버 서비스를 재시작",
+  "원격 로그를 확인",
+]
+negative_examples = [
+  "send a message to another person",
+  "open a local file without executing anything",
+]
+complements = []
+
+[effects]
+minimum = "read"
+maximum = "privileged"
+resources = ["device:{device_id}", "path:{cwd}/**"]
+
+[policy]
+approval = "risk-based"
+secret_handles = ["device-credential:{device_id}"]
+
+[verification]
+default = "exit-code-and-expected-output"

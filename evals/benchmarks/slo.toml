@@ -1,0 +1,16 @@
+[core]
+daemon_cold_start_ms_max = 200
+idle_rss_mb_max = 50
+event_append_p95_ms_max = 5
+warm_retrieval_p95_ms_max = 30
+stable_prompt_tokens_max = 700
+preloaded_schema_p95_max = 6
+durable_context_provenance_percent = 100
+privileged_actions_without_lease_max = 0
+improvement_patches_without_evidence_max = 0
+
+[artifacts]
+output_offload_chars = 8192
+
+[workers]
+idle_ttl_ms_default = 30000

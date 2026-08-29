@@ -1,0 +1,11 @@
+{
+  "name": "ditto-workspace",
+  "private": true,
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "sdk/typescript"
+  ],
+  "scripts": {
+    "test:ts": "bun test sdk/typescript"
+  }
+}

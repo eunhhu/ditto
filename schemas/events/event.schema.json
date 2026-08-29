@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ditto.local/schemas/events/event.schema.json",
+  "title": "Ditto Event",
+  "type": "object",
+  "required": ["timestamp_ms", "actor", "kind", "payload_ref"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 1 },
+    "timestamp_ms": { "type": "integer" },
+    "session_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "null"] },
+    "actor": {
+      "enum": ["user", "model", "tool", "policy", "scheduler", "kernel"]
+    },
+    "kind": { "type": "string", "minLength": 1 },
+    "payload_ref": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["storage", "value"],
+          "properties": {
+            "storage": { "const": "inline" },
+            "value": true
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["storage", "value"],
+          "properties": {
+            "storage": { "const": "artifact" },
+            "value": { "type": "string", "pattern": "^artifact:sha256:[0-9a-f]{64}$" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["storage"],
+          "properties": { "storage": { "const": "empty" } },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "causation_id": { "type": ["string", "null"] },
+    "correlation_id": { "type": ["string", "null"] },
+    "span_id": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

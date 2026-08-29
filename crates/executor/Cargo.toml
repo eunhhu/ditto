@@ -1,0 +1,22 @@
+[package]
+name = "ditto-executor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ditto-artifact-store.workspace = true
+ditto-capability-runtime.workspace = true
+ditto-effect-policy.workspace = true
+ditto-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

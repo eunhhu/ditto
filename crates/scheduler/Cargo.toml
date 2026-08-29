@@ -1,0 +1,15 @@
+[package]
+name = "ditto-scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ditto-protocol.workspace = true
+serde.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+
