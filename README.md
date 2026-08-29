@@ -1,0 +1,3 @@
+# Ditto
+
+Semantic Agent Microkernel
