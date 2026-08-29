@@ -172,12 +172,15 @@ impl EventStore {
 
     pub fn count(&self) -> Result<u64, EventStoreError> {
         let connection = self.connection()?;
-        let count: i64 = connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+        let count: i64 =
+            connection.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
         Ok(u64::try_from(count).unwrap_or_default())
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, EventStoreError> {
-        self.connection.lock().map_err(|_| EventStoreError::Poisoned)
+        self.connection
+            .lock()
+            .map_err(|_| EventStoreError::Poisoned)
     }
 }
 

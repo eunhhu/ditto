@@ -24,15 +24,15 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = "ditto-daemon", version, about = "Ditto semantic agent microkernel")]
+#[command(
+    name = "ditto-daemon",
+    version,
+    about = "Ditto semantic agent microkernel"
+)]
 struct Args {
     #[arg(long, env = "DITTO_DATA_DIR", default_value = ".ditto")]
     data_dir: PathBuf,
-    #[arg(
-        long,
-        env = "DITTO_CAPABILITIES_DIR",
-        default_value = "capabilities"
-    )]
+    #[arg(long, env = "DITTO_CAPABILITIES_DIR", default_value = "capabilities")]
     capabilities_dir: PathBuf,
     #[arg(long, env = "DITTO_BIND", default_value = "127.0.0.1:8787")]
     bind: SocketAddr,
@@ -54,11 +54,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let kernel = DittoKernel::open(KernelConfig::new(
-        args.data_dir,
-        args.capabilities_dir,
-    ))
-    .context("failed to initialize Ditto kernel")?;
+    let kernel = DittoKernel::open(KernelConfig::new(args.data_dir, args.capabilities_dir))
+        .context("failed to initialize Ditto kernel")?;
     kernel
         .record_runtime_started(&args.bind.to_string())
         .context("failed to record runtime start")?;

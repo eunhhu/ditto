@@ -35,8 +35,13 @@ pub struct CapabilityLease {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum LeaseDecision {
-    Allowed { lease_id: String, remaining_calls: u32 },
-    Denied { reason: String },
+    Allowed {
+        lease_id: String,
+        remaining_calls: u32,
+    },
+    Denied {
+        reason: String,
+    },
 }
 
 impl CapabilityLease {

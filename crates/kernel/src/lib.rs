@@ -2,9 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use ditto_capability::{CapabilityCard, CapabilityCatalog, CapabilityError};
 use ditto_event_store::{EventStore, EventStoreError};
-use ditto_protocol::{
-    EventActor, EventQuery, EventRecord, NewEvent, event_kind,
-};
+use ditto_protocol::{EventActor, EventQuery, EventRecord, NewEvent, event_kind};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
