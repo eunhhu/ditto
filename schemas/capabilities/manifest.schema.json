@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ditto.local/schemas/capabilities/manifest.schema.json",
+  "title": "Ditto Capability Manifest",
+  "type": "object",
+  "required": [
+    "id",
+    "version",
+    "namespace",
+    "kind",
+    "summary",
+    "runtime",
+    "placement",
+    "retrieval",
+    "effects",
+    "verification"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9-]*)+$" },
+    "version": { "type": "string" },
+    "namespace": { "type": "string" },
+    "kind": { "enum": ["tool", "resource", "recipe"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "runtime": {
+      "type": "object",
+      "required": ["type", "command", "lazy", "idle_ttl_ms"],
+      "properties": {
+        "type": { "enum": ["process", "unix-socket", "wasi", "mcp", "remote"] },
+        "command": { "type": "string" },
+        "lazy": { "type": "boolean" },
+        "idle_ttl_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "placement": { "type": "object" },
+    "retrieval": { "type": "object" },
+    "effects": { "type": "object" },
+    "policy": { "type": "object" },
+    "verification": { "type": "object" }
+  },
+  "additionalProperties": false
+}

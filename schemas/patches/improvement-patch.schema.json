@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ditto.local/schemas/patches/improvement-patch.schema.json",
+  "title": "Evidence-gated Improvement Patch",
+  "type": "object",
+  "required": ["kind", "target", "base_hash", "operations", "evidence", "scope", "status"],
+  "properties": {
+    "kind": {
+      "enum": [
+        "retrieval_patch",
+        "ranking_patch",
+        "normalizer_patch",
+        "validator_patch",
+        "verifier_patch",
+        "preference_claim",
+        "runbook_fragment",
+        "capability_patch"
+      ]
+    },
+    "target": { "type": "string", "minLength": 1 },
+    "base_hash": { "type": "string", "pattern": "^[0-9a-f]{6,64}$" },
+    "operations": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+    "evidence": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+    "scope": { "enum": ["task", "project", "device", "global"] },
+    "status": {
+      "enum": [
+        "candidate",
+        "deduplicated",
+        "validated",
+        "replay-tested",
+        "shadow",
+        "canary",
+        "active",
+        "deprecated",
+        "rolled-back",
+        "archived"
+      ]
+    },
+    "expires_at": { "type": ["string", "null"], "format": "date-time" },
+    "rollback": { "type": ["object", "null"] }
+  },
+  "additionalProperties": false
+}

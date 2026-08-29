@@ -1,0 +1,24 @@
+[package]
+name = "ditto-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+ditto-artifact-store.workspace = true
+ditto-capability-index.workspace = true
+ditto-context-compiler.workspace = true
+ditto-context-graph.workspace = true
+ditto-event-store.workspace = true
+ditto-kernel.workspace = true
+ditto-model-driver.workspace = true
+ditto-protocol.workspace = true
+ditto-task-state.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

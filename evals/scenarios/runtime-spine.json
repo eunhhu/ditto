@@ -1,0 +1,15 @@
+{
+  "id": "runtime-spine-reconnect",
+  "input": "inspect remote logs",
+  "expected_events": [
+    "input.received",
+    "context.compiled",
+    "capabilities.selected",
+    "model.started",
+    "model.delta",
+    "task.verifying",
+    "task.completed"
+  ],
+  "expected_capabilities": ["device.process.run"],
+  "completion_evidence": "model-stream-closed"
+}
