@@ -1,0 +1,15 @@
+[package]
+name = "ditto-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ditto-capability = { path = "../capability" }
+ditto-event-store = { path = "../event-store" }
+ditto-protocol = { path = "../protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
