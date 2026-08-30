@@ -12,15 +12,16 @@ Ditto is an agent harness for people who want frontier models to retain their fr
 
 This repository currently contains the first executable vertical slice:
 
-- an append-only SQLite event spine with WAL enabled;
+- a DB-enforced append-only SQLite event spine with WAL enabled;
+- a SHA-256 content-addressed artifact store with verified reads;
 - a Rust daemon exposing HTTP and Server-Sent Events;
 - a CLI that records inputs and inspects events;
-- lazy capability manifests with a deterministic lexical retrieval seed;
-- typed Context IR and a token-budgeted context compiler scaffold;
+- lazy capability manifests with hard-filtered retrieval and bounded execution epochs;
+- typed Context IR with provenance validation and a token-budgeted compiler;
 - bounded capability-lease primitives with deny-by-default checks;
 - architecture, protocol, and self-improvement specifications.
 
-Model providers, SSH transport, artifact storage, hybrid embedding retrieval, and the improvement compiler are intentionally not faked in this commit. They are the next vertical slices.
+Model providers, SSH transport, hybrid embedding retrieval, and the improvement compiler are intentionally not faked in this commit. They are the next vertical slices.
 
 ## Quick start
 
@@ -41,7 +42,7 @@ cargo run -p ditto-cli -- capabilities "run a command on another computer"
 curl -N 'http://127.0.0.1:8787/v1/stream?after_seq=0'
 ```
 
-The default data directory contains a single `state.db`. No Redis, Postgres, graph database, vector database, Docker daemon, or cloud account is required.
+The default data directory contains `state.db` and the local content-addressed artifact objects. No Redis, Postgres, graph database, vector database, Docker daemon, or cloud account is required.
 
 ## Architecture
 
@@ -99,6 +100,7 @@ apps/
 crates/
   protocol/         Stable wire and event types
   event-store/      SQLite event spine
+  artifact-store/   SHA-256 content-addressed objects
   capability/       Manifests, cards, retrieval seed
   context/          Typed Context IR and compiler
   policy/           Effect claims and bounded leases

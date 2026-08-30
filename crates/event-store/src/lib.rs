@@ -31,6 +31,18 @@ CREATE INDEX IF NOT EXISTS events_task_seq
     ON events(task_id, seq);
 CREATE INDEX IF NOT EXISTS events_kind_seq
     ON events(kind, seq);
+
+CREATE TRIGGER IF NOT EXISTS events_reject_update
+BEFORE UPDATE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS events_reject_delete
+BEFORE DELETE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events are append-only');
+END;
 "#;
 
 #[derive(Debug, Error)]
@@ -266,5 +278,30 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].task_id.as_deref(), Some("task-1"));
+    }
+
+    #[test]
+    fn rejects_updates_and_deletes() {
+        let directory = tempdir().expect("temporary directory");
+        let store = EventStore::open(directory.path().join("state.db")).expect("open store");
+        let event = store
+            .append(NewEvent::input("alpha", "immutable"))
+            .expect("append event");
+
+        let connection = store.connection().expect("lock connection");
+        let update_error = connection
+            .execute(
+                "UPDATE events SET kind = 'tampered' WHERE event_id = ?1",
+                [&event.event_id],
+            )
+            .expect_err("updates must be rejected");
+        let delete_error = connection
+            .execute("DELETE FROM events WHERE event_id = ?1", [&event.event_id])
+            .expect_err("deletes must be rejected");
+
+        assert!(update_error.to_string().contains("events are append-only"));
+        assert!(delete_error.to_string().contains("events are append-only"));
+        drop(connection);
+        assert_eq!(store.count().expect("count events"), 1);
     }
 }

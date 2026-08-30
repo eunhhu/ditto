@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "apps/cli",
   "apps/daemon",
+  "crates/artifact-store",
   "crates/capability",
   "crates/context",
   "crates/event-store",
@@ -30,6 +31,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower-http = { version = "0.6", features = ["trace"] }

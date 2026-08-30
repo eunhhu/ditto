@@ -6,6 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use ulid::Ulid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -133,6 +134,96 @@ pub struct CapabilityCard {
     pub placement_modes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchContext {
+    #[serde(default)]
+    pub placement_mode: Option<String>,
+    #[serde(default)]
+    pub available_requirements: Option<Vec<String>>,
+    #[serde(default)]
+    pub allowed_effects: Option<Vec<EffectClass>>,
+    #[serde(default)]
+    pub allowed_capability_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionEpoch {
+    pub id: String,
+    max_working_set: usize,
+    capabilities: Vec<CapabilityCard>,
+}
+
+impl ExecutionEpoch {
+    pub fn new(max_working_set: usize) -> Self {
+        Self {
+            id: Ulid::new().to_string(),
+            max_working_set,
+            capabilities: Vec::new(),
+        }
+    }
+
+    pub fn page_in(&mut self, cards: impl IntoIterator<Item = CapabilityCard>) -> usize {
+        let initial_len = self.capabilities.len();
+        for card in cards {
+            if self.capabilities.len() >= self.max_working_set {
+                break;
+            }
+            if !self
+                .capabilities
+                .iter()
+                .any(|existing| existing.id == card.id)
+            {
+                self.capabilities.push(card);
+            }
+        }
+        self.capabilities.len() - initial_len
+    }
+
+    pub fn capabilities(&self) -> &[CapabilityCard] {
+        &self.capabilities
+    }
+
+    pub fn max_working_set(&self) -> usize {
+        self.max_working_set
+    }
+}
+
+impl<'de> Deserialize<'de> for ExecutionEpoch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct EpochWire {
+            id: String,
+            max_working_set: usize,
+            capabilities: Vec<CapabilityCard>,
+        }
+
+        let wire = EpochWire::deserialize(deserializer)?;
+        if wire.capabilities.len() > wire.max_working_set {
+            return Err(serde::de::Error::custom(
+                "execution epoch exceeds its working-set limit",
+            ));
+        }
+        let mut ids = HashSet::new();
+        if wire
+            .capabilities
+            .iter()
+            .any(|card| !ids.insert(card.id.as_str()))
+        {
+            return Err(serde::de::Error::custom(
+                "execution epoch contains duplicate capabilities",
+            ));
+        }
+        Ok(Self {
+            id: wire.id,
+            max_working_set: wire.max_working_set,
+            capabilities: wire.capabilities,
+        })
+    }
+}
+
 impl From<&CapabilityManifest> for CapabilityCard {
     fn from(manifest: &CapabilityManifest) -> Self {
         Self {
@@ -219,15 +310,34 @@ impl CapabilityCatalog {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<CapabilityCard> {
+        self.search_with_context(query, &SearchContext::default(), limit)
+    }
+
+    pub fn search_with_context(
+        &self,
+        query: &str,
+        context: &SearchContext,
+        limit: usize,
+    ) -> Vec<CapabilityCard> {
+        if limit == 0 {
+            return Vec::new();
+        }
         let query = query.trim().to_lowercase();
         if query.is_empty() {
-            return self.cards().into_iter().take(limit).collect();
+            return self
+                .manifests
+                .iter()
+                .filter(|manifest| matches_context(manifest, context))
+                .take(limit)
+                .map(CapabilityCard::from)
+                .collect();
         }
 
         let query_tokens = tokenize(&query);
         let mut scored = self
             .manifests
             .iter()
+            .filter(|manifest| matches_context(manifest, context))
             .filter_map(|manifest| {
                 let score = lexical_score(manifest, &query, &query_tokens);
                 (score > 0.0).then_some((score, manifest))
@@ -240,12 +350,68 @@ impl CapabilityCatalog {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
-        scored
-            .into_iter()
-            .take(limit)
-            .map(|(_, manifest)| CapabilityCard::from(manifest))
-            .collect()
+        let mut selected = Vec::new();
+        for (_, manifest) in scored {
+            if selected.len() >= limit {
+                break;
+            }
+            selected.push(manifest);
+            for complement_id in &manifest.retrieval.complements {
+                if selected.len() >= limit {
+                    break;
+                }
+                let Some(complement) = self.get(complement_id) else {
+                    continue;
+                };
+                if matches_context(complement, context)
+                    && !selected
+                        .iter()
+                        .any(|candidate| candidate.id == complement.id)
+                {
+                    selected.push(complement);
+                }
+            }
+        }
+
+        selected.into_iter().map(CapabilityCard::from).collect()
     }
+}
+
+fn matches_context(manifest: &CapabilityManifest, context: &SearchContext) -> bool {
+    if let Some(mode) = &context.placement_mode
+        && !manifest.placement.modes.is_empty()
+        && !manifest
+            .placement
+            .modes
+            .iter()
+            .any(|candidate| candidate == mode)
+    {
+        return false;
+    }
+
+    if let Some(available) = &context.available_requirements
+        && !manifest
+            .placement
+            .requires
+            .iter()
+            .all(|requirement| available.contains(requirement))
+    {
+        return false;
+    }
+
+    if let Some(allowed) = &context.allowed_effects
+        && !allowed.contains(&manifest.effects.maximum)
+    {
+        return false;
+    }
+
+    if let Some(allowed) = &context.allowed_capability_ids
+        && !allowed.contains(&manifest.id)
+    {
+        return false;
+    }
+
+    true
 }
 
 fn collect_manifests(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
@@ -336,7 +502,11 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::CapabilityCatalog;
+    use super::{
+        CapabilityCatalog, CapabilityKind, CapabilityManifest, EffectClass, EffectSpec,
+        ExecutionEpoch, PlacementSpec, PolicySpec, RetrievalSpec, RuntimeSpec, RuntimeType,
+        SearchContext, VerificationSpec,
+    };
 
     const MANIFEST: &str = r#"
 id = "device.process.run"
@@ -382,5 +552,146 @@ default = "exit-code-and-expected-output"
         let result = catalog.search("remote command", 3);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "device.process.run");
+    }
+
+    #[test]
+    fn filters_before_ranking_and_expands_complements() {
+        let mut catalog = CapabilityCatalog::default();
+        catalog
+            .insert(manifest(
+                "device.process.run",
+                "restart service",
+                &["ssh"],
+                &["artifact.read"],
+            ))
+            .expect("insert process capability");
+        catalog
+            .insert(manifest(
+                "artifact.read",
+                "read process output artifact",
+                &["local", "ssh"],
+                &[],
+            ))
+            .expect("insert artifact capability");
+        catalog
+            .insert(manifest(
+                "local.service.restart",
+                "restart service locally",
+                &["local"],
+                &[],
+            ))
+            .expect("insert local capability");
+
+        let results = catalog.search_with_context(
+            "restart service",
+            &SearchContext {
+                placement_mode: Some("ssh".into()),
+                ..SearchContext::default()
+            },
+            3,
+        );
+        let ids = results
+            .iter()
+            .map(|card| card.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["device.process.run", "artifact.read"]);
+    }
+
+    #[test]
+    fn bounds_and_stabilizes_a_large_capability_working_set() {
+        let mut catalog = CapabilityCatalog::default();
+        for index in 0..1_000 {
+            catalog
+                .insert(manifest(
+                    &format!("synthetic.noise.{index:04}"),
+                    "unrelated synthetic operation",
+                    &["local"],
+                    &[],
+                ))
+                .expect("insert synthetic capability");
+        }
+        catalog
+            .insert(manifest(
+                "database.backup",
+                "create database backup snapshot",
+                &["local"],
+                &[],
+            ))
+            .expect("insert relevant capability");
+
+        let mut epoch = ExecutionEpoch::new(6);
+        let first_page = catalog.search_with_context(
+            "database backup",
+            &SearchContext {
+                placement_mode: Some("local".into()),
+                allowed_effects: Some(vec![EffectClass::Read]),
+                ..SearchContext::default()
+            },
+            6,
+        );
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(epoch.page_in(first_page), 1);
+        let stable_id = epoch.capabilities()[0].id.clone();
+
+        let noise = catalog.search("synthetic operation", 100);
+        assert_eq!(epoch.page_in(noise), 5);
+        assert_eq!(epoch.capabilities().len(), 6);
+        assert_eq!(epoch.capabilities()[0].id, stable_id);
+        assert_eq!(epoch.page_in(catalog.search("database backup", 6)), 0);
+    }
+
+    #[test]
+    fn rejects_invalid_serialized_epochs() {
+        let serialized = r#"{
+            "id": "epoch-1",
+            "max_working_set": 0,
+            "capabilities": [{
+                "id": "artifact.read",
+                "namespace": "artifact",
+                "kind": "tool",
+                "summary": "read an artifact",
+                "maximum_effect": "read",
+                "placement_modes": ["local"]
+            }]
+        }"#;
+
+        assert!(serde_json::from_str::<ExecutionEpoch>(serialized).is_err());
+    }
+
+    fn manifest(
+        id: &str,
+        summary: &str,
+        placement_modes: &[&str],
+        complements: &[&str],
+    ) -> CapabilityManifest {
+        CapabilityManifest {
+            id: id.into(),
+            version: "0.1.0".into(),
+            namespace: id.split('.').next().unwrap_or("test").into(),
+            kind: CapabilityKind::Tool,
+            summary: summary.into(),
+            runtime: RuntimeSpec {
+                runtime_type: RuntimeType::Builtin,
+                command: None,
+                lazy: true,
+                idle_ttl_ms: 30_000,
+            },
+            placement: PlacementSpec {
+                modes: placement_modes.iter().map(ToString::to_string).collect(),
+                requires: Vec::new(),
+            },
+            retrieval: RetrievalSpec {
+                intents: Vec::new(),
+                negative_examples: Vec::new(),
+                complements: complements.iter().map(ToString::to_string).collect(),
+                aliases: Vec::new(),
+            },
+            effects: EffectSpec {
+                maximum: EffectClass::Read,
+                resources: Vec::new(),
+            },
+            policy: PolicySpec::default(),
+            verification: VerificationSpec::default(),
+        }
     }
 }
