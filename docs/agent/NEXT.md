@@ -3,14 +3,7 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
-## Active — 002 First frontier provider
-
-Task file: [`tasks/002-first-provider.md`](tasks/002-first-provider.md)
-
-Goal: connect one frontier provider through the model IR with deterministic
-fixtures and cancellation, without a tool executor yet.
-
-## Queued — 003 Read-only tool continuation loop
+## Active — 003 Read-only tool continuation loop
 
 Task file: [`tasks/003-read-only-tool-loop.md`](tasks/003-read-only-tool-loop.md)
 
@@ -21,6 +14,12 @@ a task-specific verifier exists.
 
 ## Completed
 
+- [`002 First frontier provider`](tasks/002-first-provider.md): closed
+  `gpt-5.6` OpenAI Responses adapter with fixed-origin HTTPS, external redacted
+  credentials, deterministic prompt and schema projection, bounded SSE
+  correlation, text/tool/structured-output streaming, exact optional usage and
+  terminal semantics, cancellation/deadline propagation, pre-response-only
+  retry, explicit remote-storage policy, and response-ID continuation.
 - [`001 Provider-neutral model IR`](tasks/001-model-ir.md): versioned request and
   validated stream contract, compact context and Draft 2020-12 schema
   projections, typed generation/replay capabilities, deterministic fixture
