@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
 pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
 const REFERENCE_PREFIX: &str = "artifact:sha256:";
 
@@ -96,19 +99,12 @@ impl FromStr for ArtifactRef {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct PutOptions {
-    pub mime: Option<String>,
-    pub producer_event_id: Option<String>,
-}
-
+/// Immutable metadata belonging to the content itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactMetadata {
     pub reference: ArtifactRef,
     pub bytes: u64,
-    pub mime: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub producer_event_id: Option<String>,
+    pub first_seen_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,10 +123,12 @@ impl ArtifactStore {
         root: impl AsRef<Path>,
         max_object_bytes: u64,
     ) -> Result<Self, ArtifactStoreError> {
-        let object_root = root.as_ref().join("sha256");
-        let metadata_root = root.as_ref().join("metadata");
-        fs::create_dir_all(&object_root)?;
-        fs::create_dir_all(&metadata_root)?;
+        let root = root.as_ref();
+        create_private_dir(root)?;
+        let object_root = root.join("sha256");
+        let metadata_root = root.join("metadata");
+        create_private_dir(&object_root)?;
+        create_private_dir(&metadata_root)?;
         Ok(Self {
             object_root,
             metadata_root,
@@ -138,25 +136,17 @@ impl ArtifactStore {
         })
     }
 
-    pub fn put(
-        &self,
-        bytes: &[u8],
-        options: PutOptions,
-    ) -> Result<ArtifactMetadata, ArtifactStoreError> {
-        self.put_reader(bytes, options)
+    pub fn put(&self, bytes: &[u8]) -> Result<ArtifactMetadata, ArtifactStoreError> {
+        self.put_reader(bytes)
     }
 
     pub fn put_reader(
         &self,
         mut reader: impl Read,
-        options: PutOptions,
     ) -> Result<ArtifactMetadata, ArtifactStoreError> {
         let temporary_path = self.object_root.join(format!(".tmp-{}", Ulid::new()));
         let result = (|| {
-            let mut temporary = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary_path)?;
+            let mut temporary = open_private_new(&temporary_path)?;
             let mut hasher = Sha256::new();
             let mut total_bytes = 0_u64;
             let mut buffer = [0_u8; 64 * 1024];
@@ -186,20 +176,13 @@ impl ArtifactStore {
                     sync_directory(&self.object_root)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    self.verify_path(&object_path, &reference)?;
+                    let _ = self.open_verified(&reference)?;
                     fs::remove_file(&temporary_path)?;
                 }
                 Err(error) => return Err(error.into()),
             }
 
-            let metadata = ArtifactMetadata {
-                reference,
-                bytes: total_bytes,
-                mime: options.mime,
-                created_at: Utc::now(),
-                producer_event_id: options.producer_event_id,
-            };
-            self.install_metadata(&metadata)
+            self.install_metadata(&reference, total_bytes)
         })();
 
         if temporary_path.exists() {
@@ -208,20 +191,23 @@ impl ArtifactStore {
         result
     }
 
+    /// Verifies and reads through the same file descriptor, avoiding replacement races.
     pub fn get(&self, reference: &ArtifactRef) -> Result<Vec<u8>, ArtifactStoreError> {
-        let path = self.object_path(reference);
-        self.verify_path(&path, reference)?;
-        Ok(fs::read(path)?)
+        let (mut file, bytes) = self.open_verified(reference)?;
+        let capacity = usize::try_from(bytes).unwrap_or(usize::MAX);
+        let mut output = Vec::with_capacity(capacity);
+        file.read_to_end(&mut output)?;
+        Ok(output)
     }
 
+    /// Verifies and range-reads through the same file descriptor.
     pub fn read_range(
         &self,
         reference: &ArtifactRef,
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, ArtifactStoreError> {
-        let path = self.object_path(reference);
-        let bytes = self.verify_path(&path, reference)?;
+        let (mut file, bytes) = self.open_verified(reference)?;
         if offset >= bytes || length == 0 {
             return Ok(Vec::new());
         }
@@ -229,7 +215,6 @@ impl ArtifactStore {
         let available = bytes - offset;
         let requested = u64::try_from(length).unwrap_or(u64::MAX);
         let read_length = usize::try_from(available.min(requested)).unwrap_or(length);
-        let mut file = open_regular_file(&path)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut output = vec![0_u8; read_length];
         file.read_exact(&mut output)?;
@@ -253,18 +238,21 @@ impl ArtifactStore {
 
     fn install_metadata(
         &self,
-        metadata: &ArtifactMetadata,
+        reference: &ArtifactRef,
+        bytes: u64,
     ) -> Result<ArtifactMetadata, ArtifactStoreError> {
-        let path = self.metadata_path(&metadata.reference);
+        let path = self.metadata_path(reference);
         let temporary_path = self
             .metadata_root
             .join(format!(".tmp-{}.json", Ulid::new()));
+        let metadata = ArtifactMetadata {
+            reference: reference.clone(),
+            bytes,
+            first_seen_at: Utc::now(),
+        };
         let result = (|| {
-            let encoded = serde_json::to_vec(metadata)?;
-            let mut temporary = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary_path)?;
+            let encoded = serde_json::to_vec(&metadata)?;
+            let mut temporary = open_private_new(&temporary_path)?;
             temporary.write_all(&encoded)?;
             temporary.sync_all()?;
             drop(temporary);
@@ -273,11 +261,15 @@ impl ArtifactStore {
                 Ok(()) => {
                     fs::remove_file(&temporary_path)?;
                     sync_directory(&self.metadata_root)?;
-                    Ok(metadata.clone())
+                    Ok(metadata)
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     fs::remove_file(&temporary_path)?;
-                    self.metadata(&metadata.reference)
+                    let existing = self.metadata(reference)?;
+                    if existing.bytes != bytes {
+                        return Err(ArtifactStoreError::MetadataMismatch(reference.clone()));
+                    }
+                    Ok(existing)
                 }
                 Err(error) => Err(error.into()),
             }
@@ -288,32 +280,12 @@ impl ArtifactStore {
         result
     }
 
-    fn verify_path(&self, path: &Path, reference: &ArtifactRef) -> Result<u64, ArtifactStoreError> {
-        let mut file = open_regular_file(path)?;
-        let mut hasher = Sha256::new();
-        let mut total_bytes = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            total_bytes = total_bytes.saturating_add(read as u64);
-            if total_bytes > self.max_object_bytes {
-                return Err(ArtifactStoreError::TooLarge {
-                    max_bytes: self.max_object_bytes,
-                });
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let actual = format!("{:x}", hasher.finalize());
-        if actual != reference.sha256() {
-            return Err(ArtifactStoreError::Integrity {
-                expected: reference.to_string(),
-                actual,
-            });
-        }
-        Ok(total_bytes)
+    fn open_verified(&self, reference: &ArtifactRef) -> Result<(File, u64), ArtifactStoreError> {
+        let path = self.object_path(reference);
+        let mut file = open_regular_file(&path)?;
+        let bytes = verify_open_file(&mut file, reference, self.max_object_bytes)?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok((file, bytes))
     }
 
     fn object_path(&self, reference: &ArtifactRef) -> PathBuf {
@@ -326,12 +298,69 @@ impl ArtifactStore {
     }
 }
 
+fn verify_open_file(
+    file: &mut File,
+    reference: &ArtifactRef,
+    max_object_bytes: u64,
+) -> Result<u64, ArtifactStoreError> {
+    let mut hasher = Sha256::new();
+    let mut total_bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(read as u64);
+        if total_bytes > max_object_bytes {
+            return Err(ArtifactStoreError::TooLarge {
+                max_bytes: max_object_bytes,
+            });
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != reference.sha256() {
+        return Err(ArtifactStoreError::Integrity {
+            expected: reference.to_string(),
+            actual,
+        });
+    }
+    Ok(total_bytes)
+}
+
+fn create_private_dir(path: &Path) -> Result<(), ArtifactStoreError> {
+    #[cfg(unix)]
+    {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn open_private_new(path: &Path) -> Result<File, ArtifactStoreError> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    Ok(options.open(path)?)
+}
+
 fn open_regular_file(path: &Path) -> Result<File, ArtifactStoreError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let file = options.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
         return Err(ArtifactStoreError::NotRegularFile(path.to_path_buf()));
     }
-    Ok(File::open(path)?)
+    Ok(file)
 }
 
 fn sync_directory(path: &Path) -> Result<(), ArtifactStoreError> {
@@ -345,23 +374,15 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ArtifactRef, ArtifactStore, ArtifactStoreError, PutOptions};
+    use super::{ArtifactRef, ArtifactStore, ArtifactStoreError};
 
     #[test]
     fn deduplicates_and_reads_ranges() {
         let directory = tempdir().expect("temporary directory");
         let store = ArtifactStore::open(directory.path()).expect("open store");
-        let first = store
-            .put(
-                b"semantic artifact",
-                PutOptions {
-                    mime: Some("text/plain".into()),
-                    producer_event_id: Some("event-1".into()),
-                },
-            )
-            .expect("put artifact");
+        let first = store.put(b"semantic artifact").expect("put artifact");
         let second = store
-            .put(b"semantic artifact", PutOptions::default())
+            .put(b"semantic artifact")
             .expect("deduplicate artifact");
 
         assert_eq!(first, second);
@@ -382,13 +403,11 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let store = ArtifactStore::with_max_object_bytes(directory.path(), 8).expect("open store");
         let too_large = store
-            .put(b"nine-byte", PutOptions::default())
+            .put(b"nine-byte")
             .expect_err("reject oversized artifact");
         assert!(matches!(too_large, ArtifactStoreError::TooLarge { .. }));
 
-        let metadata = store
-            .put(b"original", PutOptions::default())
-            .expect("put artifact");
+        let metadata = store.put(b"original").expect("put artifact");
         fs::write(
             directory
                 .path()
@@ -410,9 +429,7 @@ mod tests {
 
         let directory = tempdir().expect("temporary directory");
         let store = ArtifactStore::open(directory.path()).expect("open store");
-        let metadata = store
-            .put(b"linked", PutOptions::default())
-            .expect("put artifact");
+        let metadata = store.put(b"linked").expect("put artifact");
         let object = directory
             .path()
             .join("sha256")
@@ -421,7 +438,7 @@ mod tests {
         symlink("/dev/null", &object).expect("create symlink");
 
         let error = store.get(&metadata.reference).expect_err("reject symlink");
-        assert!(matches!(error, ArtifactStoreError::NotRegularFile(_)));
+        assert!(matches!(error, ArtifactStoreError::Io(_)));
     }
 
     #[test]

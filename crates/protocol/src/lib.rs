@@ -17,6 +17,7 @@ pub mod event_kind {
     pub const ARTIFACT_CREATED: &str = "artifact.created";
     pub const TASK_COMPLETED: &str = "task.completed";
     pub const TASK_BLOCKED: &str = "task.blocked";
+    pub const TASK_CANCEL_REQUESTED: &str = "task.cancel_requested";
     pub const IMPROVEMENT_CANDIDATE_CREATED: &str = "improvement.candidate_created";
     pub const IMPROVEMENT_PROMOTED: &str = "improvement.promoted";
 }
@@ -78,6 +79,7 @@ impl FromStr for EventActor {
     }
 }
 
+/// Internal event draft. Public network ingress must use typed commands instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,10 +99,14 @@ pub struct NewEvent {
 }
 
 impl NewEvent {
-    pub fn input(session_id: impl Into<String>, text: impl Into<String>) -> Self {
+    pub fn user_input(
+        session_id: impl Into<String>,
+        task_id: Option<String>,
+        text: impl Into<String>,
+    ) -> Self {
         Self {
             session_id: Some(session_id.into()),
-            task_id: None,
+            task_id,
             actor: EventActor::User,
             kind: event_kind::INPUT_RECEIVED.to_owned(),
             payload: serde_json::json!({ "text": text.into() }),
@@ -148,8 +154,7 @@ impl EventQuery {
         self.limit.unwrap_or(100).clamp(1, 1_000)
     }
 
-    pub fn matches(&self, event: &EventRecord) -> bool {
-        let after_matches = self.after_seq.is_none_or(|after| event.seq > after);
+    pub fn matches_scope(&self, event: &EventRecord) -> bool {
         let session_matches = self
             .session_id
             .as_ref()
@@ -159,12 +164,26 @@ impl EventQuery {
             .as_ref()
             .is_none_or(|task| event.task_id.as_ref() == Some(task));
 
-        after_matches && session_matches && task_matches
+        session_matches && task_matches
+    }
+
+    pub fn matches(&self, event: &EventRecord) -> bool {
+        self.after_seq.is_none_or(|after| event.seq > after) && self.matches_scope(event)
     }
 }
 
+/// Trusted user-input command accepted by the public daemon API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppendEventResponse {
+pub struct SubmitInputCommand {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitInputResponse {
     pub event: EventRecord,
 }
 
@@ -173,6 +192,7 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub durable_events: u64,
+    pub latest_seq: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

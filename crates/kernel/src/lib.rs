@@ -1,13 +1,20 @@
 use std::{path::PathBuf, sync::Arc};
 
-pub use ditto_artifact_store::{ArtifactMetadata, ArtifactRef, PutOptions};
+pub use ditto_artifact_store::{ArtifactMetadata, ArtifactRef};
 use ditto_artifact_store::{ArtifactStore, ArtifactStoreError, DEFAULT_MAX_OBJECT_BYTES};
 use ditto_capability::{CapabilityCard, CapabilityCatalog, CapabilityError};
 pub use ditto_capability::{ExecutionEpoch, SearchContext};
 use ditto_event_store::{EventStore, EventStoreError};
-use ditto_protocol::{EventActor, EventQuery, EventRecord, NewEvent, event_kind};
+use ditto_protocol::{
+    EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
+};
+use serde_json::json;
 use thiserror::Error;
 use tokio::sync::broadcast;
+use ulid::Ulid;
+
+const MAX_INPUT_BYTES: usize = 64 * 1024;
+const MAX_IDENTIFIER_BYTES: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
@@ -36,6 +43,8 @@ pub enum KernelError {
     Capability(#[from] CapabilityError),
     #[error(transparent)]
     ArtifactStore(#[from] ArtifactStoreError),
+    #[error("invalid command: {0}")]
+    InvalidCommand(String),
 }
 
 #[derive(Clone)]
@@ -48,6 +57,21 @@ struct KernelInner {
     artifacts: ArtifactStore,
     capabilities: CapabilityCatalog,
     event_sender: broadcast::Sender<EventRecord>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactWriteContext {
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub producer_event_id: Option<String>,
+    pub mime: Option<String>,
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredArtifact {
+    pub metadata: ArtifactMetadata,
+    pub event: EventRecord,
 }
 
 impl DittoKernel {
@@ -70,19 +94,13 @@ impl DittoKernel {
         })
     }
 
-    pub fn append_event(&self, event: NewEvent) -> Result<EventRecord, KernelError> {
-        let event = self.inner.events.append(event)?;
-        let _ = self.inner.event_sender.send(event.clone());
-        Ok(event)
-    }
-
     pub fn record_runtime_started(&self, bind: &str) -> Result<EventRecord, KernelError> {
-        self.append_event(NewEvent {
+        self.append_and_publish(NewEvent {
             session_id: None,
             task_id: None,
             actor: EventActor::System,
             kind: event_kind::RUNTIME_STARTED.into(),
-            payload: serde_json::json!({
+            payload: json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "bind": bind,
                 "capability_count": self.inner.capabilities.len(),
@@ -93,8 +111,45 @@ impl DittoKernel {
         })
     }
 
+    /// Converts a narrow public command into a trusted user event.
+    pub fn record_user_input(
+        &self,
+        command: SubmitInputCommand,
+    ) -> Result<EventRecord, KernelError> {
+        let text = command.text.trim();
+        if text.is_empty() {
+            return Err(KernelError::InvalidCommand("input text is empty".into()));
+        }
+        if text.len() > MAX_INPUT_BYTES {
+            return Err(KernelError::InvalidCommand(format!(
+                "input exceeds {MAX_INPUT_BYTES} bytes"
+            )));
+        }
+
+        let session_id = normalize_identifier(command.session_id, "session")?;
+        let task_id = command
+            .task_id
+            .map(|task_id| validate_identifier(task_id, "task"))
+            .transpose()?;
+        let mut event = NewEvent::user_input(session_id, task_id, text);
+        event.correlation_id = event.task_id.clone();
+        self.append_and_publish(event)
+    }
+
     pub fn list_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>, KernelError> {
         Ok(self.inner.events.list(query)?)
+    }
+
+    pub fn list_events_through(
+        &self,
+        query: &EventQuery,
+        through_seq: i64,
+    ) -> Result<Vec<EventRecord>, KernelError> {
+        Ok(self.inner.events.list_through(query, through_seq)?)
+    }
+
+    pub fn latest_event_seq(&self) -> Result<i64, KernelError> {
+        Ok(self.inner.events.latest_seq()?)
     }
 
     pub fn event_count(&self) -> Result<u64, KernelError> {
@@ -137,16 +192,34 @@ impl DittoKernel {
         let cards =
             self.inner
                 .capabilities
-                .search_with_context(query, context, epoch.max_working_set());
+                .search_with_context(query, context, epoch.remaining_capacity());
         epoch.page_in(cards)
     }
 
+    /// Stores content, then roots its task-specific meaning in the event spine.
     pub fn store_artifact(
         &self,
         bytes: &[u8],
-        options: PutOptions,
-    ) -> Result<ArtifactMetadata, KernelError> {
-        Ok(self.inner.artifacts.put(bytes, options)?)
+        context: ArtifactWriteContext,
+    ) -> Result<StoredArtifact, KernelError> {
+        let metadata = self.inner.artifacts.put(bytes)?;
+        let event = self.append_and_publish(NewEvent {
+            session_id: context.session_id,
+            task_id: context.task_id,
+            actor: EventActor::System,
+            kind: event_kind::ARTIFACT_CREATED.into(),
+            payload: json!({
+                "reference": metadata.reference.clone(),
+                "bytes": metadata.bytes,
+                "first_seen_at": metadata.first_seen_at,
+                "mime": context.mime,
+                "purpose": context.purpose,
+            }),
+            causation_id: context.producer_event_id,
+            correlation_id: None,
+            span_id: None,
+        })?;
+        Ok(StoredArtifact { metadata, event })
     }
 
     pub fn read_artifact(&self, reference: &ArtifactRef) -> Result<Vec<u8>, KernelError> {
@@ -161,31 +234,117 @@ impl DittoKernel {
     ) -> Result<Vec<u8>, KernelError> {
         Ok(self.inner.artifacts.read_range(reference, offset, length)?)
     }
+
+    pub fn artifact_metadata(
+        &self,
+        reference: &ArtifactRef,
+    ) -> Result<ArtifactMetadata, KernelError> {
+        Ok(self.inner.artifacts.metadata(reference)?)
+    }
+
+    fn append_and_publish(&self, event: NewEvent) -> Result<EventRecord, KernelError> {
+        let event = self.inner.events.append(event)?;
+        let _ = self.inner.event_sender.send(event.clone());
+        Ok(event)
+    }
+}
+
+fn normalize_identifier(value: Option<String>, prefix: &str) -> Result<String, KernelError> {
+    match value {
+        Some(value) => validate_identifier(value, prefix),
+        None => Ok(format!("{prefix}_{}", Ulid::new())),
+    }
+}
+
+fn validate_identifier(value: String, label: &str) -> Result<String, KernelError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(KernelError::InvalidCommand(format!("{label} id is empty")));
+    }
+    if value.len() > MAX_IDENTIFIER_BYTES {
+        return Err(KernelError::InvalidCommand(format!(
+            "{label} id exceeds {MAX_IDENTIFIER_BYTES} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(KernelError::InvalidCommand(format!(
+            "{label} id contains control characters"
+        )));
+    }
+    Ok(value.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
-    use super::{DittoKernel, KernelConfig, PutOptions};
+    use super::{ArtifactWriteContext, DittoKernel, KernelConfig};
+    use ditto_protocol::{EventActor, EventQuery, SubmitInputCommand, event_kind};
 
-    #[test]
-    fn stores_content_addressed_artifacts_through_the_kernel() {
+    fn kernel() -> (tempfile::TempDir, DittoKernel) {
         let directory = tempdir().expect("temporary directory");
         let kernel = DittoKernel::open(KernelConfig::new(
             directory.path().join("data"),
             directory.path().join("capabilities"),
         ))
         .expect("open kernel");
-        let metadata = kernel
-            .store_artifact(b"verified output", PutOptions::default())
+        (directory, kernel)
+    }
+
+    #[test]
+    fn public_input_cannot_choose_an_actor_or_event_kind() {
+        let (_directory, kernel) = kernel();
+        let event = kernel
+            .record_user_input(SubmitInputCommand {
+                text: "hello".into(),
+                session_id: Some("local".into()),
+                task_id: Some("task-1".into()),
+            })
+            .expect("record input");
+        assert_eq!(event.actor, EventActor::User);
+        assert_eq!(event.kind, event_kind::INPUT_RECEIVED);
+    }
+
+    #[test]
+    fn artifact_occurrence_is_rooted_in_the_event_spine() {
+        let (_directory, kernel) = kernel();
+        let producer = kernel
+            .record_user_input(SubmitInputCommand {
+                text: "produce output".into(),
+                session_id: Some("local".into()),
+                task_id: Some("task-1".into()),
+            })
+            .expect("record input");
+        let stored = kernel
+            .store_artifact(
+                b"verified output",
+                ArtifactWriteContext {
+                    session_id: producer.session_id.clone(),
+                    task_id: producer.task_id.clone(),
+                    producer_event_id: Some(producer.event_id.clone()),
+                    mime: Some("text/plain".into()),
+                    purpose: Some("test output".into()),
+                },
+            )
             .expect("store artifact");
 
+        assert_eq!(stored.event.kind, event_kind::ARTIFACT_CREATED);
+        assert_eq!(stored.event.causation_id, Some(producer.event_id));
         assert_eq!(
             kernel
-                .read_artifact_range(&metadata.reference, 9, 6)
+                .read_artifact_range(&stored.metadata.reference, 9, 6)
                 .expect("read artifact range"),
             b"output"
+        );
+        assert_eq!(
+            kernel
+                .list_events(&EventQuery {
+                    task_id: Some("task-1".into()),
+                    ..EventQuery::default()
+                })
+                .expect("list events")
+                .len(),
+            2
         );
     }
 }

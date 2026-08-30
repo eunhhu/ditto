@@ -10,7 +10,9 @@ use rusqlite::{Connection, params};
 use thiserror::Error;
 use ulid::Ulid;
 
-const MIGRATION: &str = r#"
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+
+const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
     seq             INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id        TEXT NOT NULL UNIQUE,
@@ -31,7 +33,9 @@ CREATE INDEX IF NOT EXISTS events_task_seq
     ON events(task_id, seq);
 CREATE INDEX IF NOT EXISTS events_kind_seq
     ON events(kind, seq);
+"#;
 
+const MIGRATION_V2: &str = r#"
 CREATE TRIGGER IF NOT EXISTS events_reject_update
 BEFORE UPDATE ON events
 BEGIN
@@ -59,6 +63,8 @@ pub enum EventStoreError {
     InvalidActor(String),
     #[error("event store mutex was poisoned")]
     Poisoned,
+    #[error("database schema version {found} is newer than supported version {supported}")]
+    UnsupportedSchemaVersion { found: i64, supported: i64 },
 }
 
 #[derive(Clone)]
@@ -69,18 +75,18 @@ pub struct EventStore {
 impl EventStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EventStoreError> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
         }
 
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        connection.execute_batch(MIGRATION)?;
+        apply_migrations(&mut connection)?;
 
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -88,11 +94,10 @@ impl EventStore {
     }
 
     pub fn append(&self, event: NewEvent) -> Result<EventRecord, EventStoreError> {
-        let recorded_at = Utc::now();
         let record = EventRecord {
             seq: 0,
             event_id: Ulid::new().to_string(),
-            recorded_at,
+            recorded_at: Utc::now(),
             session_id: event.session_id,
             task_id: event.task_id,
             actor: event.actor,
@@ -134,6 +139,15 @@ impl EventStore {
     }
 
     pub fn list(&self, query: &EventQuery) -> Result<Vec<EventRecord>, EventStoreError> {
+        self.list_through(query, i64::MAX)
+    }
+
+    /// Returns one stable page bounded by an inclusive high-water sequence.
+    pub fn list_through(
+        &self,
+        query: &EventQuery,
+        through_seq: i64,
+    ) -> Result<Vec<EventRecord>, EventStoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             r#"
@@ -142,18 +156,20 @@ impl EventStore {
                 payload_json, causation_id, correlation_id, span_id
             FROM events
             WHERE seq > ?1
-              AND (?2 IS NULL OR session_id = ?2)
-              AND (?3 IS NULL OR task_id = ?3)
+              AND seq <= ?2
+              AND (?3 IS NULL OR session_id = ?3)
+              AND (?4 IS NULL OR task_id = ?4)
             ORDER BY seq ASC
-            LIMIT ?4
+            LIMIT ?5
             "#,
         )?;
 
-        let after_seq = query.after_seq.unwrap_or(0);
+        let after_seq = query.after_seq.unwrap_or(0).max(0);
         let limit = i64::try_from(query.normalized_limit()).unwrap_or(1_000);
         let rows = statement.query_map(
             params![
                 after_seq,
+                through_seq.max(0),
                 query.session_id.as_deref(),
                 query.task_id.as_deref(),
                 limit,
@@ -182,6 +198,15 @@ impl EventStore {
         Ok(events)
     }
 
+    pub fn latest_seq(&self) -> Result<i64, EventStoreError> {
+        let connection = self.connection()?;
+        let latest =
+            connection.query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |row| {
+                row.get(0)
+            })?;
+        Ok(latest)
+    }
+
     pub fn count(&self) -> Result<u64, EventStoreError> {
         let connection = self.connection()?;
         let count: i64 =
@@ -194,6 +219,27 @@ impl EventStore {
             .lock()
             .map_err(|_| EventStoreError::Poisoned)
     }
+}
+
+fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> {
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(EventStoreError::UnsupportedSchemaVersion {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        });
+    }
+
+    let transaction = connection.transaction()?;
+    if version < 1 {
+        transaction.execute_batch(MIGRATION_V1)?;
+    }
+    if version < 2 {
+        transaction.execute_batch(MIGRATION_V2)?;
+    }
+    transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 struct RawEventRecord {
@@ -251,7 +297,7 @@ mod tests {
         let store = EventStore::open(directory.path().join("state.db")).expect("open store");
 
         let first = store
-            .append(NewEvent::input("alpha", "hello"))
+            .append(NewEvent::user_input("alpha", None, "hello"))
             .expect("append first event");
         let second = store
             .append(NewEvent {
@@ -285,7 +331,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let store = EventStore::open(directory.path().join("state.db")).expect("open store");
         let event = store
-            .append(NewEvent::input("alpha", "immutable"))
+            .append(NewEvent::user_input("alpha", None, "immutable"))
             .expect("append event");
 
         let connection = store.connection().expect("lock connection");
@@ -303,5 +349,55 @@ mod tests {
         assert!(delete_error.to_string().contains("events are append-only"));
         drop(connection);
         assert_eq!(store.count().expect("count events"), 1);
+    }
+
+    #[test]
+    fn paginates_a_stable_high_water_snapshot_without_gaps() {
+        let directory = tempdir().expect("temporary directory");
+        let store = EventStore::open(directory.path().join("state.db")).expect("open store");
+        for index in 0..2_005 {
+            store
+                .append(NewEvent::user_input(
+                    "session",
+                    None,
+                    format!("event-{index}"),
+                ))
+                .expect("append fixture");
+        }
+
+        let high_water = store.latest_seq().expect("latest sequence");
+        store
+            .append(NewEvent::user_input("session", None, "after-high-water"))
+            .expect("append newer event");
+
+        let mut cursor = 0;
+        let mut collected = Vec::new();
+        while cursor < high_water {
+            let page = store
+                .list_through(
+                    &EventQuery {
+                        after_seq: Some(cursor),
+                        limit: Some(137),
+                        session_id: Some("session".into()),
+                        task_id: None,
+                    },
+                    high_water,
+                )
+                .expect("read page");
+            if page.is_empty() {
+                break;
+            }
+            cursor = page.last().expect("non-empty page").seq;
+            collected.extend(page);
+        }
+
+        assert_eq!(collected.len(), 2_005);
+        assert_eq!(collected.first().expect("first").seq, 1);
+        assert_eq!(collected.last().expect("last").seq, high_water);
+        assert!(
+            collected
+                .windows(2)
+                .all(|pair| pair[1].seq == pair[0].seq + 1)
+        );
     }
 }

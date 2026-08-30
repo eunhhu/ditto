@@ -1,70 +1,91 @@
 # Roadmap
 
-Roadmap items are vertical slices with executable completion criteria. Dates are intentionally omitted until benchmark data exists.
+Roadmap items are vertical slices with executable completion criteria. Dates are
+omitted until benchmark data exists. The active implementation task is always
+named in `docs/agent/NEXT.md`.
 
-## A. Runtime spine — scaffolded
+## A. Trusted runtime spine — scaffolded
 
 - Rust daemon and CLI
-- SQLite WAL event log
+- SQLite WAL event log with schema versioning
 - database-enforced append-only event integrity
+- typed command ingress; trusted actor/kind assignment
+- subscribe-first, high-water, paginated SSE replay/follow
+- sequence-gap and broadcast-lag recovery
 - SHA-256 content-addressed artifact storage
-- HTTP append/query API
-- resumable SSE replay/follow stream
-- typed event protocol
-- graceful shutdown
+- graceful shutdown and non-loopback safety guard
 
-Exit criterion: a client can disconnect, reconnect from a sequence number, and reconstruct the same durable session.
+Exit criterion: a client can disconnect, reconnect from a sequence number, and
+reconstruct the same durable session without manufacturing trusted events.
 
 ## B. Semantic working set — started
 
-- typed Context IR and Context Receipt
+- typed Context IR, graph edges, provenance validation, and Context Receipt
+- trusted ephemeral pin/policy directives and derived token cost
 - capability manifests and cards
-- exact/alias/lexical retrieval with placement and policy hard filters
+- validated complements and strict runtime hard filters
+- bounded, append-only execution-epoch ordering
 - namespace map and full-schema page-in
 - pluggable local embedding worker
-- temporal + graph reranking
-- bounded, append-only execution-epoch tool ordering
+- temporal and graph reranking
 
-Exit criterion: with 1,000 synthetic capabilities, the model sees at most the relevant working set and the UI explains every selected context node and capability.
+Exit criterion: with 1,000 synthetic capabilities, the model sees only the
+relevant working set and the UI explains every selected context node and
+capability.
 
-## C. Effectful execution
+## C. Provider-neutral model IR — active
+
+- stable/volatile request separation
+- structured text and tool-call streaming
+- usage, finish reason, warnings, and continuation
+- feature flags without lowest-common-denominator collapse
+- cancellation and deadline propagation
+- serialization and replay fixtures
+
+Exit criterion: two representative provider response shapes map losslessly into
+the same IR, and provider completion never creates task verification.
+
+## D. First provider and read-only agent loop
+
+- one frontier provider adapter with mock transport tests
+- full `artifact.read` schema page-in
+- structured tool invocation and bounded artifact result
+- model continuation after tool result
+- durable turn replay
+- explicit unverified final state
+
+Exit criterion: one real model turn can call `artifact.read`, continue, and be
+fully replayed without process or SSH authority.
+
+## E. Effectful execution
 
 - device registry
-- structured local process runner
+- canonical invocation envelope
+- capability-specific argument normalization and effect derivation
+- structured local process worker
 - SSH transport with host-key pinning
 - secret handles
-- effect claims
 - approval UI and bounded leases
-- process-group cancellation
-- deterministic output projection
-- evidence verifiers
+- process-group cancellation and resource limits
+- deterministic output projection and evidence verifiers
 
-Exit criterion: a remote service can be inspected and restarted without exposing credentials or granting authority beyond one lease.
+Exit criterion: a remote service can be inspected and restarted without exposing
+credentials or granting authority beyond one lease.
 
-## D. Gateway UX
+## F. Gateway UX
 
 - WebSocket event protocol
-- web timeline + inspector
+- web timeline and inspector
 - context receipt editor
 - lease approval surface
 - task pause, redirect, branch, and replay
 - one messaging gateway
 - ACP adapter
 
-Exit criterion: web, CLI, messaging, and IDE clients observe and control the same task state.
+Exit criterion: web, CLI, messaging, and IDE clients observe and control the same
+task state.
 
-## E. Model drivers
-
-- provider-neutral request IR
-- provider feature flags
-- streaming and structured tool calls
-- deferred tool search when available
-- prompt-cache-stable epochs
-- local Program Cell fallback
-
-Exit criterion: at least two frontier providers pass the same replay suite without collapsing to a lowest-common-denominator interface.
-
-## F. Improvement compiler
+## G. Improvement compiler
 
 - deterministic signal detectors
 - typed patch schema
@@ -74,9 +95,10 @@ Exit criterion: at least two frontier providers pass the same replay suite witho
 - expiration and rollback
 - task-local ephemeral runbooks
 
-Exit criterion: repeated retrieval failure can improve measured Recall@k without creating a new permanent skill or regressing unrelated scenarios.
+Exit criterion: repeated retrieval failure improves measured Recall@k without
+creating a new permanent skill or regressing unrelated scenarios.
 
-## G. Ecosystem
+## H. Ecosystem
 
 - TypeScript capability SDK
 - MCP consumer

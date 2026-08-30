@@ -10,3 +10,4 @@ repository.workspace = true
 chrono.workspace = true
 ditto-capability = { path = "../capability" }
 serde.workspace = true
+thiserror.workspace = true

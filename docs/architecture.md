@@ -1,168 +1,163 @@
 # Architecture
 
-Ditto is a **semantic agent microkernel**. It does not own the model's strategy. It owns the model's environment: what context is visible, what capabilities can be discovered, which effects are allowed, how execution survives process boundaries, and what becomes durable knowledge.
+Ditto is a **local-first semantic agent microkernel**. It does not own a frontier
+model's strategy. It owns the model's environment: visible context, discoverable
+capabilities, permitted effects, durable execution state, and promotion of
+learned behavior.
 
-## Core sentence
-
-> Context is compiled. Capabilities are paged. Effects are leased. Improvements are promoted.
+> Context is compiled. Capabilities are paged. Effects are leased. Improvements
+> are promoted.
 
 ## Ownership boundary
 
-The model owns:
+The model owns intent interpretation, decomposition, judgment, and deciding when
+it needs another capability or context fragment.
 
-- intent interpretation;
-- strategy and decomposition;
-- judgment under uncertainty;
-- deciding when another capability or context fragment is needed.
+The harness owns event authority, persistence, context provenance, capability
+discovery and lifecycle, credentials, policy, approval, cancellation,
+verification, and improvement promotion.
 
-The harness owns:
-
-- durable events and resource lifetime;
-- context selection and provenance;
-- capability discovery and loading;
-- credentials, policy, approval, and effect execution;
-- resumability, cancellation, verification, and self-improvement promotion.
-
-This avoids both extremes: a loose chat wrapper that gives the model raw machine access, and a rigid planner/executor pipeline that suppresses a frontier model's native competence.
-
-## 1. Event spine
-
-Every meaningful state transition is an event. SQLite in WAL mode is the initial durable implementation; the append-only sequence is the source of truth. UI state, task projections, context graphs, replay tests, and improvement signals are rebuildable projections.
-
-No important state may exist only in process memory. Ephemeral handles may point to a browser, process, SSH channel, workspace, or child context, but their lifecycle is represented durably.
-
-Representative event families:
+## Runtime spine
 
 ```text
-input.received
-context.compiled
-capabilities.selected
-model.started
-model.delta
-capability.requested
-policy.approval_required
-policy.lease_granted
-execution.started
-execution.output
-artifact.created
-task.blocked
-task.completed
-improvement.candidate_created
-improvement.promoted
+clients and gateways
+       │ typed commands
+       ▼
+trusted ingress ──► semantic kernel ──► append-only event spine
+                         │                    │
+                         │                    ├─ projections
+                         │                    └─ replay/follow stream
+                         ├─ context compiler
+                         ├─ capability pager
+                         ├─ effect firewall
+                         ├─ model drivers
+                         └─ artifact store / isolated workers
 ```
 
-The daemon fans new durable events out to clients over one event protocol. Clients are projections, not separate agent loops.
+Public clients never append arbitrary internal events. The kernel assigns actor
+and kind, persists the event, then publishes it. SQLite sequence is the durable
+resume cursor; ULID is the global event identity.
 
-## 2. Context compiler
+The SSE adapter subscribes before capturing a high-water mark, replays the
+bounded snapshot in pages, deduplicates buffered live events, and recovers gaps
+or lag from durable storage.
 
-Conversation transcripts are evidence, not the prompt. Before a model turn, Ditto builds a Task Signature from the current request, active goal, explicit entities, unresolved constraints, and expected effect class. Retrieval runs against four lenses:
+## Context compiler
 
-- personal: preferences, recurring constraints, long-term goals;
-- task: goals, decisions, blockers, evidence, completion conditions;
-- environment: devices, repositories, apps, accounts, processes;
-- conversation: references, corrections, negations, and supersession.
+Conversation transcripts are evidence, not the prompt. Ditto builds a task
+signature from the current request, active goal, entities, unresolved
+constraints, and expected effects. Retrieval spans personal, task, environment,
+and conversation lenses.
 
-The intermediate representation is a typed temporal graph. Every node carries origin, epistemic status, scope, confidence, source events, validity, supersession, and token cost. The graph is not dumped into the model. It is compiled into a bounded Context Capsule and an inspectable Context Receipt.
+Durable nodes carry origin, epistemic status, scope, confidence, provenance,
+validity, and supersession. Compiler authority is separate:
 
-The initial crate implements deterministic lexical ranking and hard inclusion for pinned/compiler-required nodes. Hybrid lexical, embedding, temporal, and graph scoring belongs behind the same compiler boundary.
+```text
+ranked | user-pinned | policy-required(reason)
+```
 
-## 3. Capability pager
+A model cannot create a pinned node by serializing a field. Token cost is derived
+locally. Required invalid context blocks the request rather than disappearing
+silently.
 
-The complete capability universe is virtual address space; model context is RAM. The pager exposes four levels:
+## Capability pager
+
+The complete capability universe is virtual address space; model context is RAM.
 
 ```text
 L0 namespace map
-L1 short capability card
-L2 full provider-native schema
-L3 lazy runtime worker
+L1 capability card
+L2 full provider-neutral schema
+L3 lazy isolated runtime
 ```
 
-Hard filters run before semantic retrieval: device availability, OS/runtime support, policy compatibility, permissions, and worker health. Exact aliases and lexical retrieval precede embeddings. Embeddings narrow candidates; they never directly authorize execution.
+Runtime search fails closed against installed placements, prerequisites, allowed
+IDs, and minimum effect. Available placements are a set so a remote primary
+operation can compose with a local artifact reader. An execution epoch has a
+bounded, append-only working set to preserve prompt-cache ordering.
 
-A working set is stable for one execution epoch. New schemas append to the epoch rather than reordering the prefix, preserving provider prompt caches.
+Capability manifests are runtime input. Unknown complements and malformed
+runtime metadata fail catalogue load.
 
-Capability implementations never dynamically import into the core daemon. A capability is an isolated stdio/socket/WASI/MCP/remote worker described by a manifest.
+## Effect firewall
 
-## 4. Effect firewall
-
-SSH is a transport, not a model-facing tool. The model requests a structured capability invocation against a registered device. The kernel chooses local, SSH, container, or remote placement.
-
-Every invocation declares an effect class:
+Effects are not one danger number. They form an orthogonal profile:
 
 ```text
-pure
-read
-write-reversible
-write-irreversible
-external-communication
-credential-access
-privileged
+access       none < metadata < content < credentials
+mutation     none < reversible < irreversible
+externality  local < network < human-communication
+privilege    user < elevated
 ```
 
-Approval grants an expiring, bounded Capability Lease scoped to capability IDs, devices, programs, resources, call count, and effect ceiling. Credentials remain opaque handles and never enter model context or event payloads.
+A lease must permit every dimension. Elevated access alone never grants deletion,
+credential access, or messaging. If a lease scopes devices, programs, or
+resources, omission of that field is a denial.
 
-The current policy crate evaluates already-normalized resource identifiers. Transport workers must independently revalidate canonical paths, binaries, service names, and secret audiences at execution time.
-
-## 5. Adaptive execution
-
-Simple read-only work takes the fast path: compile context, call the model, optionally call one capability, return. Multi-device, long-running, destructive, approval-gated, externally blocked, or evidence-sensitive work gains a durable Task Graph.
-
-The Task Graph is not a forced plan. It is a ledger of external commitments and remaining state:
+The eventual execution path is:
 
 ```text
-accepted → assembling → running
-                      ↘ waiting_event
-                      ↘ waiting_approval
-                      ↘ blocked
-running → verifying → completed | failed | cancelled
+model tool call
+→ schema validation
+→ argument normalization
+→ resource canonicalization
+→ capability-specific effect derivation
+→ lease authorization
+→ canonical invocation
+→ isolated executor
 ```
 
-Tasks wake on events—process exit, webhook, timer, device online, approval, or user input—not periodic LLM heartbeats.
+SSH is placement transport, not a model-facing raw shell.
 
-Subagents are short-lived context forks with a bounded objective, context filter, capability set, effect ceiling, output schema, and budget. They are not permanent personas.
+## Artifacts and evidence
 
-## 6. Artifacts and evidence
+Large outputs live in a SHA-256 content-addressed store. Immutable object metadata
+contains only content facts. Task-specific meaning—producer, MIME interpretation,
+purpose, session, and task—is rooted in an `artifact.created` event.
 
-Large outputs are content-addressed artifacts. Model context receives deterministic summaries, selected structured fields, and artifact references. Completion is a claim until a verifier produces evidence such as a file hash, diff, commit SHA, provider message ID, health response, or build artifact.
+Artifact reads reject malformed references and symlink traversal, enforce object
+size limits, and verify content through the same descriptor used to return data.
 
-The UI distinguishes `completed` from `unverified`.
+Task completion remains a claim until a task-specific verifier supplies evidence
+such as a diff, commit, provider message ID, health response, or artifact hash. A
+model stream ending is never completion evidence.
 
-## 7. Improvement compiler
+## Model boundary
 
-Self-improvement never means writing another free-form skill after every turn. Deterministic detectors first identify repeated corrections, retrieval misses, argument errors, retry loops, approval repetition, latency regressions, or verifier mismatches.
+The next active slice is a provider-neutral model IR. It must retain structured
+tool calls, partial arguments, usage, cancellation, continuation, and finish
+reasons rather than flattening every provider to text. Provider-specific
+advantages are compiled through feature flags; unsupported features are not
+advertised.
 
-A model may then propose a typed patch against a bounded surface:
+## Improvement compiler
 
-```text
-retrieval alias or example
-capability relationship
-context ranking rule
-argument normalizer
-validator or verifier
-temporary runbook fragment
-user preference claim
-capability implementation
-```
+Most experience remains trace data. Deterministic detectors identify repeated
+corrections, retrieval misses, argument errors, approval repetition, latency
+regressions, or verifier mismatches. Typed patches pass deduplication, validation,
+replay, shadow, and canary stages before promotion.
 
-Candidates pass deduplication, validation, replay, shadow, and canary stages before promotion. Kernel code, root policy, credentials, the evaluator, audit logs, pinned context, and active provider settings are not self-editable.
-
-Most trajectories remain traces. One success never becomes a permanent capability.
+Kernel code, root policy, credentials, evaluator logic, audit history, pinned
+context, and active provider settings are not self-editable.
 
 ## Runtime composition
 
-- Rust: daemon, event store, context compiler, capability index, policy, executor, scheduler, protocol.
-- TypeScript/Bun: integration SDK, browser and app connectors, gateway adapters.
-- Python: optional out-of-process worker for workloads that genuinely require it.
-- SQLite + local object store: mandatory persistence.
+- Rust: daemon, storage, context, capability index, policy, model IR, executor,
+  scheduler, and protocol.
+- TypeScript/Bun: integration SDKs, browser/app connectors, and gateways.
+- Python: optional out-of-process worker only for workloads that require it.
+- SQLite and local object storage: mandatory persistence.
 - MCP: external capability/resource boundary.
 - ACP: IDE/editor client boundary.
-- A2A: only for truly independent external agents.
+- A2A: only for independent external agents.
 
-## Zero-cost definition
+No Redis, Postgres, vector service, graph database, Docker daemon, or cloud
+service is mandatory.
 
-Ditto cannot make frontier inference, CPU, RAM, or security checks literally free. “Zero” means:
+## Repository-native agent operation
 
-- zero mandatory infrastructure beyond one daemon and local storage;
-- zero housekeeping inference by default;
-- near-zero hot-path work before the model request;
-- zero eager loading of capability implementations.
+`AGENTS.md` contains stable invariants. Scoped instruction files and
+`docs/agent` provide progressive disclosure for long-running coding agents.
+`NEXT.md` owns the implementation frontier and `HANDOFF.md` owns verified
+recovery state. This keeps the development agent's context working set small for
+the same reason Ditto keeps its runtime working set small.
