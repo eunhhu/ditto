@@ -3,15 +3,7 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
-## Active — 001 Provider-neutral model IR
-
-Task file: [`tasks/001-model-ir.md`](tasks/001-model-ir.md)
-
-Goal: define a provider-neutral request and streaming event contract that can
-represent text, structured tool calls, usage, continuation, cancellation, and
-provider completion without collapsing provider-specific capabilities.
-
-## Queued — 002 First frontier provider
+## Active — 002 First frontier provider
 
 Task file: [`tasks/002-first-provider.md`](tasks/002-first-provider.md)
 
@@ -26,6 +18,15 @@ Goal: page a full `artifact.read` schema, accept a structured tool call, execute
 the builtin read through policy-free read authority, return the result, and
 continue the same model epoch. Completion remains explicitly unverified unless
 a task-specific verifier exists.
+
+## Completed
+
+- [`001 Provider-neutral model IR`](tasks/001-model-ir.md): versioned request and
+  validated stream contract, compact context and Draft 2020-12 schema
+  projections, typed generation/replay capabilities, deterministic fixture
+  driver, cancellation/deadline handling, correlated tool and reasoning
+  lifecycles, usage/continuation, and distinct OpenAI/Anthropic source-shape
+  coverage.
 
 ## Later
 

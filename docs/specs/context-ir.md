@@ -67,6 +67,13 @@ Exact references and aliases may skip embedding entirely.
 The compiler emits a compact model-facing capsule and a user-facing receipt. The
 default soft budget is 900 estimated tokens and the default absolute ceiling is
 1,800, excluding the stable system prefix and provider-native tool schemas.
+Capsule items retain only the fields the model boundary needs: identity, kind,
+summary, origin, epistemic status, scope, confidence, source-event provenance,
+and validity bounds. Durable lens and supersession metadata and the compiler
+receipt are not serialized into the capsule. Selection charges the exact
+serialized item length through the local token estimator plus fixed envelope
+overhead, so provenance or other retained metadata cannot bypass the ceiling.
+Deserialized capsules are revalidated at the model request boundary before use.
 
 The receipt explains source events, epistemic status, inclusion directive,
 score, derived token cost, and exclusion reason. Clients pin, dispute, delete,

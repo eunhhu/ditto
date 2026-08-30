@@ -8,6 +8,7 @@ members = [
   "crates/context",
   "crates/event-store",
   "crates/kernel",
+  "crates/model",
   "crates/policy",
   "crates/protocol",
 ]

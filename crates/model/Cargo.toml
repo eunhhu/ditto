@@ -1,0 +1,21 @@
+[package]
+name = "ditto-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-stream.workspace = true
+chrono.workspace = true
+ditto-capability = { path = "../capability" }
+ditto-context = { path = "../context" }
+futures-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true

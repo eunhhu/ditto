@@ -89,7 +89,19 @@ and expected evidence.
 
 ## Disclosure levels
 
-1. Namespace map: stable and tiny.
-2. Capability card: ID, purpose, placements, and minimum/maximum effects.
-3. Full input/output schema: paged into one execution epoch.
-4. Runtime: started immediately before first invocation and stopped after idle TTL.
+- L0 namespace map: stable and tiny.
+- L1 capability card: ID, purpose, placements, and minimum/maximum effects.
+- L2 full input/output schema: paged into one execution epoch.
+- L3 runtime: started immediately before first invocation and stopped after idle
+  TTL.
+
+Level-2 disclosure uses the provider-neutral `CapabilitySchema` record: stable
+capability ID and version, summary, and complete input/output JSON Schemas. The
+canonical dialect is JSON Schema Draft 2020-12. When `$schema` is omitted it is
+interpreted as Draft 2020-12; when present it must be the canonical Draft
+2020-12 URI. The capability boundary structurally validates recognized keywords
+recursively while retaining unknown extension keywords without applying legacy
+dialect rules to them. This validation does not claim that a particular
+provider accepts every valid schema; adapters must apply their own compatibility
+checks. Model requests preserve the epoch's schema order and do not load any
+capability implementation.
