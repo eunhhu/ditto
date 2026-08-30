@@ -31,44 +31,55 @@
   tool-argument, and reasoning-item lifecycle checks. Driver descriptors keep
   exact request capabilities separate from emitted features, and the
   deterministic fixture driver derives emitted features only from reachable
-  semantic frames. No production provider adapter or turn loop exists yet, and
-  provider completion is not task completion.
+  semantic frames. `ditto-model-openai` adds a closed `gpt-5.6` Responses
+  profile with deterministic request projection, a fixed-origin
+  redirect-disabled reqwest/rustls transport, redacted transport-only
+  credentials, bounded SSE decoding and correlation, exact model/storage/
+  continuation checks, optional-versus-required usage handling, and explicit
+  ephemeral or provider-managed remote response state. No kernel turn loop
+  exists yet, and provider completion is not task completion.
 
 ## Latest verified slice
 
-- Task 001 is complete under ADR 0007. Public types include `ModelRequest`,
-  `ModelTurn`, `StableSystemPrefix`, `ConversationItem`, `ModelEvent`,
-  `ModelStreamEvent`, `ModelEventStream`, `ModelDriver`, `DriverDescriptor`,
-  `FeatureRequest`, `GenerationControls`, `RequestCapabilities`,
-  `ProviderStateFormat`, `ReasoningItem`, `OpaqueReasoningState`,
-  `FixtureDriver`, `CancellationToken`, `ToolCallBuffer`, `ContinuationState`,
-  `TokenUsage`, `CapabilitySchema`, `ContextCapsule`, and
-  `ContextCapsuleItem`.
-- Distinct current OpenAI Responses and Anthropic Messages source-shape
-  fixtures were normalized through the IR before any production adapter work.
-  They exercise different item/block lifecycles, partial tool JSON, reasoning
-  state, usage, warnings, continuation, and terminal mapping.
-- `./scripts/agent-check.sh` passed with 56 `ditto-model` tests and 96 workspace
-  tests. Exact contract tests include
-  `text_only_fixture_emits_ordered_deltas_and_completion`,
-  `tool_fixture_emits_stable_started_deltas_and_ready`,
-  `malformed_tool_arguments_emit_typed_failure`,
-  `cancellation_terminates_without_provider_completion`,
-  `usage_and_continuation_survive_serialization_round_trips`,
-  `fixture_features_are_derived_from_emitted_frames`,
-  `incoming_continuation_requires_an_exact_provider_format_capability`,
-  `conversation_tool_history_accepts_interleaved_resolved_calls`,
-  `wrapper_assigns_sequences_to_a_valid_tool_lifecycle`,
-  `raw_ready_arguments_must_equal_the_accumulated_json`,
-  `openai_responses_source_shape_preserves_item_call_reasoning_usage_and_continuation`,
-  and
-  `anthropic_messages_source_shape_preserves_indexed_blocks_thinking_signature_partial_json_usage_warning_and_stop`.
-- `cargo +1.88.0 check --locked --workspace --all-targets` passed against the
-  repository MSRV.
+- Task 002 is complete under ADR 0008. Public adapter types include
+  `OpenAiResponsesDriver`, `OpenAiRetryPolicy`, `OpenAiStoragePolicy`,
+  `OpenAiApiKey`, `OpenAiConfigError`, `OpenAiTransportConfig`,
+  `OpenAiReqwestTransport`, `OpenAiTransport`, `OpenAiHttpRequest`,
+  `OpenAiHttpResponse`, `OpenAiTransportError`,
+  `OpenAiTransportErrorKind`, and `OpenAiTransportFuture`.
+- The production constructor sends only to
+  `https://api.openai.com/v1/responses`; CI uses the credential-free injected
+  transport. Ephemeral mode sends `store: false`. Provider-managed mode sends
+  `store: true` and alone advertises and emits exact
+  `openai/responses-previous-response-id-v1` continuation state. No live or
+  billable provider request was run.
+- Exact request fixtures cover stable system and context epistemic projection,
+  complete ordered tool schemas, deterministic provider-name mapping, tool
+  choice, structured output, prompt-cache controls, and continuation suffix
+  rejection. Stream fixtures cover split-at-every-byte text, interleaved tool
+  arguments, final item correlation, usage, finish reasons, provider errors,
+  unknown and post-terminal events, bounded active and historical state,
+  cancellation/deadline during handshake, body, and backoff, and the
+  pre-response-only retry cutoff.
+- Security and boundary regressions include
+  `production_http_errors_scrub_exact_and_masked_credentials_everywhere`,
+  `in_band_provider_failures_scrub_exact_and_masked_credential_tokens`,
+  `terminal_usage_object_null_and_omission_follow_request_requirement`,
+  `terminal_status_is_optional_but_present_contradictions_fail_closed`,
+  `response_profile_storage_and_previous_id_are_correlated_before_completion`,
+  `total_sequential_output_history_accepts_n_and_rejects_n_plus_one`, and
+  `post_terminal_failure_preserves_chunk_independent_prefix_and_allows_done`.
+- `cargo test -p ditto-model-openai --all-targets` passed 43 tests; the package
+  suite including its credential non-serialization doctest passed 44.
+  `./scripts/agent-check.sh` passed 140 workspace tests, and
+  `cargo +1.88.0 check --locked --workspace --all-targets` passed against the
+  repository MSRV. Independent code review and manual QA reported no blockers.
 
 ## Intentionally deferred
 
-- production provider adapters and model turn loop;
+- kernel provider selection and the model/tool continuation loop;
+- additional providers, OpenAI model profiles, reasoning replay, remote cancel,
+  and explicit prompt-cache breakpoints;
 - capability worker protocol and lifecycle;
 - device registry, local process runner, SSH transport, and secrets;
 - persistent context projections and embeddings;

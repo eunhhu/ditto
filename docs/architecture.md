@@ -124,11 +124,17 @@ model stream ending is never completion evidence.
 
 ## Model boundary
 
-The next active slice is a provider-neutral model IR. It must retain structured
-tool calls, partial arguments, usage, cancellation, continuation, and finish
-reasons rather than flattening every provider to text. Provider-specific
-advantages are compiled through feature flags; unsupported features are not
-advertised.
+`ditto-model` owns the versioned provider-neutral request and validated semantic
+stream. It retains structured tool calls, partial arguments, typed reasoning
+and replay state, usage, cancellation, continuation, and finish reasons rather
+than flattening providers to text. Driver descriptors keep request controls
+separate from emitted features, and unsupported features fail before output.
+
+`ditto-model-openai` owns the first production adapter: a closed `gpt-5.6`
+Responses profile with a fixed HTTPS origin, redacted transport-only
+credentials, deterministic request projection, bounded raw-stream correlation,
+and explicit ephemeral or provider-managed response storage. Its terminal is a
+model terminal only. No kernel turn loop or task-completion claim is implied.
 
 ## Improvement compiler
 
