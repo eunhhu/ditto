@@ -6,6 +6,8 @@ Roadmap items are vertical slices with executable completion criteria. Dates are
 
 - Rust daemon and CLI
 - SQLite WAL event log
+- database-enforced append-only event integrity
+- SHA-256 content-addressed artifact storage
 - HTTP append/query API
 - resumable SSE replay/follow stream
 - typed event protocol
@@ -17,11 +19,11 @@ Exit criterion: a client can disconnect, reconnect from a sequence number, and r
 
 - typed Context IR and Context Receipt
 - capability manifests and cards
-- exact/alias/lexical retrieval
+- exact/alias/lexical retrieval with placement and policy hard filters
 - namespace map and full-schema page-in
 - pluggable local embedding worker
 - temporal + graph reranking
-- stable execution-epoch tool ordering
+- bounded, append-only execution-epoch tool ordering
 
 Exit criterion: with 1,000 synthetic capabilities, the model sees at most the relevant working set and the UI explains every selected context node and capability.
 
