@@ -1,0 +1,17 @@
+[package]
+name = "ditto-artifact-read"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64.workspace = true
+ditto-artifact-store = { path = "../artifact-store" }
+ditto-capability = { path = "../capability" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
