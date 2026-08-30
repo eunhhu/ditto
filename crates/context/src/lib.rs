@@ -63,7 +63,7 @@ pub enum ContextLens {
 }
 
 /// Durable semantic content. Compiler authority is intentionally not stored here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextNode {
     pub id: String,
     pub kind: ContextNodeKind,
@@ -354,6 +354,180 @@ pub struct CompiledContext {
     pub receipt: ContextReceipt,
 }
 
+/// A compact, model-facing projection of one durable context node.
+///
+/// Compiler directives, receipts, and durable supersession/lens metadata remain
+/// harness-owned. The remaining metadata is intentionally retained so a
+/// deserialized capsule can be validated before it reaches a model boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextCapsuleItem {
+    pub id: String,
+    pub kind: ContextNodeKind,
+    pub summary: String,
+    pub origin: ContextOrigin,
+    pub epistemic: EpistemicStatus,
+    pub scope: ContextScope,
+    pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_event_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<DateTime<Utc>>,
+}
+
+impl From<&ContextNode> for ContextCapsuleItem {
+    fn from(node: &ContextNode) -> Self {
+        Self {
+            id: node.id.clone(),
+            kind: node.kind,
+            summary: node.summary.clone(),
+            origin: node.origin,
+            epistemic: node.epistemic,
+            scope: node.scope,
+            confidence: node.confidence,
+            source_event_ids: node.source_event_ids.clone(),
+            valid_from: node.valid_from,
+            valid_until: node.valid_until,
+        }
+    }
+}
+
+impl ContextCapsuleItem {
+    /// Validate this model-facing item at a specific wall-clock instant.
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ContextCapsuleValidationError> {
+        let node = self.as_context_node();
+        node.validate()
+            .map_err(|error| ContextCapsuleValidationError::InvalidItem {
+                item_id: self.id.clone(),
+                reason: error.to_string(),
+            })?;
+        if !node.is_valid_at(now) {
+            return Err(ContextCapsuleValidationError::NotValidAt {
+                item_id: self.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Return the exact serialized item size used by the compiler's estimate.
+    ///
+    /// An item that cannot be represented as JSON is charged as maximally large
+    /// so callers fail closed rather than panicking or undercounting it.
+    pub fn serialized_len(&self) -> usize {
+        serde_json::to_vec(self).map_or(usize::MAX, |serialized| serialized.len())
+    }
+
+    /// Return the conservative token estimate charged for this item.
+    ///
+    /// The fixed overhead covers the surrounding capsule array and separators;
+    /// charging it per item keeps the sum conservative for every capsule size.
+    pub fn token_cost(&self) -> u32 {
+        estimate_serialized_tokens(self.serialized_len(), CAPSULE_ITEM_FIXED_OVERHEAD_TOKENS)
+    }
+
+    fn as_context_node(&self) -> ContextNode {
+        ContextNode {
+            id: self.id.clone(),
+            kind: self.kind,
+            summary: self.summary.clone(),
+            origin: self.origin,
+            epistemic: self.epistemic,
+            scope: self.scope,
+            // Lens and supersession are durable/harness metadata and are not
+            // part of the model projection. Their values are irrelevant to
+            // the validation invariants enforced here.
+            lens: ContextLens::default(),
+            confidence: self.confidence,
+            source_event_ids: self.source_event_ids.clone(),
+            supersedes: Vec::new(),
+            valid_from: self.valid_from,
+            valid_until: self.valid_until,
+        }
+    }
+}
+
+/// Validation failures for model-facing context projections.
+#[derive(Debug, Error, PartialEq)]
+pub enum ContextCapsuleValidationError {
+    #[error("context capsule item {item_id} is invalid: {reason}")]
+    InvalidItem { item_id: String, reason: String },
+    #[error("context capsule item {item_id} is disputed or not valid at the requested time")]
+    NotValidAt { item_id: String },
+    #[error(
+        "context capsule costs {used} tokens, exceeding the absolute ceiling {absolute_budget}"
+    )]
+    TokenBudgetExceeded { used: u32, absolute_budget: u32 },
+}
+
+/// Fixed token overhead charged for each serialized capsule item.
+///
+/// This is deliberately conservative: it covers the capsule's `nodes` field,
+/// array punctuation, and separators in addition to the serialized item body.
+pub const CAPSULE_ITEM_FIXED_OVERHEAD_TOKENS: u32 = 16;
+
+/// Default soft context budget in estimated tokens.
+pub const DEFAULT_CONTEXT_TOKEN_BUDGET: u32 = 900;
+
+/// Default absolute context ceiling in estimated tokens.
+pub const DEFAULT_CONTEXT_ABSOLUTE_BUDGET: u32 = 1_800;
+
+/// Model-facing context projection. Compiler receipts remain harness-owned.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContextCapsule {
+    #[serde(default)]
+    pub nodes: Vec<ContextCapsuleItem>,
+}
+
+impl From<&CompiledContext> for ContextCapsule {
+    fn from(compiled: &CompiledContext) -> Self {
+        Self {
+            nodes: compiled
+                .nodes
+                .iter()
+                .map(ContextCapsuleItem::from)
+                .collect(),
+        }
+    }
+}
+
+impl ContextCapsule {
+    /// Validate every item and enforce the default absolute model-context cap.
+    pub fn validate_at(&self, now: DateTime<Utc>) -> Result<(), ContextCapsuleValidationError> {
+        self.validate_at_with_budget(now, DEFAULT_CONTEXT_ABSOLUTE_BUDGET)
+    }
+
+    /// Validate every item and enforce an explicit absolute token ceiling.
+    ///
+    /// This variant lets callers using a non-default `ContextCompiler`
+    /// validate a capsule against that compiler's configured ceiling.
+    pub fn validate_at_with_budget(
+        &self,
+        now: DateTime<Utc>,
+        absolute_budget: u32,
+    ) -> Result<(), ContextCapsuleValidationError> {
+        for item in &self.nodes {
+            item.validate_at(now)?;
+        }
+
+        let used = self.token_cost();
+        if used > absolute_budget {
+            return Err(ContextCapsuleValidationError::TokenBudgetExceeded {
+                used,
+                absolute_budget,
+            });
+        }
+        Ok(())
+    }
+
+    /// Return the conservative token estimate for the exact serialized items.
+    pub fn token_cost(&self) -> u32 {
+        self.nodes
+            .iter()
+            .fold(0_u32, |total, item| total.saturating_add(item.token_cost()))
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ContextCompileError {
     #[error("required context {node_id} is invalid: {reason}")]
@@ -373,8 +547,8 @@ pub struct ContextCompiler {
 impl Default for ContextCompiler {
     fn default() -> Self {
         Self {
-            default_budget: 900,
-            absolute_budget: 1_800,
+            default_budget: DEFAULT_CONTEXT_TOKEN_BUDGET,
+            absolute_budget: DEFAULT_CONTEXT_ABSOLUTE_BUDGET,
         }
     }
 }
@@ -388,6 +562,7 @@ impl ContextCompiler {
         now: DateTime<Utc>,
     ) -> Result<CompiledContext, ContextCompileError> {
         let token_budget = token_budget.unwrap_or(self.default_budget);
+        let selection_budget = token_budget.min(self.absolute_budget);
         let query_tokens = tokenize(&signature.searchable_text());
         let mut required = Vec::new();
         let mut ranked = Vec::new();
@@ -410,6 +585,12 @@ impl ContextCompiler {
                 continue;
             }
             if !candidate.node.is_valid_at(now) {
+                if candidate.directive.is_required() {
+                    return Err(ContextCompileError::InvalidRequiredContext {
+                        node_id,
+                        reason: invalid_at_reason(&candidate.node, now).into(),
+                    });
+                }
                 excluded.push(ContextExclusion {
                     node_id,
                     reason: ContextExclusionReason::DisputedOrExpired,
@@ -418,12 +599,24 @@ impl ContextCompiler {
                 continue;
             }
 
-            let token_cost = estimate_tokens(&candidate.node.summary);
-            let score = relevance_score(&candidate.node, &query_tokens);
+            let node = candidate.node;
+            let capsule_item = ContextCapsuleItem::from(&node);
+            let token_cost = capsule_item.token_cost();
+            let score = relevance_score(&node, &query_tokens);
             if candidate.directive.is_required() {
-                required.push((candidate.directive, score, token_cost, candidate.node));
+                required.push(PreparedCandidate {
+                    directive: candidate.directive,
+                    score,
+                    token_cost,
+                    node,
+                });
             } else if score > 0.0 {
-                ranked.push((candidate.directive, score, token_cost, candidate.node));
+                ranked.push(PreparedCandidate {
+                    directive: candidate.directive,
+                    score,
+                    token_cost,
+                    node,
+                });
             } else {
                 excluded.push(ContextExclusion {
                     node_id,
@@ -436,9 +629,9 @@ impl ContextCompiler {
         required.sort_by(candidate_order);
         ranked.sort_by(candidate_order);
 
-        let required_cost = required
-            .iter()
-            .fold(0_u32, |total, (_, _, cost, _)| total.saturating_add(*cost));
+        let required_cost = required.iter().fold(0_u32, |total, candidate| {
+            total.saturating_add(candidate.token_cost)
+        });
         if required_cost > self.absolute_budget {
             return Err(ContextCompileError::RequiredContextBudgetExceeded {
                 used: required_cost,
@@ -450,24 +643,34 @@ impl ContextCompiler {
         let mut included = Vec::new();
         let mut used = 0_u32;
 
-        for (directive, score, token_cost, node) in required {
-            used = used.saturating_add(token_cost);
-            included.push(receipt_entry(&node, &directive, score, token_cost));
-            selected.push(node);
+        for candidate in required {
+            used = used.saturating_add(candidate.token_cost);
+            included.push(receipt_entry(
+                &candidate.node,
+                &candidate.directive,
+                candidate.score,
+                candidate.token_cost,
+            ));
+            selected.push(candidate.node);
         }
 
-        for (directive, score, token_cost, node) in ranked {
-            if used.saturating_add(token_cost) > token_budget {
+        for candidate in ranked {
+            if used.saturating_add(candidate.token_cost) > selection_budget {
                 excluded.push(ContextExclusion {
-                    node_id: node.id,
+                    node_id: candidate.node.id,
                     reason: ContextExclusionReason::TokenBudget,
                     detail: None,
                 });
                 continue;
             }
-            used += token_cost;
-            included.push(receipt_entry(&node, &directive, score, token_cost));
-            selected.push(node);
+            used += candidate.token_cost;
+            included.push(receipt_entry(
+                &candidate.node,
+                &candidate.directive,
+                candidate.score,
+                candidate.token_cost,
+            ));
+            selected.push(candidate.node);
         }
 
         Ok(CompiledContext {
@@ -484,15 +687,20 @@ impl ContextCompiler {
     }
 }
 
-fn candidate_order(
-    (left_directive, left_score, _, left): &(ContextDirective, f32, u32, ContextNode),
-    (right_directive, right_score, _, right): &(ContextDirective, f32, u32, ContextNode),
-) -> std::cmp::Ordering {
-    right_directive
+struct PreparedCandidate {
+    directive: ContextDirective,
+    score: f32,
+    token_cost: u32,
+    node: ContextNode,
+}
+
+fn candidate_order(left: &PreparedCandidate, right: &PreparedCandidate) -> std::cmp::Ordering {
+    right
+        .directive
         .priority()
-        .cmp(&left_directive.priority())
-        .then_with(|| right_score.total_cmp(left_score))
-        .then_with(|| left.id.cmp(&right.id))
+        .cmp(&left.directive.priority())
+        .then_with(|| right.score.total_cmp(&left.score))
+        .then_with(|| left.node.id.cmp(&right.node.id))
 }
 
 fn receipt_entry(
@@ -534,9 +742,31 @@ fn relevance_score(node: &ContextNode, query_tokens: &HashSet<String>) -> f32 {
     overlap * 5.0 + authority + node.confidence
 }
 
-fn estimate_tokens(text: &str) -> u32 {
-    let estimate = text.chars().count().div_ceil(4).max(1);
-    u32::try_from(estimate).unwrap_or(u32::MAX)
+fn invalid_at_reason(node: &ContextNode, now: DateTime<Utc>) -> &'static str {
+    if node.epistemic == EpistemicStatus::Disputed {
+        "epistemic status is disputed"
+    } else if node
+        .valid_until
+        .as_ref()
+        .is_some_and(|valid_until| valid_until <= &now)
+    {
+        "validity window has expired"
+    } else if node
+        .valid_from
+        .as_ref()
+        .is_some_and(|valid_from| valid_from > &now)
+    {
+        "validity window has not started"
+    } else {
+        "not valid at the requested time"
+    }
+}
+
+fn estimate_serialized_tokens(serialized_len: usize, fixed_overhead: u32) -> u32 {
+    let estimate = serialized_len.div_ceil(4).max(1);
+    u32::try_from(estimate)
+        .unwrap_or(u32::MAX)
+        .saturating_add(fixed_overhead)
 }
 
 fn has_provenance(source_event_ids: &[String]) -> bool {
@@ -553,12 +783,14 @@ fn tokenize(input: &str) -> HashSet<String> {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
 
     use super::{
-        ContextCandidate, ContextCompileError, ContextCompiler, ContextEdge, ContextEdgeKind,
-        ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope,
-        ContextValidationError, EpistemicStatus, TaskSignature,
+        CAPSULE_ITEM_FIXED_OVERHEAD_TOKENS, ContextCandidate, ContextCapsule, ContextCapsuleItem,
+        ContextCapsuleValidationError, ContextCompileError, ContextCompiler, ContextEdge,
+        ContextEdgeKind, ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin,
+        ContextScope, ContextValidationError, DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus,
+        TaskSignature,
     };
 
     fn node(id: &str, summary: &str) -> ContextNode {
@@ -582,7 +814,7 @@ mod tests {
     fn trusted_pin_survives_soft_budget_but_not_absolute_ceiling() {
         let compiler = ContextCompiler {
             default_budget: 5,
-            absolute_budget: 50,
+            absolute_budget: 100,
         };
         let signature = TaskSignature {
             request: "restart the home server service".into(),
@@ -704,5 +936,317 @@ mod tests {
             )
             .expect("compile context");
         assert!(compiled.receipt.included[0].token_cost > 0);
+    }
+
+    #[test]
+    fn context_capsule_projection_preserves_compiled_node_order() {
+        let signature = TaskSignature {
+            request: "database service".into(),
+            ..TaskSignature::default()
+        };
+        let compiled = ContextCompiler::default()
+            .compile(
+                &signature,
+                [
+                    ContextCandidate::user_pinned(node("pinned", "database approval")),
+                    ContextCandidate::ranked(node("ranked", "database service")),
+                ],
+                None,
+                Utc::now(),
+            )
+            .expect("compile context");
+
+        let capsule = ContextCapsule::from(&compiled);
+        assert_eq!(
+            capsule
+                .nodes
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["pinned", "ranked"]
+        );
+        let wire = serde_json::to_value(&capsule).expect("serialize context capsule");
+        assert!(wire.get("receipt").is_none());
+        assert_eq!(wire["nodes"].as_array().map(Vec::len), Some(2));
+        assert!(wire["nodes"][0].get("supersedes").is_none());
+        assert!(wire["nodes"][0].get("lens").is_none());
+        assert_eq!(capsule.token_cost(), compiled.receipt.total_token_cost);
+        assert!(
+            serde_json::to_vec(&capsule)
+                .expect("serialize context capsule")
+                .len()
+                .div_ceil(4)
+                <= compiled.receipt.total_token_cost as usize
+        );
+        capsule.validate_at(Utc::now()).expect("valid capsule");
+    }
+
+    #[test]
+    fn capsule_cost_uses_exact_item_serialization_and_drops_durable_metadata() {
+        let mut durable = node("project", "database service");
+        durable.lens = ContextLens::Environment;
+        durable.supersedes = (0..10_000).map(|index| format!("old-{index}")).collect();
+
+        let item = ContextCapsuleItem::from(&durable);
+        let compact = ContextCapsuleItem::from(&node("project", "database service"));
+        let wire = serde_json::to_value(&item).expect("serialize capsule item");
+        assert!(wire.get("supersedes").is_none());
+        assert!(wire.get("lens").is_none());
+        assert_eq!(
+            item.serialized_len(),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "project",
+                "kind": "constraint",
+                "summary": "database service",
+                "origin": "user",
+                "epistemic": "asserted",
+                "scope": "project",
+                "confidence": 1.0,
+                "source_event_ids": ["event-1"]
+            }))
+            .expect("serialize expected capsule item")
+            .len()
+        );
+        let expected_item_cost =
+            item.serialized_len().div_ceil(4) as u32 + CAPSULE_ITEM_FIXED_OVERHEAD_TOKENS;
+        assert_eq!(item.token_cost(), expected_item_cost);
+        assert_eq!(item.source_event_ids, compact.source_event_ids);
+        assert_eq!(item.token_cost(), compact.token_cost());
+
+        let capsule = ContextCapsule { nodes: vec![item] };
+        capsule
+            .validate_at(Utc::now())
+            .expect("dropped metadata cannot invalidate capsule");
+        assert!(capsule.token_cost() <= DEFAULT_CONTEXT_ABSOLUTE_BUDGET);
+    }
+
+    #[test]
+    fn huge_provenance_is_charged_and_cannot_cross_absolute_ceiling() {
+        let mut huge = node("huge", "database service");
+        huge.source_event_ids = (0..10_000).map(|index| format!("event-{index}")).collect();
+        let compiler = ContextCompiler {
+            default_budget: DEFAULT_CONTEXT_ABSOLUTE_BUDGET,
+            absolute_budget: DEFAULT_CONTEXT_ABSOLUTE_BUDGET,
+        };
+
+        let compiled = compiler
+            .compile(
+                &TaskSignature {
+                    request: "database service".into(),
+                    ..TaskSignature::default()
+                },
+                [ContextCandidate::ranked(huge)],
+                None,
+                Utc::now(),
+            )
+            .expect("oversized ranked context is excluded");
+
+        assert!(compiled.nodes.is_empty());
+        assert_eq!(compiled.receipt.total_token_cost, 0);
+        assert!(
+            compiled
+                .receipt
+                .excluded
+                .iter()
+                .any(|entry| matches!(entry.reason, super::ContextExclusionReason::TokenBudget))
+        );
+    }
+
+    #[test]
+    fn ranked_selection_is_capped_even_when_soft_budget_is_larger() {
+        let compiler = ContextCompiler {
+            default_budget: 100_000,
+            absolute_budget: 200,
+        };
+        let signature = TaskSignature {
+            request: "database service".into(),
+            ..TaskSignature::default()
+        };
+        let compiled = compiler
+            .compile(
+                &signature,
+                (0..10).map(|index| {
+                    ContextCandidate::ranked(node(
+                        &format!("candidate-{index}"),
+                        "database service",
+                    ))
+                }),
+                None,
+                Utc::now(),
+            )
+            .expect("ranked context compiles");
+
+        assert!(compiled.receipt.total_token_cost <= compiler.absolute_budget);
+        assert!(
+            compiled
+                .receipt
+                .excluded
+                .iter()
+                .any(|entry| matches!(entry.reason, super::ContextExclusionReason::TokenBudget))
+        );
+    }
+
+    #[test]
+    fn capsule_validation_rejects_invalid_trust_metadata_and_time() {
+        let now = Utc::now();
+
+        let mut missing_provenance = node("missing-provenance", "database service");
+        missing_provenance.source_event_ids.clear();
+        let missing_provenance = ContextCapsule {
+            nodes: vec![ContextCapsuleItem::from(&missing_provenance)],
+        };
+        assert!(matches!(
+            missing_provenance.validate_at(now),
+            Err(ContextCapsuleValidationError::InvalidItem { ref reason, .. })
+                if reason.contains("no source event provenance")
+        ));
+
+        let mut model_assertion = node("model-assertion", "database service");
+        model_assertion.origin = ContextOrigin::Model;
+        let model_assertion = ContextCapsule {
+            nodes: vec![ContextCapsuleItem::from(&model_assertion)],
+        };
+        assert!(matches!(
+            model_assertion.validate_at(now),
+            Err(ContextCapsuleValidationError::InvalidItem { ref reason, .. })
+                if reason.contains("cannot be asserted")
+        ));
+
+        let mut disputed = node("disputed", "database service");
+        disputed.epistemic = EpistemicStatus::Disputed;
+        let disputed = ContextCapsule {
+            nodes: vec![ContextCapsuleItem::from(&disputed)],
+        };
+        assert!(matches!(
+            disputed.validate_at(now),
+            Err(ContextCapsuleValidationError::NotValidAt { ref item_id })
+                if item_id == "disputed"
+        ));
+
+        let mut expired = node("expired", "database service");
+        expired.valid_until = Some(now - Duration::seconds(1));
+        let expired = ContextCapsule {
+            nodes: vec![ContextCapsuleItem::from(&expired)],
+        };
+        assert!(matches!(
+            expired.validate_at(now),
+            Err(ContextCapsuleValidationError::NotValidAt { ref item_id })
+                if item_id == "expired"
+        ));
+    }
+
+    #[test]
+    fn required_time_invalid_context_blocks_but_ranked_context_is_excluded() {
+        let now = Utc::now();
+        let signature = TaskSignature {
+            request: "database service".into(),
+            ..TaskSignature::default()
+        };
+
+        let mut expired = node("expired-required", "database service");
+        expired.valid_until = Some(now - Duration::seconds(1));
+        let error = ContextCompiler::default()
+            .compile(
+                &signature,
+                [ContextCandidate::user_pinned(expired)],
+                None,
+                now,
+            )
+            .expect_err("expired required context must block");
+        assert!(matches!(
+            error,
+            ContextCompileError::InvalidRequiredContext { ref node_id, ref reason }
+                if node_id == "expired-required" && reason.contains("expired")
+        ));
+
+        let mut future = node("future-required", "database service");
+        future.valid_from = Some(now + Duration::seconds(1));
+        let error = ContextCompiler::default()
+            .compile(
+                &signature,
+                [ContextCandidate::policy_required(future, "fresh state")],
+                None,
+                now,
+            )
+            .expect_err("future required context must block");
+        assert!(matches!(
+            error,
+            ContextCompileError::InvalidRequiredContext { ref node_id, ref reason }
+                if node_id == "future-required" && reason.contains("not started")
+        ));
+
+        let mut disputed = node("disputed-required", "database service");
+        disputed.epistemic = EpistemicStatus::Disputed;
+        let error = ContextCompiler::default()
+            .compile(
+                &signature,
+                [ContextCandidate::user_pinned(disputed)],
+                None,
+                now,
+            )
+            .expect_err("disputed required context must block");
+        assert!(matches!(
+            error,
+            ContextCompileError::InvalidRequiredContext { ref node_id, ref reason }
+                if node_id == "disputed-required" && reason.contains("disputed")
+        ));
+
+        let mut ranked_expired = node("expired-ranked", "database service");
+        ranked_expired.valid_until = Some(now - Duration::seconds(1));
+        let compiled = ContextCompiler::default()
+            .compile(
+                &signature,
+                [ContextCandidate::ranked(ranked_expired)],
+                None,
+                now,
+            )
+            .expect("expired ranked context is excluded");
+        assert!(compiled.nodes.is_empty());
+        assert!(compiled.receipt.excluded.iter().any(|entry| {
+            entry.node_id == "expired-ranked"
+                && matches!(
+                    entry.reason,
+                    super::ContextExclusionReason::DisputedOrExpired
+                )
+        }));
+
+        let mut ranked_future = node("future-ranked", "database service");
+        ranked_future.valid_from = Some(now + Duration::seconds(1));
+        let compiled = ContextCompiler::default()
+            .compile(
+                &signature,
+                [ContextCandidate::ranked(ranked_future)],
+                None,
+                now,
+            )
+            .expect("future ranked context is excluded");
+        assert!(compiled.nodes.is_empty());
+        assert!(compiled.receipt.excluded.iter().any(|entry| {
+            entry.node_id == "future-ranked"
+                && matches!(
+                    entry.reason,
+                    super::ContextExclusionReason::DisputedOrExpired
+                )
+        }));
+    }
+
+    #[test]
+    fn deserialized_over_budget_capsule_is_rejected() {
+        let oversized =
+            ContextCapsuleItem::from(&node("oversized", &"database service ".repeat(2_000)));
+        let wire = serde_json::to_vec(&ContextCapsule {
+            nodes: vec![oversized],
+        })
+        .expect("serialize oversized capsule");
+        let decoded: ContextCapsule =
+            serde_json::from_slice(&wire).expect("deserialize oversized capsule");
+
+        assert!(matches!(
+            decoded.validate_at(Utc::now()),
+            Err(ContextCapsuleValidationError::TokenBudgetExceeded {
+                absolute_budget: DEFAULT_CONTEXT_ABSOLUTE_BUDGET,
+                ..
+            })
+        ));
     }
 }

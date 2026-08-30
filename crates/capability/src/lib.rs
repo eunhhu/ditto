@@ -5,6 +5,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -199,6 +200,361 @@ impl From<&CapabilityManifest> for CapabilityCard {
             placement_modes: manifest.placement.modes.clone(),
         }
     }
+}
+
+/// Provider-neutral level-2 capability schema exposed to a model driver.
+///
+/// Validation is structural: boolean schemas are valid, recognized JSON
+/// Schema keywords are checked recursively, and unknown keywords are retained
+/// as opaque extensions. This does not evaluate instances or claim that a
+/// provider-specific tool API accepts a schema (including a boolean schema).
+/// In the supported dialect, `required` may be empty, while schema arrays such
+/// as `prefixItems` must contain at least one valid schema.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapabilitySchema {
+    pub id: String,
+    pub version: String,
+    pub summary: String,
+    pub input_schema: Value,
+    pub output_schema: Value,
+}
+
+impl CapabilitySchema {
+    pub fn validate(&self) -> Result<(), CapabilitySchemaError> {
+        if !valid_capability_id(&self.id) {
+            return Err(CapabilitySchemaError::InvalidId {
+                id: self.id.clone(),
+            });
+        }
+        if !valid_semver(&self.version) {
+            return Err(CapabilitySchemaError::InvalidVersion {
+                version: self.version.clone(),
+            });
+        }
+        if self.summary.trim().is_empty() {
+            return Err(CapabilitySchemaError::EmptySummary);
+        }
+        validate_schema_field("input_schema", &self.input_schema)?;
+        validate_schema_field("output_schema", &self.output_schema)?;
+        Ok(())
+    }
+}
+
+/// Canonical dialect for provider-neutral capability schemas.
+pub const JSON_SCHEMA_DRAFT_2020_12_URI: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// Structural validation failures for a provider-neutral JSON Schema.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum JsonSchemaValidationError {
+    #[error("JSON Schema must be a boolean or a Draft 2020-12 schema object")]
+    Invalid,
+    #[error("JSON Schema declares unsupported dialect: {dialect}")]
+    UnsupportedDialect { dialect: String },
+}
+
+/// Validate a provider-neutral JSON Schema using the Draft 2020-12 structure.
+///
+/// An omitted `$schema` is interpreted as Draft 2020-12. Unknown keywords are
+/// intentionally opaque extension data; this function does not evaluate
+/// instances or certify compatibility with a provider's tool API.
+pub fn validate_json_schema(value: &Value) -> Result<(), JsonSchemaValidationError> {
+    validate_schema(value)
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CapabilitySchemaError {
+    #[error("capability schema id is invalid: {id}")]
+    InvalidId { id: String },
+    #[error("capability schema version is invalid: {version}")]
+    InvalidVersion { version: String },
+    #[error("capability schema summary is empty")]
+    EmptySummary,
+    #[error("capability schema {field} must be a valid provider-neutral JSON Schema")]
+    InvalidSchema { field: &'static str },
+    #[error("capability schema {field} declares unsupported JSON Schema dialect: {dialect}")]
+    UnsupportedDialect {
+        field: &'static str,
+        dialect: String,
+    },
+}
+
+fn validate_schema_field(field: &'static str, value: &Value) -> Result<(), CapabilitySchemaError> {
+    match validate_json_schema(value) {
+        Ok(()) => Ok(()),
+        Err(JsonSchemaValidationError::Invalid) => {
+            Err(CapabilitySchemaError::InvalidSchema { field })
+        }
+        Err(JsonSchemaValidationError::UnsupportedDialect { dialect }) => {
+            Err(CapabilitySchemaError::UnsupportedDialect { field, dialect })
+        }
+    }
+}
+
+fn validate_schema(value: &Value) -> Result<(), JsonSchemaValidationError> {
+    match value {
+        Value::Bool(_) => Ok(()),
+        Value::Object(object) => validate_schema_object(object),
+        Value::Array(_) | Value::Null | Value::Number(_) | Value::String(_) => {
+            Err(JsonSchemaValidationError::Invalid)
+        }
+    }
+}
+
+fn validate_schema_object(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), JsonSchemaValidationError> {
+    if let Some(value) = object.get("$schema") {
+        match value {
+            Value::String(dialect) if dialect == JSON_SCHEMA_DRAFT_2020_12_URI => {}
+            Value::String(dialect) => {
+                return Err(JsonSchemaValidationError::UnsupportedDialect {
+                    dialect: dialect.clone(),
+                });
+            }
+            _ => return Err(JsonSchemaValidationError::Invalid),
+        }
+    }
+    for keyword in [
+        "$id",
+        "$ref",
+        "$anchor",
+        "$dynamicRef",
+        "$dynamicAnchor",
+        "$comment",
+    ] {
+        if let Some(value) = object.get(keyword) {
+            if !value.is_string() {
+                return Err(JsonSchemaValidationError::Invalid);
+            }
+        }
+    }
+    if let Some(value) = object.get("$vocabulary") {
+        validate_boolean_map(value)?;
+    }
+
+    if let Some(value) = object.get("type") {
+        if !is_valid_type(value) {
+            return Err(JsonSchemaValidationError::Invalid);
+        }
+    }
+    if let Some(value) = object.get("enum") {
+        if !value.is_array() {
+            return Err(JsonSchemaValidationError::Invalid);
+        }
+    }
+    if let Some(value) = object.get("multipleOf") {
+        if !is_positive_number(value) {
+            return Err(JsonSchemaValidationError::Invalid);
+        }
+    }
+    for keyword in ["maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum"] {
+        if let Some(value) = object.get(keyword) {
+            if !is_number(value) {
+                return Err(JsonSchemaValidationError::Invalid);
+            }
+        }
+    }
+    for keyword in [
+        "maxLength",
+        "minLength",
+        "maxItems",
+        "minItems",
+        "maxProperties",
+        "minProperties",
+        "maxContains",
+        "minContains",
+    ] {
+        if let Some(value) = object.get(keyword) {
+            if !is_non_negative_integer(value) {
+                return Err(JsonSchemaValidationError::Invalid);
+            }
+        }
+    }
+    for keyword in ["pattern", "format", "contentEncoding", "contentMediaType"] {
+        if let Some(value) = object.get(keyword) {
+            if !value.is_string() {
+                return Err(JsonSchemaValidationError::Invalid);
+            }
+        }
+    }
+    for keyword in ["uniqueItems", "deprecated", "readOnly", "writeOnly"] {
+        if let Some(value) = object.get(keyword) {
+            if !value.is_boolean() {
+                return Err(JsonSchemaValidationError::Invalid);
+            }
+        }
+    }
+    for keyword in ["title", "description"] {
+        if let Some(value) = object.get(keyword) {
+            if !value.is_string() {
+                return Err(JsonSchemaValidationError::Invalid);
+            }
+        }
+    }
+    if let Some(value) = object.get("examples") {
+        if !value.is_array() {
+            return Err(JsonSchemaValidationError::Invalid);
+        }
+    }
+
+    for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(value) = object.get(keyword) {
+            validate_schema_array(value, true)?;
+        }
+    }
+    for keyword in [
+        "not",
+        "if",
+        "then",
+        "else",
+        "contains",
+        "propertyNames",
+        "contentSchema",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+        "items",
+        "additionalProperties",
+    ] {
+        if let Some(value) = object.get(keyword) {
+            validate_schema(value)?;
+        }
+    }
+
+    if let Some(value) = object.get("required") {
+        validate_string_array(value, false)?;
+    }
+    if let Some(value) = object.get("dependentRequired") {
+        validate_dependent_required(value)?;
+    }
+
+    for keyword in [
+        "$defs",
+        "properties",
+        "patternProperties",
+        "dependentSchemas",
+    ] {
+        if let Some(value) = object.get(keyword) {
+            validate_schema_map(value)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn is_valid_type(value: &Value) -> bool {
+    const TYPE_NAMES: [&str; 7] = [
+        "null", "boolean", "object", "array", "number", "string", "integer",
+    ];
+
+    match value {
+        Value::String(name) => TYPE_NAMES.contains(&name.as_str()),
+        Value::Array(values) => {
+            !values.is_empty()
+                && values.iter().all(|value| {
+                    value
+                        .as_str()
+                        .is_some_and(|name| TYPE_NAMES.contains(&name))
+                })
+                && values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<HashSet<_>>()
+                    .len()
+                    == values.len()
+        }
+        Value::Bool(_) | Value::Null | Value::Number(_) | Value::Object(_) => false,
+    }
+}
+
+fn is_number(value: &Value) -> bool {
+    value.is_number()
+}
+
+fn is_positive_number(value: &Value) -> bool {
+    value
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number > 0.0)
+}
+
+fn is_non_negative_integer(value: &Value) -> bool {
+    let Value::Number(number) = value else {
+        return false;
+    };
+
+    number.as_u64().is_some()
+        || number
+            .as_f64()
+            .is_some_and(|number| number.is_finite() && number >= 0.0 && number.fract() == 0.0)
+}
+
+fn validate_schema_array(
+    value: &Value,
+    require_non_empty: bool,
+) -> Result<(), JsonSchemaValidationError> {
+    let Value::Array(values) = value else {
+        return Err(JsonSchemaValidationError::Invalid);
+    };
+    if require_non_empty && values.is_empty() {
+        return Err(JsonSchemaValidationError::Invalid);
+    }
+    for schema in values {
+        validate_schema(schema)?;
+    }
+    Ok(())
+}
+
+fn validate_schema_map(value: &Value) -> Result<(), JsonSchemaValidationError> {
+    let Value::Object(object) = value else {
+        return Err(JsonSchemaValidationError::Invalid);
+    };
+    for schema in object.values() {
+        validate_schema(schema)?;
+    }
+    Ok(())
+}
+
+fn validate_boolean_map(value: &Value) -> Result<(), JsonSchemaValidationError> {
+    let Value::Object(object) = value else {
+        return Err(JsonSchemaValidationError::Invalid);
+    };
+    if object.values().all(Value::is_boolean) {
+        Ok(())
+    } else {
+        Err(JsonSchemaValidationError::Invalid)
+    }
+}
+
+fn validate_string_array(
+    value: &Value,
+    require_non_empty: bool,
+) -> Result<(), JsonSchemaValidationError> {
+    let Value::Array(values) = value else {
+        return Err(JsonSchemaValidationError::Invalid);
+    };
+    if require_non_empty && values.is_empty() {
+        return Err(JsonSchemaValidationError::Invalid);
+    }
+
+    let mut entries = HashSet::with_capacity(values.len());
+    for value in values {
+        let Some(entry) = value.as_str() else {
+            return Err(JsonSchemaValidationError::Invalid);
+        };
+        if !entries.insert(entry) {
+            return Err(JsonSchemaValidationError::Invalid);
+        }
+    }
+    Ok(())
+}
+
+fn validate_dependent_required(value: &Value) -> Result<(), JsonSchemaValidationError> {
+    let Value::Object(object) = value else {
+        return Err(JsonSchemaValidationError::Invalid);
+    };
+    for required in object.values() {
+        validate_string_array(required, false)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,10 +1090,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CapabilityCatalog, CapabilityError, CapabilityKind, CapabilityManifest, DataAccess,
-        EffectProfile, EffectSpec, ExecutionEpoch, Externality, Mutation, PlacementSpec,
+        CapabilityCatalog, CapabilityError, CapabilityKind, CapabilityManifest, CapabilitySchema,
+        CapabilitySchemaError, DataAccess, EffectProfile, EffectSpec, ExecutionEpoch, Externality,
+        JSON_SCHEMA_DRAFT_2020_12_URI, JsonSchemaValidationError, Mutation, PlacementSpec,
         PolicySpec, Privilege, RetrievalSpec, RuntimeSpec, RuntimeType, SearchContext, SearchMode,
-        VerificationSpec,
+        VerificationSpec, validate_json_schema,
     };
 
     const MANIFEST: &str = r#"
@@ -968,6 +1325,208 @@ default = "exit-code-and-expected-output"
             ..EffectProfile::default()
         };
         assert!(!elevated_read.permits(irreversible_write));
+    }
+
+    #[test]
+    fn capability_schema_round_trips_full_json_schemas() {
+        let schema = CapabilitySchema {
+            id: "artifact.read".into(),
+            version: "1.2.3-beta".into(),
+            summary: "Read an artifact range".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "artifact_id": { "type": "string" }
+                },
+                "required": ["artifact_id"]
+            }),
+            output_schema: serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "additionalProperties": false
+            }),
+        };
+
+        schema.validate().expect("valid capability schema");
+        let encoded = serde_json::to_string(&schema).expect("serialize capability schema");
+        let decoded: CapabilitySchema =
+            serde_json::from_str(&encoded).expect("deserialize capability schema");
+        assert_eq!(decoded.id, schema.id);
+        assert_eq!(decoded.version, schema.version);
+        assert_eq!(decoded.summary, schema.summary);
+        assert_eq!(decoded.input_schema, schema.input_schema);
+        assert_eq!(decoded.output_schema, schema.output_schema);
+    }
+
+    #[test]
+    fn capability_schema_rejects_invalid_id_and_schema_root() {
+        let mut schema = CapabilitySchema {
+            id: "Artifact.Read".into(),
+            version: "1.0.0".into(),
+            summary: "Read an artifact".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!(true),
+        };
+        assert!(matches!(
+            schema.validate(),
+            Err(CapabilitySchemaError::InvalidId { .. })
+        ));
+
+        schema.id = "artifact.read".into();
+        schema.input_schema = serde_json::json!(["an", "array"]);
+        assert!(matches!(
+            schema.validate(),
+            Err(CapabilitySchemaError::InvalidSchema {
+                field: "input_schema"
+            })
+        ));
+    }
+
+    #[test]
+    fn capability_schema_rejects_malformed_known_keywords_recursively() {
+        let invalid_input_schemas = [
+            serde_json::json!({"type": 42}),
+            serde_json::json!({"type": ["object", 42]}),
+            serde_json::json!({"type": []}),
+            serde_json::json!({"properties": {"artifact_id": 42}}),
+            serde_json::json!({"items": 42}),
+            serde_json::json!({"items": []}),
+            serde_json::json!({"additionalProperties": 42}),
+            serde_json::json!({"anyOf": [{"type": "string"}, 42]}),
+            serde_json::json!({"prefixItems": []}),
+            serde_json::json!({"required": ["artifact_id", 42]}),
+            serde_json::json!({
+                "properties": {
+                    "nested": {
+                        "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"properties": {"child": {"type": 42}}}
+                            ]
+                        }
+                    }
+                }
+            }),
+        ];
+
+        for input_schema in invalid_input_schemas {
+            let schema = CapabilitySchema {
+                id: "artifact.read".into(),
+                version: "1.0.0".into(),
+                summary: "Read an artifact".into(),
+                input_schema,
+                output_schema: serde_json::json!(true),
+            };
+            assert!(matches!(
+                schema.validate(),
+                Err(CapabilitySchemaError::InvalidSchema {
+                    field: "input_schema"
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn capability_schema_allows_boolean_schemas_and_opaque_extensions() {
+        let mut schema = CapabilitySchema {
+            id: "artifact.read".into(),
+            version: "1.0.0".into(),
+            summary: "Read an artifact".into(),
+            input_schema: serde_json::json!(false),
+            output_schema: serde_json::json!(true),
+        };
+        schema
+            .validate()
+            .expect("boolean schemas are provider-neutral schemas");
+
+        schema.input_schema = serde_json::json!({
+            "type": "object",
+            "enum": [],
+            "dependentRequired": {"artifact_id": []}
+        });
+        schema
+            .validate()
+            .expect("empty enum and dependentRequired arrays are valid");
+
+        schema.input_schema = serde_json::json!({
+            "type": "array",
+            "prefixItems": [{"type": "string"}],
+            "required": []
+        });
+        schema
+            .validate()
+            .expect("empty required arrays are structurally valid");
+
+        schema.input_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "artifact_id": {
+                    "type": "string",
+                    "x-extension": {"items": 42}
+                }
+            },
+            "x-provider-metadata": {"required": [42]}
+        });
+        schema
+            .validate()
+            .expect("unknown extension keywords remain opaque");
+    }
+
+    #[test]
+    fn capability_schema_enforces_canonical_draft_2020_12_dialect() {
+        validate_json_schema(&serde_json::json!({"type": "object"}))
+            .expect("omitted $schema uses Draft 2020-12");
+        validate_json_schema(&serde_json::json!({
+            "$schema": JSON_SCHEMA_DRAFT_2020_12_URI,
+            "type": "object"
+        }))
+        .expect("canonical Draft 2020-12 declaration is accepted");
+
+        let mut schema = CapabilitySchema {
+            id: "artifact.read".into(),
+            version: "1.0.0".into(),
+            summary: "Read an artifact".into(),
+            input_schema: serde_json::json!({
+                "$schema": "http://json-schema.org/draft-07/schema",
+                "type": "object"
+            }),
+            output_schema: serde_json::json!(true),
+        };
+        assert!(matches!(
+            schema.validate(),
+            Err(CapabilitySchemaError::UnsupportedDialect {
+                field: "input_schema",
+                dialect
+            }) if dialect == "http://json-schema.org/draft-07/schema"
+        ));
+
+        schema.input_schema = serde_json::json!({
+            "properties": {
+                "nested": {
+                    "$schema": "http://json-schema.org/draft-07/schema"
+                }
+            }
+        });
+        assert!(matches!(
+            validate_json_schema(&schema.input_schema),
+            Err(JsonSchemaValidationError::UnsupportedDialect { dialect })
+                if dialect == "http://json-schema.org/draft-07/schema"
+        ));
+    }
+
+    #[test]
+    fn capability_schema_keeps_obsolete_keywords_opaque() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "id": 42,
+            "$recursiveRef": 42,
+            "$recursiveAnchor": "not a boolean",
+            "additionalItems": 42,
+            "dependencies": {"artifact_id": 42},
+            "definitions": {"nested": 42}
+        });
+        validate_json_schema(&schema)
+            .expect("obsolete keyword values are opaque extensions in Draft 2020-12");
     }
 
     fn manifest(
