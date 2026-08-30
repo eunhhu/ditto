@@ -4,26 +4,36 @@
 
 One daemon, infinite capabilities, constant context.
 
-> Context is compiled. Capabilities are paged. Effects are leased. Improvements are promoted.
+> Context is compiled. Capabilities are paged. Effects are leased. Improvements
+> are promoted.
 
-Ditto is an agent harness for people who want frontier models to retain their freedom while the runtime handles context, capabilities, side effects, persistence, and long-lived execution. It is deliberately not a planner/executor framework, a persona zoo, or an always-on reflection loop.
+Ditto lets frontier models retain strategic freedom while the runtime controls
+context, capabilities, side effects, persistence, verification, and long-lived
+execution. It is not a planner/executor framework, persona zoo, or always-on
+reflection loop.
 
-## Status
+## Current state
 
-This repository currently contains the first executable vertical slice:
+The executable foundation includes:
 
-- a DB-enforced append-only SQLite event spine with WAL enabled;
-- a SHA-256 content-addressed artifact store with verified reads;
-- a Rust daemon exposing HTTP and Server-Sent Events;
-- a CLI that records inputs and inspects events;
-- lazy capability manifests with hard-filtered retrieval and bounded execution epochs;
-- typed Context IR with provenance validation and a token-budgeted compiler;
-- bounded capability-lease primitives with deny-by-default checks;
-- architecture, protocol, and self-improvement specifications.
+- a schema-versioned, DB-enforced append-only SQLite event spine;
+- typed public command ingress with kernel-owned actor and event kind;
+- subscribe-first, high-water-bounded, paginated SSE replay and lag recovery;
+- SHA-256 content-addressed artifacts with private storage and verified reads;
+- file-backed capability manifests, validated complements, strict runtime search,
+  and bounded execution epochs;
+- typed Context IR with provenance validation, trusted compiler directives, and
+  locally derived token cost;
+- orthogonal effect profiles and fail-closed lease primitives;
+- repository-native instructions for long-running coding agents.
 
-Model providers, SSH transport, hybrid embedding retrieval, and the improvement compiler are intentionally not faked in this commit. They are the next vertical slices.
+Production model drivers, capability execution, SSH, embeddings, authenticated
+remote gateways, completion verifiers, and the improvement compiler are still
+deferred. They are not represented by fake success paths.
 
 ## Quick start
+
+Requires Rust 1.88 or newer.
 
 ```bash
 # Terminal 1
@@ -38,123 +48,78 @@ cargo run -p ditto-cli -- input "hello from ditto" --session local
 cargo run -p ditto-cli -- events --session local
 cargo run -p ditto-cli -- capabilities "run a command on another computer"
 
-# The event stream is resumable through the Last-Event-ID equivalent: after_seq.
 curl -N 'http://127.0.0.1:8787/v1/stream?after_seq=0'
 ```
 
-The default data directory contains `state.db` and the local content-addressed artifact objects. No Redis, Postgres, graph database, vector database, Docker daemon, or cloud account is required.
+The daemon refuses non-loopback binding without the explicitly unsafe
+`--allow-unauthenticated-remote` escape hatch. That flag does not add
+authentication; use loopback until an authenticated gateway exists.
+
+## HTTP surface
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness, durable count, and latest sequence |
+| `POST` | `/v1/commands/input` | Submit user input; kernel assigns event authority |
+| `GET` | `/v1/events` | Query one durable event page |
+| `GET` | `/v1/stream` | Replay all pages through a high-water mark, then follow |
+| `GET` | `/v1/capabilities` | Catalogue-level capability card search |
+
+There is intentionally no public arbitrary event-append endpoint.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    UI[Web · CLI · Gateways · ACP] --> BUS[Unified Event Stream]
-    BUS --> KERNEL[Semantic Agent Microkernel]
-
+    UI[Web · CLI · Gateways · ACP] --> CMD[Typed Commands]
+    CMD --> KERNEL[Semantic Agent Microkernel]
+    KERNEL --> STORE[(Append-only Event Spine)]
+    KERNEL --> ART[Content-addressed Artifacts]
     KERNEL --> CTX[Context Compiler]
-    CTX --> GRAPH[Typed Context Projections]
-    GRAPH --> STORE[(Append-only Event Store)]
-
     KERNEL --> PAGER[Capability Pager]
-    PAGER --> INDEX[Lexical + Vector + Graph Index]
-    PAGER --> MODEL[Frontier Model Driver]
-
-    MODEL --> EXEC[Execution Coordinator]
+    KERNEL --> MODEL[Frontier Model Drivers]
+    MODEL --> EXEC[Canonical Invocation]
     EXEC --> POLICY[Effect Firewall]
-    POLICY --> WORKERS[Lazy Capability Workers]
-
-    WORKERS --> LOCAL[Local Resources]
-    WORKERS --> REMOTE[Remote Devices via SSH]
-    WORKERS --> MCP[MCP Servers]
-
-    EXEC --> STORE
-    STORE --> IMPROVE[Improvement Compiler]
-    IMPROVE --> PATCHES[Evidence-backed Patches]
+    POLICY --> WORKERS[Lazy Isolated Workers]
+    STORE --> CLIENTS[Unified Replay/Follow Stream]
+    STORE --> IMPROVE[Evidence-gated Improvement]
 ```
-
-The ownership boundary is strict:
 
 - **The model owns intent, strategy, and judgment.**
-- **The harness owns context, capabilities, effects, persistence, and execution lifetime.**
+- **The harness owns context, capabilities, effects, persistence, and execution
+  lifetime.**
 
-See [Architecture](docs/architecture.md) for the full design.
-
-## HTTP surface
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/health` | Liveness and durable event count |
-| `POST` | `/v1/events` | Append a typed event |
-| `GET` | `/v1/events` | Query durable events |
-| `GET` | `/v1/stream` | Replay then follow the event stream over SSE |
-| `GET` | `/v1/capabilities` | List or search capability cards |
-
-The event log is the source of truth. UI state, task state, memory projections, audits, replay tests, and later self-improvement signals are derived from it.
-
-## Repository layout
-
-```text
-apps/
-  daemon/           HTTP/SSE daemon
-  cli/              Local operator CLI
-crates/
-  protocol/         Stable wire and event types
-  event-store/      SQLite event spine
-  artifact-store/   SHA-256 content-addressed objects
-  capability/       Manifests, cards, retrieval seed
-  context/          Typed Context IR and compiler
-  policy/           Effect claims and bounded leases
-  kernel/           Composition root and event fan-out
-capabilities/core/  Built-in capability manifests
-docs/               Architecture, ADRs, and specifications
-```
-
-## Invariants
-
-1. No model call solely for housekeeping.
-2. No capability implementation loaded before use.
-3. No full tool catalogue in model context.
-4. No durable memory without provenance and scope.
-5. No agent inference represented as a user-confirmed fact.
-6. No external side effect without a typed effect claim.
-7. No credential material visible to the model.
-8. No privileged action without a bounded lease.
-9. No completion without evidence or an explicit unverified state.
-10. No permanent improvement from one successful trajectory.
-11. No self-edit outside a typed, versioned patch surface.
-12. No client-specific agent loop.
-13. No periodic LLM heartbeat when an event can wake the task.
-14. No subagent unless isolation or parallelism has measurable value.
-15. No mandatory infrastructure beyond one daemon and local storage.
-
-## Performance gates
-
-These are CI/benchmark targets, not marketing claims:
-
-| Metric | Initial gate |
-|---|---:|
-| Core daemon cold start, Linux x64 | `< 200 ms` |
-| Core idle RSS | `< 50 MiB` |
-| Event append p95 | `< 5 ms` |
-| Warm context + capability retrieval p95 | `< 30 ms` |
-| Stable harness prompt | `< 700 tokens` |
-| Housekeeping model calls on a simple turn | `0` |
-| Preloaded tool schemas p95 | `<= 6` |
-| Privileged actions without a lease | `0` |
-| Improvement patches without evidence | `0` |
-
-Model network time, optional embedding workers, browsers, and capability workers are measured separately from core overhead.
+See [`docs/architecture.md`](docs/architecture.md).
 
 ## Development
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+./scripts/agent-check.sh
 ```
 
-The next implementation sequence is tracked in [the roadmap](docs/roadmap.md).
+Long-running Codex or other coding-agent work starts at [`AGENTS.md`](AGENTS.md)
+and [`docs/agent/NEXT.md`](docs/agent/NEXT.md). A paste-ready autonomous-run
+prompt lives in [`docs/agent/CODEX-RUN.md`](docs/agent/CODEX-RUN.md).
+
+The next active slice is the provider-neutral model IR, specified in
+[`docs/agent/tasks/001-model-ir.md`](docs/agent/tasks/001-model-ir.md).
+
+## Invariants
+
+1. No housekeeping-only model call.
+2. No eager capability implementation loading.
+3. No full capability catalogue in model context.
+4. No durable memory without provenance and scope.
+5. No model inference represented as a user assertion.
+6. No public client choosing trusted event authority.
+7. No side effect authorized from a model's self-reported effect.
+8. No credential material visible to the model.
+9. No privileged action without a bounded lease.
+10. No verified completion without task-specific evidence.
+11. No permanent improvement from one successful trajectory.
+12. No periodic LLM heartbeat when an event can wake the task.
+13. No mandatory infrastructure beyond one daemon and local storage.
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Licensed under either Apache License 2.0 or MIT, at your option.

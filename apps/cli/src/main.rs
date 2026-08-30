@@ -1,6 +1,6 @@
-use anyhow::{Context, bail};
+use anyhow::Context;
 use clap::{Parser, Subcommand};
-use ditto_protocol::{CapabilitySearchQuery, EventActor, EventQuery, NewEvent};
+use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
 
 #[derive(Debug, Parser)]
@@ -16,26 +16,13 @@ struct Cli {
 enum Command {
     /// Check daemon health.
     Ping,
-    /// Record a user input event.
+    /// Submit trusted user input. The daemon chooses actor and event kind.
     Input {
         text: String,
-        #[arg(long, default_value = "local")]
-        session: String,
-        #[arg(long)]
-        task: Option<String>,
-    },
-    /// Append an arbitrary typed event.
-    Emit {
-        #[arg(long)]
-        kind: String,
-        #[arg(long, default_value = "user")]
-        actor: EventActor,
         #[arg(long)]
         session: Option<String>,
         #[arg(long)]
         task: Option<String>,
-        #[arg(long, default_value = "{}")]
-        payload: String,
     },
     /// Query durable events.
     Events {
@@ -81,33 +68,22 @@ async fn main() -> anyhow::Result<()> {
             session,
             task,
         } => {
-            let mut event = NewEvent::input(session, text);
-            event.task_id = task;
-            let value = append(&client, api, &event).await?;
-            print_json(&value)?;
-        }
-        Command::Emit {
-            kind,
-            actor,
-            session,
-            task,
-            payload,
-        } => {
-            if kind.trim().is_empty() {
-                bail!("--kind must not be empty");
-            }
-            let payload = serde_json::from_str(&payload).context("--payload must be valid JSON")?;
-            let event = NewEvent {
+            let command = SubmitInputCommand {
+                text,
                 session_id: session,
                 task_id: task,
-                actor,
-                kind,
-                payload,
-                causation_id: None,
-                correlation_id: None,
-                span_id: None,
             };
-            let value = append(&client, api, &event).await?;
+            let value = client
+                .post(format!("{api}/v1/commands/input"))
+                .json(&command)
+                .send()
+                .await
+                .context("failed to submit input")?
+                .error_for_status()
+                .context("input command failed")?
+                .json::<Value>()
+                .await
+                .context("invalid input response")?;
             print_json(&value)?;
         }
         Command::Events {
@@ -156,20 +132,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-async fn append(client: &reqwest::Client, api: &str, event: &NewEvent) -> anyhow::Result<Value> {
-    client
-        .post(format!("{api}/v1/events"))
-        .json(event)
-        .send()
-        .await
-        .context("failed to append event")?
-        .error_for_status()
-        .context("event append failed")?
-        .json::<Value>()
-        .await
-        .context("invalid append response")
 }
 
 fn print_json(value: &Value) -> anyhow::Result<()> {

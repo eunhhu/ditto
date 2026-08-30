@@ -62,6 +62,7 @@ pub enum ContextLens {
     Conversation,
 }
 
+/// Durable semantic content. Compiler authority is intentionally not stored here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextNode {
     pub id: String,
@@ -81,15 +82,18 @@ pub struct ContextNode {
     pub valid_from: Option<DateTime<Utc>>,
     #[serde(default)]
     pub valid_until: Option<DateTime<Utc>>,
-    pub token_cost: u32,
-    #[serde(default)]
-    pub pinned: bool,
-    #[serde(default)]
-    pub force_include: bool,
 }
 
 impl ContextNode {
     pub fn validate(&self) -> Result<(), ContextValidationError> {
+        if self.id.trim().is_empty() {
+            return Err(ContextValidationError::EmptyId);
+        }
+        if self.summary.trim().is_empty() {
+            return Err(ContextValidationError::EmptySummary {
+                node_id: self.id.clone(),
+            });
+        }
         if !self.confidence.is_finite() || !(0.0..=1.0).contains(&self.confidence) {
             return Err(ContextValidationError::InvalidConfidence {
                 node_id: self.id.clone(),
@@ -145,6 +149,9 @@ pub struct ContextEdge {
 
 impl ContextEdge {
     pub fn validate(&self) -> Result<(), ContextValidationError> {
+        if self.id.trim().is_empty() {
+            return Err(ContextValidationError::EmptyId);
+        }
         if !has_provenance(&self.source_event_ids) {
             return Err(ContextValidationError::MissingProvenance {
                 subject_id: self.id.clone(),
@@ -156,6 +163,10 @@ impl ContextEdge {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ContextValidationError {
+    #[error("context id is empty")]
+    EmptyId,
+    #[error("context node {node_id} has an empty summary")]
+    EmptySummary { node_id: String },
     #[error("context {subject_id} has no source event provenance")]
     MissingProvenance { subject_id: String },
     #[error("model-origin context {node_id} cannot be asserted")]
@@ -239,23 +250,102 @@ impl TaskSignature {
     }
 }
 
+/// Trusted, ephemeral compiler directive. It is not deserializable from model output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextDirective {
+    Ranked,
+    UserPinned,
+    PolicyRequired { reason: String },
+}
+
+impl ContextDirective {
+    const fn priority(&self) -> u8 {
+        match self {
+            Self::Ranked => 0,
+            Self::UserPinned => 1,
+            Self::PolicyRequired { .. } => 2,
+        }
+    }
+
+    fn receipt_reason(&self) -> String {
+        match self {
+            Self::Ranked => "task-relevance".into(),
+            Self::UserPinned => "user-pinned".into(),
+            Self::PolicyRequired { reason } => format!("policy-required: {reason}"),
+        }
+    }
+
+    const fn is_required(&self) -> bool {
+        !matches!(self, Self::Ranked)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextCandidate {
+    pub node: ContextNode,
+    pub directive: ContextDirective,
+}
+
+impl ContextCandidate {
+    pub fn ranked(node: ContextNode) -> Self {
+        Self {
+            node,
+            directive: ContextDirective::Ranked,
+        }
+    }
+
+    pub fn user_pinned(node: ContextNode) -> Self {
+        Self {
+            node,
+            directive: ContextDirective::UserPinned,
+        }
+    }
+
+    pub fn policy_required(node: ContextNode, reason: impl Into<String>) -> Self {
+        Self {
+            node,
+            directive: ContextDirective::PolicyRequired {
+                reason: reason.into(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextReceiptEntry {
     pub node_id: String,
+    pub source_event_ids: Vec<String>,
+    pub epistemic: EpistemicStatus,
     pub reason: String,
     pub score: f32,
     pub token_cost: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextExclusionReason {
+    Invalid,
+    DisputedOrExpired,
+    Irrelevant,
+    TokenBudget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextExclusion {
+    pub node_id: String,
+    pub reason: ContextExclusionReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextReceipt {
     pub included: Vec<ContextReceiptEntry>,
-    pub excluded_count: usize,
-    #[serde(default)]
-    pub invalid_count: usize,
+    pub excluded: Vec<ContextExclusion>,
     pub total_token_cost: u32,
     pub token_budget: u32,
-    pub over_budget: bool,
+    pub absolute_budget: u32,
+    pub over_soft_budget: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,15 +354,27 @@ pub struct CompiledContext {
     pub receipt: ContextReceipt,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ContextCompileError {
+    #[error("required context {node_id} is invalid: {reason}")]
+    InvalidRequiredContext { node_id: String, reason: String },
+    #[error(
+        "required context costs {used} tokens, exceeding the absolute ceiling {absolute_budget}"
+    )]
+    RequiredContextBudgetExceeded { used: u32, absolute_budget: u32 },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ContextCompiler {
     pub default_budget: u32,
+    pub absolute_budget: u32,
 }
 
 impl Default for ContextCompiler {
     fn default() -> Self {
         Self {
             default_budget: 900,
+            absolute_budget: 1_800,
         }
     }
 }
@@ -281,96 +383,132 @@ impl ContextCompiler {
     pub fn compile(
         &self,
         signature: &TaskSignature,
-        nodes: impl IntoIterator<Item = ContextNode>,
+        candidates: impl IntoIterator<Item = ContextCandidate>,
         token_budget: Option<u32>,
         now: DateTime<Utc>,
-    ) -> CompiledContext {
+    ) -> Result<CompiledContext, ContextCompileError> {
         let token_budget = token_budget.unwrap_or(self.default_budget);
         let query_tokens = tokenize(&signature.searchable_text());
-        let mut forced = Vec::new();
-        let mut candidates = Vec::new();
-        let mut excluded_count = 0;
-        let mut invalid_count = 0;
+        let mut required = Vec::new();
+        let mut ranked = Vec::new();
+        let mut excluded = Vec::new();
 
-        for node in nodes {
-            if node.validate().is_err() {
-                excluded_count += 1;
-                invalid_count += 1;
+        for candidate in candidates {
+            let node_id = candidate.node.id.clone();
+            if let Err(error) = candidate.node.validate() {
+                if candidate.directive.is_required() {
+                    return Err(ContextCompileError::InvalidRequiredContext {
+                        node_id,
+                        reason: error.to_string(),
+                    });
+                }
+                excluded.push(ContextExclusion {
+                    node_id,
+                    reason: ContextExclusionReason::Invalid,
+                    detail: Some(error.to_string()),
+                });
                 continue;
             }
-            if !node.is_valid_at(now) {
-                excluded_count += 1;
+            if !candidate.node.is_valid_at(now) {
+                excluded.push(ContextExclusion {
+                    node_id,
+                    reason: ContextExclusionReason::DisputedOrExpired,
+                    detail: None,
+                });
                 continue;
             }
 
-            let score = relevance_score(&node, &query_tokens);
-            if node.pinned || node.force_include {
-                forced.push((score, node));
+            let token_cost = estimate_tokens(&candidate.node.summary);
+            let score = relevance_score(&candidate.node, &query_tokens);
+            if candidate.directive.is_required() {
+                required.push((candidate.directive, score, token_cost, candidate.node));
             } else if score > 0.0 {
-                candidates.push((score, node));
+                ranked.push((candidate.directive, score, token_cost, candidate.node));
             } else {
-                excluded_count += 1;
+                excluded.push(ContextExclusion {
+                    node_id,
+                    reason: ContextExclusionReason::Irrelevant,
+                    detail: None,
+                });
             }
         }
 
-        forced.sort_by(stable_score_order);
-        candidates.sort_by(stable_score_order);
+        required.sort_by(candidate_order);
+        ranked.sort_by(candidate_order);
+
+        let required_cost = required
+            .iter()
+            .fold(0_u32, |total, (_, _, cost, _)| total.saturating_add(*cost));
+        if required_cost > self.absolute_budget {
+            return Err(ContextCompileError::RequiredContextBudgetExceeded {
+                used: required_cost,
+                absolute_budget: self.absolute_budget,
+            });
+        }
 
         let mut selected = Vec::new();
-        let mut receipt = Vec::new();
+        let mut included = Vec::new();
         let mut used = 0_u32;
 
-        for (score, node) in forced {
-            used = used.saturating_add(node.token_cost);
-            receipt.push(ContextReceiptEntry {
-                node_id: node.id.clone(),
-                reason: if node.pinned {
-                    "user-pinned".into()
-                } else {
-                    "forced-by-compiler-rule".into()
-                },
-                score,
-                token_cost: node.token_cost,
-            });
+        for (directive, score, token_cost, node) in required {
+            used = used.saturating_add(token_cost);
+            included.push(receipt_entry(&node, &directive, score, token_cost));
             selected.push(node);
         }
 
-        for (score, node) in candidates {
-            if used.saturating_add(node.token_cost) > token_budget {
-                excluded_count += 1;
+        for (directive, score, token_cost, node) in ranked {
+            if used.saturating_add(token_cost) > token_budget {
+                excluded.push(ContextExclusion {
+                    node_id: node.id,
+                    reason: ContextExclusionReason::TokenBudget,
+                    detail: None,
+                });
                 continue;
             }
-            used += node.token_cost;
-            receipt.push(ContextReceiptEntry {
-                node_id: node.id.clone(),
-                reason: "task-relevance".into(),
-                score,
-                token_cost: node.token_cost,
-            });
+            used += token_cost;
+            included.push(receipt_entry(&node, &directive, score, token_cost));
             selected.push(node);
         }
 
-        CompiledContext {
+        Ok(CompiledContext {
             nodes: selected,
             receipt: ContextReceipt {
-                included: receipt,
-                excluded_count,
-                invalid_count,
+                included,
+                excluded,
                 total_token_cost: used,
                 token_budget,
-                over_budget: used > token_budget,
+                absolute_budget: self.absolute_budget,
+                over_soft_budget: used > token_budget,
             },
-        }
+        })
     }
 }
 
-fn stable_score_order(
-    (left_score, left): &(f32, ContextNode),
-    (right_score, right): &(f32, ContextNode),
+fn candidate_order(
+    (left_directive, left_score, _, left): &(ContextDirective, f32, u32, ContextNode),
+    (right_directive, right_score, _, right): &(ContextDirective, f32, u32, ContextNode),
 ) -> std::cmp::Ordering {
-    right_score
-        .total_cmp(left_score)
+    right_directive
+        .priority()
+        .cmp(&left_directive.priority())
+        .then_with(|| right_score.total_cmp(left_score))
         .then_with(|| left.id.cmp(&right.id))
+}
+
+fn receipt_entry(
+    node: &ContextNode,
+    directive: &ContextDirective,
+    score: f32,
+    token_cost: u32,
+) -> ContextReceiptEntry {
+    ContextReceiptEntry {
+        node_id: node.id.clone(),
+        source_event_ids: node.source_event_ids.clone(),
+        epistemic: node.epistemic,
+        reason: directive.receipt_reason(),
+        score,
+        token_cost,
+    }
 }
 
 fn relevance_score(node: &ContextNode, query_tokens: &HashSet<String>) -> f32 {
@@ -393,7 +531,12 @@ fn relevance_score(node: &ContextNode, query_tokens: &HashSet<String>) -> f32 {
         (_, EpistemicStatus::Disputed) => -10.0,
     };
 
-    overlap * 5.0 + authority + node.confidence.clamp(0.0, 1.0)
+    overlap * 5.0 + authority + node.confidence
+}
+
+fn estimate_tokens(text: &str) -> u32 {
+    let estimate = text.chars().count().div_ceil(4).max(1);
+    u32::try_from(estimate).unwrap_or(u32::MAX)
 }
 
 fn has_provenance(source_event_ids: &[String]) -> bool {
@@ -403,7 +546,7 @@ fn has_provenance(source_event_ids: &[String]) -> bool {
 fn tokenize(input: &str) -> HashSet<String> {
     input
         .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| token.len() > 1)
+        .filter(|token| token.chars().count() > 1)
         .map(str::to_lowercase)
         .collect()
 }
@@ -413,12 +556,12 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        ContextCompiler, ContextEdge, ContextEdgeKind, ContextGraph, ContextLens, ContextNode,
-        ContextNodeKind, ContextOrigin, ContextScope, ContextValidationError, EpistemicStatus,
-        TaskSignature,
+        ContextCandidate, ContextCompileError, ContextCompiler, ContextEdge, ContextEdgeKind,
+        ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope,
+        ContextValidationError, EpistemicStatus, TaskSignature,
     };
 
-    fn node(id: &str, summary: &str, token_cost: u32, pinned: bool) -> ContextNode {
+    fn node(id: &str, summary: &str) -> ContextNode {
         ContextNode {
             id: id.into(),
             kind: ContextNodeKind::Constraint,
@@ -432,55 +575,71 @@ mod tests {
             supersedes: Vec::new(),
             valid_from: None,
             valid_until: None,
-            token_cost,
-            pinned,
-            force_include: false,
         }
     }
 
     #[test]
-    fn pinned_context_survives_the_budget() {
-        let compiler = ContextCompiler::default();
+    fn trusted_pin_survives_soft_budget_but_not_absolute_ceiling() {
+        let compiler = ContextCompiler {
+            default_budget: 5,
+            absolute_budget: 50,
+        };
         let signature = TaskSignature {
             request: "restart the home server service".into(),
             ..TaskSignature::default()
         };
-        let compiled = compiler.compile(
-            &signature,
-            [
-                node("pinned", "always ask before sudo", 60, true),
-                node("relevant", "home server service uses systemd", 60, false),
-            ],
-            Some(80),
-            Utc::now(),
-        );
+        let compiled = compiler
+            .compile(
+                &signature,
+                [
+                    ContextCandidate::user_pinned(node("pinned", "always ask before sudo")),
+                    ContextCandidate::ranked(node("relevant", "home server service uses systemd")),
+                ],
+                None,
+                Utc::now(),
+            )
+            .expect("compile context");
 
         assert!(compiled.nodes.iter().any(|item| item.id == "pinned"));
-        assert_eq!(compiled.receipt.total_token_cost, 60);
+        assert!(compiled.receipt.over_soft_budget);
+    }
+
+    #[test]
+    fn required_invalid_context_blocks_compilation() {
+        let mut invalid = node("policy", "never expose credentials");
+        invalid.source_event_ids.clear();
+        let error = ContextCompiler::default()
+            .compile(
+                &TaskSignature::default(),
+                [ContextCandidate::policy_required(
+                    invalid,
+                    "credential boundary",
+                )],
+                None,
+                Utc::now(),
+            )
+            .expect_err("required invalid context must block");
+        assert!(matches!(
+            error,
+            ContextCompileError::InvalidRequiredContext { .. }
+        ));
     }
 
     #[test]
     fn rejects_context_without_valid_provenance() {
         let mut graph = ContextGraph::default();
-        let mut durable = node("durable", "project constraint", 10, false);
+        let mut durable = node("durable", "project constraint");
         durable.source_event_ids.clear();
         assert!(matches!(
             graph.insert_node(durable),
             Err(ContextValidationError::MissingProvenance { .. })
         ));
 
-        let mut model_assertion = node("model", "model claim", 10, false);
+        let mut model_assertion = node("model", "model claim");
         model_assertion.origin = ContextOrigin::Model;
         assert!(matches!(
             graph.insert_node(model_assertion),
             Err(ContextValidationError::ModelCannotAssert { .. })
-        ));
-
-        let mut invalid_confidence = node("confidence", "bad confidence", 10, false);
-        invalid_confidence.confidence = 1.1;
-        assert!(matches!(
-            graph.insert_node(invalid_confidence),
-            Err(ContextValidationError::InvalidConfidence { .. })
         ));
     }
 
@@ -488,10 +647,10 @@ mod tests {
     fn validates_edge_provenance_and_endpoints() {
         let mut graph = ContextGraph::default();
         graph
-            .insert_node(node("claim", "service state", 10, false))
+            .insert_node(node("claim", "service state"))
             .expect("insert claim");
         graph
-            .insert_node(node("evidence", "service output", 10, false))
+            .insert_node(node("evidence", "service output"))
             .expect("insert evidence");
         graph
             .insert_edge(ContextEdge {
@@ -507,24 +666,43 @@ mod tests {
 
     #[test]
     fn authority_does_not_make_irrelevant_context_eligible() {
-        let compiler = ContextCompiler::default();
         let signature = TaskSignature {
             request: "restart database service".into(),
             ..TaskSignature::default()
         };
-        let compiled = compiler.compile(
-            &signature,
-            [node(
-                "irrelevant",
-                "preferred vacation destination",
-                10,
-                false,
-            )],
-            None,
-            Utc::now(),
-        );
+        let compiled = ContextCompiler::default()
+            .compile(
+                &signature,
+                [ContextCandidate::ranked(node(
+                    "irrelevant",
+                    "preferred vacation destination",
+                ))],
+                None,
+                Utc::now(),
+            )
+            .expect("compile context");
 
         assert!(compiled.nodes.is_empty());
-        assert_eq!(compiled.receipt.excluded_count, 1);
+        assert_eq!(compiled.receipt.excluded.len(), 1);
+    }
+
+    #[test]
+    fn token_cost_is_derived_instead_of_accepted_from_input() {
+        let signature = TaskSignature {
+            request: "database".into(),
+            ..TaskSignature::default()
+        };
+        let compiled = ContextCompiler::default()
+            .compile(
+                &signature,
+                [ContextCandidate::ranked(node(
+                    "cost",
+                    "database database database database",
+                ))],
+                None,
+                Utc::now(),
+            )
+            .expect("compile context");
+        assert!(compiled.receipt.included[0].token_cost > 0);
     }
 }

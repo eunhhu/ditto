@@ -1,6 +1,7 @@
 # Capability Manifest
 
-A capability is metadata plus an isolated implementation. Merely discovering a manifest must not start its runtime.
+A capability is metadata plus an isolated implementation. Discovering a
+manifest must not start its runtime.
 
 ```toml
 id = "device.process.run"
@@ -26,8 +27,19 @@ aliases = ["remote command"]
 complements = ["artifact.read"]
 
 [effects]
-maximum = "privileged"
 resources = ["device:{device_id}", "path:{cwd}/**"]
+
+[effects.minimum]
+access = "metadata"
+mutation = "none"
+externality = "local"
+privilege = "user"
+
+[effects.maximum]
+access = "credentials"
+mutation = "irreversible"
+externality = "network"
+privilege = "elevated"
 
 [policy]
 approval = "risk-based"
@@ -37,17 +49,47 @@ secret_handles = ["device-credential:{device_id}"]
 default = "exit-code-and-expected-output"
 ```
 
+## Effect profile
+
+Effects are orthogonal dimensions, not one numeric danger rank.
+
+```text
+access:       none | metadata | content | credentials
+mutation:     none | reversible | irreversible
+externality:  local | network | human-communication
+privilege:    user | elevated
+```
+
+`minimum` controls runtime retrieval eligibility. `maximum` documents the outer
+implementation boundary. Neither authorizes a call. A capability-specific
+normalizer derives the exact invocation effect from validated arguments before
+policy runs.
+
 ## Retrieval contract
 
-Descriptions, intents, aliases, negative examples, prerequisites, complements, effect metadata, placement, health, and observed latency may influence ranking. Embedding similarity only narrows candidates; it never bypasses hard filters or policy.
+Catalogue search may inspect incomplete metadata. Runtime search is fail closed:
+installed placement, prerequisites, allowed capability IDs, and an effect ceiling
+must all permit the manifest's minimum effect.
+
+Available placements are a set, not one global location. A remote primary tool
+may therefore compose with a local artifact reader. Complements are validated at
+catalogue load and deduplicated across ranked roots and expansions.
+
+Descriptions, intents, aliases, negative examples, prerequisites, complements,
+health, and observed latency may influence ranking. Embedding similarity only
+narrows candidates; it never bypasses hard filters or policy.
 
 ## Runtime contract
 
-Runtime types are `builtin`, `process`, `wasi`, `mcp`, and `remote`. Non-builtin implementations run outside the daemon. The invocation envelope will include a run ID, capability ID and version, normalized arguments, placement, effect claim, lease handle, timeout, resource limits, idempotency key, and expected evidence.
+Runtime types are `builtin`, `process`, `wasi`, `mcp`, and `remote`. Non-builtin
+implementations run outside the daemon. The canonical invocation will include a
+run ID, capability ID and version, normalized arguments, resolved placement,
+derived effect profile, lease handle, timeout, resource limits, idempotency key,
+and expected evidence.
 
 ## Disclosure levels
 
-1. Namespace map: stable, tiny, normally present.
-2. Capability card: ID, purpose, placement, and maximum effect.
-3. Full input/output schema: paged into the current execution epoch.
-4. Runtime: started immediately before the first invocation and stopped after its idle TTL.
+1. Namespace map: stable and tiny.
+2. Capability card: ID, purpose, placements, and minimum/maximum effects.
+3. Full input/output schema: paged into one execution epoch.
+4. Runtime: started immediately before first invocation and stopped after idle TTL.

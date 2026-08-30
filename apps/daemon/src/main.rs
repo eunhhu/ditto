@@ -1,6 +1,6 @@
 use std::{convert::Infallible, net::SocketAddr, path::PathBuf, time::Duration};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use async_stream::stream;
 use axum::{
     Json, Router,
@@ -15,13 +15,17 @@ use axum::{
 use clap::Parser;
 use ditto_kernel::{DittoKernel, KernelConfig, KernelError};
 use ditto_protocol::{
-    AppendEventResponse, CapabilitySearchQuery, EventQuery, EventRecord, HealthResponse, NewEvent,
+    CapabilitySearchQuery, EventQuery, EventRecord, HealthResponse, SubmitInputCommand,
+    SubmitInputResponse,
 };
 use futures_core::Stream;
+use futures_util::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+const DEFAULT_REPLAY_PAGE_SIZE: usize = 500;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -36,6 +40,9 @@ struct Args {
     capabilities_dir: PathBuf,
     #[arg(long, env = "DITTO_BIND", default_value = "127.0.0.1:8787")]
     bind: SocketAddr,
+    /// Explicit escape hatch until authenticated remote ingress exists.
+    #[arg(long, env = "DITTO_ALLOW_UNAUTHENTICATED_REMOTE")]
+    allow_unauthenticated_remote: bool,
 }
 
 #[derive(Clone)]
@@ -54,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    validate_bind(args.bind, args.allow_unauthenticated_remote)?;
     let kernel = DittoKernel::open(KernelConfig::new(args.data_dir, args.capabilities_dir))
         .context("failed to initialize Ditto kernel")?;
     kernel
@@ -63,7 +71,8 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState { kernel };
     let app = Router::new()
         .route("/health", get(health))
-        .route("/v1/events", post(append_event).get(list_events))
+        .route("/v1/commands/input", post(submit_input))
+        .route("/v1/events", get(list_events))
         .route("/v1/stream", get(stream_events))
         .route("/v1/capabilities", get(capabilities))
         .layer(TraceLayer::new_for_http())
@@ -81,23 +90,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_bind(bind: SocketAddr, allow_unauthenticated_remote: bool) -> anyhow::Result<()> {
+    if !bind.ip().is_loopback() && !allow_unauthenticated_remote {
+        bail!(
+            "refusing unauthenticated non-loopback bind {bind}; use an authenticated gateway or pass --allow-unauthenticated-remote explicitly"
+        );
+    }
+    Ok(())
+}
+
 async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, ApiError> {
     Ok(Json(HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         durable_events: state.kernel.event_count()?,
+        latest_seq: state.kernel.latest_event_seq()?,
     }))
 }
 
-async fn append_event(
+async fn submit_input(
     State(state): State<AppState>,
-    Json(event): Json<NewEvent>,
-) -> Result<(StatusCode, Json<AppendEventResponse>), ApiError> {
-    if event.kind.trim().is_empty() {
-        return Err(ApiError::bad_request("event kind must not be empty"));
-    }
-    let event = state.kernel.append_event(event)?;
-    Ok((StatusCode::CREATED, Json(AppendEventResponse { event })))
+    Json(command): Json<SubmitInputCommand>,
+) -> Result<(StatusCode, Json<SubmitInputResponse>), ApiError> {
+    let event = state.kernel.record_user_input(command)?;
+    Ok((StatusCode::CREATED, Json(SubmitInputResponse { event })))
 }
 
 async fn list_events(
@@ -128,51 +144,102 @@ async fn stream_events(
     State(state): State<AppState>,
     Query(query): Query<EventQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ApiError> {
-    let initial = state.kernel.list_events(&query)?;
+    // Subscribe before capturing the high-water mark. Events appended in between are
+    // present in both the durable replay and the receiver and are deduplicated by seq.
     let kernel = state.kernel.clone();
-    let filter = query.clone();
     let mut receiver = kernel.subscribe();
+    let initial_high_water = kernel.latest_event_seq()?;
+    let page_size = query
+        .limit
+        .unwrap_or(DEFAULT_REPLAY_PAGE_SIZE)
+        .clamp(1, 1_000);
+    let filter = query;
 
     let output = stream! {
-        let mut last_seq = filter.after_seq.unwrap_or(0);
+        let mut cursor = filter.after_seq.unwrap_or(0).max(0);
 
-        for event in initial {
-            if event.seq > last_seq {
-                last_seq = event.seq;
-                yield Ok(encode_sse(&event));
+        let initial = replay_events(
+            kernel.clone(),
+            filter.clone(),
+            cursor,
+            initial_high_water,
+            page_size,
+        );
+        futures_util::pin_mut!(initial);
+        while let Some(result) = initial.next().await {
+            match result {
+                Ok(event) => yield Ok(encode_sse(&event)),
+                Err(error) => {
+                    error!(%error, cursor, initial_high_water, "initial event replay failed");
+                    return;
+                }
             }
         }
+        cursor = initial_high_water;
 
-        loop {
+        'live: loop {
             match receiver.recv().await {
                 Ok(event) => {
-                    if event.seq > last_seq && filter.matches(&event) {
-                        last_seq = event.seq;
-                        yield Ok(encode_sse(&event));
+                    if event.seq <= cursor {
+                        continue;
                     }
-                }
-                Err(RecvError::Lagged(skipped)) => {
-                    warn!(skipped, last_seq, "event stream lagged; replaying from durable store");
-                    let replay_query = EventQuery {
-                        after_seq: Some(last_seq),
-                        limit: Some(1_000),
-                        session_id: filter.session_id.clone(),
-                        task_id: filter.task_id.clone(),
-                    };
-                    match kernel.list_events(&replay_query) {
-                        Ok(events) => {
-                            for event in events {
-                                if event.seq > last_seq {
-                                    last_seq = event.seq;
-                                    yield Ok(encode_sse(&event));
+                    if event.seq > cursor.saturating_add(1) {
+                        let gap_high_water = event.seq - 1;
+                        warn!(cursor, gap_high_water, "event stream observed a sequence gap; replaying durable events");
+                        let gap = replay_events(
+                            kernel.clone(),
+                            filter.clone(),
+                            cursor,
+                            gap_high_water,
+                            page_size,
+                        );
+                        futures_util::pin_mut!(gap);
+                        while let Some(result) = gap.next().await {
+                            match result {
+                                Ok(replayed) => yield Ok(encode_sse(&replayed)),
+                                Err(error) => {
+                                    error!(%error, cursor, gap_high_water, "gap recovery failed");
+                                    break 'live;
                                 }
                             }
                         }
+                        cursor = gap_high_water;
+                    }
+
+                    if event.seq > cursor {
+                        if filter.matches_scope(&event) {
+                            yield Ok(encode_sse(&event));
+                        }
+                        cursor = event.seq;
+                    }
+                }
+                Err(RecvError::Lagged(skipped)) => {
+                    let catch_up_high_water = match kernel.latest_event_seq() {
+                        Ok(seq) => seq,
                         Err(error) => {
-                            error!(%error, "failed to recover lagged event stream");
+                            error!(%error, "failed to capture lag-recovery high-water mark");
                             break;
                         }
+                    };
+                    warn!(skipped, cursor, catch_up_high_water, "event stream lagged; replaying from durable storage");
+                    let catch_up = replay_events(
+                        kernel.clone(),
+                        filter.clone(),
+                        cursor,
+                        catch_up_high_water,
+                        page_size,
+                    );
+                    futures_util::pin_mut!(catch_up);
+                    while let Some(result) = catch_up.next().await {
+                        match result {
+                            Ok(event) => yield Ok(encode_sse(&event)),
+                            Err(error) => {
+                                error!(%error, cursor, catch_up_high_water, "lag recovery failed");
+                                break 'live;
+                            }
+                        }
                     }
+                    cursor = catch_up_high_water;
                 }
                 Err(RecvError::Closed) => break,
             }
@@ -184,6 +251,44 @@ async fn stream_events(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+fn replay_events(
+    kernel: DittoKernel,
+    filter: EventQuery,
+    after_seq: i64,
+    through_seq: i64,
+    page_size: usize,
+) -> impl Stream<Item = Result<EventRecord, KernelError>> {
+    stream! {
+        let mut cursor = after_seq.max(0);
+        while cursor < through_seq {
+            let page = kernel.list_events_through(
+                &EventQuery {
+                    after_seq: Some(cursor),
+                    limit: Some(page_size),
+                    session_id: filter.session_id.clone(),
+                    task_id: filter.task_id.clone(),
+                },
+                through_seq,
+            );
+            match page {
+                Ok(events) => {
+                    if events.is_empty() {
+                        break;
+                    }
+                    for event in events {
+                        cursor = event.seq;
+                        yield Ok(event);
+                    }
+                }
+                Err(error) => {
+                    yield Err(error);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 fn encode_sse(event: &EventRecord) -> SseEvent {
@@ -207,21 +312,17 @@ struct ApiError {
     message: String,
 }
 
-impl ApiError {
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.into(),
-        }
-    }
-}
-
 impl From<KernelError> for ApiError {
     fn from(error: KernelError) -> Self {
-        error!(%error, "kernel operation failed");
+        let status = if matches!(&error, KernelError::InvalidCommand(_)) {
+            StatusCode::BAD_REQUEST
+        } else {
+            error!(%error, "kernel operation failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
         Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "kernel operation failed".into(),
+            status,
+            message: error.to_string(),
         }
     }
 }
@@ -262,4 +363,59 @@ async fn shutdown_signal() {
     }
 
     info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::StreamExt;
+    use tempfile::tempdir;
+
+    use super::{replay_events, validate_bind};
+    use ditto_kernel::{DittoKernel, KernelConfig};
+    use ditto_protocol::{EventQuery, SubmitInputCommand};
+
+    #[test]
+    fn refuses_remote_bind_without_an_explicit_escape_hatch() {
+        let remote = "0.0.0.0:8787".parse().expect("socket address");
+        assert!(validate_bind(remote, false).is_err());
+        assert!(validate_bind(remote, true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn durable_replay_crosses_multiple_pages_without_gaps() {
+        let directory = tempdir().expect("temporary directory");
+        let kernel = DittoKernel::open(KernelConfig::new(
+            directory.path().join("data"),
+            directory.path().join("capabilities"),
+        ))
+        .expect("open kernel");
+        for index in 0..2_005 {
+            kernel
+                .record_user_input(SubmitInputCommand {
+                    text: format!("event-{index}"),
+                    session_id: Some("session".into()),
+                    task_id: None,
+                })
+                .expect("record fixture");
+        }
+        let high_water = kernel.latest_event_seq().expect("latest sequence");
+        let replay = replay_events(
+            kernel,
+            EventQuery {
+                session_id: Some("session".into()),
+                ..EventQuery::default()
+            },
+            0,
+            high_water,
+            137,
+        );
+        futures_util::pin_mut!(replay);
+        let mut events = Vec::new();
+        while let Some(event) = replay.next().await {
+            events.push(event.expect("replay event"));
+        }
+
+        assert_eq!(events.len(), 2_005);
+        assert!(events.windows(2).all(|pair| pair[1].seq == pair[0].seq + 1));
+    }
 }

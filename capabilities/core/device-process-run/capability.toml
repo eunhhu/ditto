@@ -25,11 +25,22 @@ negative_examples = [
   "reboot the entire machine when only one service should restart",
 ]
 aliases = ["remote command", "ssh command", "run process"]
-complements = ["artifact.read", "device.process.wait"]
+complements = ["artifact.read"]
 
 [effects]
-maximum = "privileged"
 resources = ["device:{device_id}", "path:{cwd}/**"]
+
+[effects.minimum]
+access = "metadata"
+mutation = "none"
+externality = "local"
+privilege = "user"
+
+[effects.maximum]
+access = "credentials"
+mutation = "irreversible"
+externality = "network"
+privilege = "elevated"
 
 [policy]
 approval = "risk-based"

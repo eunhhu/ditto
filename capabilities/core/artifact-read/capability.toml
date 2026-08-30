@@ -23,8 +23,19 @@ aliases = ["read output", "open artifact"]
 complements = []
 
 [effects]
-maximum = "read"
 resources = ["artifact:{artifact_id}"]
+
+[effects.minimum]
+access = "content"
+mutation = "none"
+externality = "local"
+privilege = "user"
+
+[effects.maximum]
+access = "content"
+mutation = "none"
+externality = "local"
+privilege = "user"
 
 [policy]
 approval = "never"
