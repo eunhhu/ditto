@@ -252,6 +252,40 @@ it does not rank candidates or assign retrieval relevance. `ditto-context`
 owns ranking after this gate. A requested context-result limit must be in 1
 through 256. These are V2 rules, not retroactive legacy compiler limits.
 
+#### Joint retrieval snapshot authority
+
+The joint retrieval path must establish a bounded canonical view before it
+returns any context candidates. While holding the shared kernel retrieval gate
+and the projection synchronization gate, it captures one event-spine high-water
+and walks ordered, bounded pages of canonical event history through that
+high-water for the requested namespace: all session-scoped rows for the
+requested session plus task-scoped rows for the exact requested task. This
+canonical view is bounded by the same pre-filter rule as projection search:
+the canonical 10,001st selected scope row and the cache 10,001st selected scope
+row each fail with a typed scan-limit error before active, supersession, or
+relevance filtering. The canonical walk uses O(session-history) time and
+O(page + 10,000 scoped identities/digests) memory; it does not retain or
+materialize an unbounded session history.
+
+Before exposing the detached snapshot, one consistent read transaction in the
+projection database compares the canonical view with the exact projected scope
+view. The comparison covers the complete projected row-key set, each row's
+task/event sequence and event ID, each serialized-node digest, and the exact
+incoming and outgoing supersession-edge shapes. The canonical event history is
+the authority for every comparison input: a projection row may neither
+authorize, hide, rewrite, nor otherwise alter a context node. If the comparison
+finds a mismatch, the projection resets and replays once at the same captured
+high-water, then performs one recheck. A persistent mismatch returns a typed
+projection/retrieval failure, and no snapshot or partial result is returned.
+There is no source mutation in this process.
+
+Concurrent or out-of-band projection-cache writers are unsupported in this
+slice. Nevertheless, the final comparison and snapshot materialization use one
+projection read transaction so the supported in-process path has no internal
+time-of-check/time-of-use gap. `capture_snapshot` remains a low-level derived
+inspection helper only; its result has no authority unless this canonical
+compare-and-snapshot procedure has succeeded.
+
 ### One shared bounded retrieval contract
 
 Add a dependency-light internal `ditto-retrieval` crate. It owns the canonical
