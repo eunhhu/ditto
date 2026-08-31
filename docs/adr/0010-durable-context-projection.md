@@ -172,13 +172,19 @@ typed failure. The recheck verifies replay integrity only; it cannot authorize
 an identity or supersession decision, and cache-only rows never create
 authority.
 
+Kernel open eagerly synchronizes the projection through the current canonical
+high-water before returning. Malformed or otherwise unreplayable canonical
+history makes open fail closed with a typed projection error. Recovery appends
+and publishes nothing; it only reconstructs derived state.
+
 `KernelInner` owns one in-process context-admission mutex shared by every
 `DittoKernel` clone. Admission holds it continuously while it:
 
-1. captures an event-spine high-water and resolves identity and exact-scope
-   supersession from bounded canonical session-history pages;
-2. catches the projection up to that high-water and validates scope, sources,
-   origin evidence, causation, validity, and durable node structure;
+1. captures one event-spine high-water;
+2. catches the projection up to that high-water, then resolves identity and
+   exact-scope supersession from bounded canonical session-history pages and
+   validates scope, sources, origin evidence, causation, validity, and durable
+   node structure;
 3. appends the canonical `context.node.recorded` event, which is the durable
    acceptance linearization point;
 4. attempts projection synchronization and checkpointing through that exact
@@ -186,6 +192,14 @@ authority.
 5. live-publishes the newly appended durable event exactly once regardless of
    synchronization success or failure, then returns the corresponding typed
    outcome.
+
+Canonical identity resolution may begin before step 2, but no duplicate or
+collision outcome is returned until synchronization and the relevant
+cache-integrity rebuild/recheck have succeeded at the captured high-water. If
+the projection remains unavailable, the attempt fails before append with a
+typed projection error; after recovery, the duplicate outcome references the
+canonical committed event without comparing payloads. This reconciles early
+source-authoritative lookup with the catch-up-first retry contract.
 
 The joint retrieval path acquires the same mutex while it synchronizes and
 captures its projection snapshot. Acceptance always linearizes at the event
@@ -195,11 +209,16 @@ that acquires the mutex afterward observes the node when active for that query.
 A retrieval that captured an earlier high-water may return the earlier snapshot.
 
 If exact-event synchronization fails after append, the node is still durably
-accepted. The API live-publishes that durable event before returning the typed
+accepted. "Publishes exactly once" means one nonblocking broadcast-send attempt
+after append; a receiver subscribed beforehand and not already lagged observes
+one identical record. Absence of receivers or receiver lag does not revoke the
+durable acceptance. The API makes that send attempt before returning the typed
 `committed_but_projection_unavailable` outcome. That outcome contains the full
 durable `EventRecord` (and therefore its `seq` and `event_id`) plus a redacted
 projection error of at most 4,096 UTF-8 bytes; oversized detail is replaced by a
-fixed bound message. No later event is needed to flush publication. A later
+fixed `projection error detail exceeds 4096 bytes` message. The public outcome
+and its `Error::source` chain retain only this sanitized value, never the raw
+SQLite/I/O error or an absolute database path. No later event is needed to flush publication. A later
 retrieval or kernel open synchronizes the accepted event from the event spine.
 The committed-beyond-projection outcome carries the event record so callers do
 not retry blindly. Any retry or collision catches up first and finds the
@@ -214,6 +233,12 @@ out-of-band event-store writers are explicitly unsupported. The mutex is not a
 cross-process lock and does not turn the source append plus cache commit into a
 cross-database transaction. Crash recovery still replays the event spine, which
 is authoritative over every projection row and checkpoint.
+
+The mutex orders context admissions and context snapshot capture, not unrelated
+input, artifact, or turn event appenders on the same `KernelInner`. Those
+appenders may interleave after the captured high-water, so a context event is
+not required to receive `high_water + 1`. Post-append catch-up uses the exact
+returned event sequence and ID and includes any intervening canonical events.
 
 Context V2 projection search scope-selects every session-scoped projected row
 for the requested session plus every task-scoped row for the exact requested
