@@ -3,19 +3,22 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
-## Active — 004 Durable context projection and shared retrieval query
+## Next priority — Canonical capability invocation and effect derivation
 
-Contract: [tasks/004-durable-context-projection.md](tasks/004-durable-context-projection.md)
-
-Implement the accepted Task 004 contract in dependency order. The active slice
-is limited to task/session-scoped system-authored context events, a deletable and
-rebuildable projection, and one bounded lexical query contract shared by context
-and capability retrieval. An optional injected embedding seam may be tested,
-but production remains honestly lexical-only and gains no public context
-mutation route or housekeeping model call.
+This remains an unimplemented priority, not an active contract. Define its ADR
+and task file before changing the frontier or connecting an effectful executor.
+The slice must derive a canonical effect profile from validated capability
+arguments and authorize it with a bounded lease; it must not add a fake success
+path for the still-deferred worker lifecycle.
 
 ## Completed
 
+- [`004 Durable context projection and shared retrieval query`](tasks/004-durable-context-projection.md):
+  canonical system-authored session/task context events, a separately stored
+  rebuildable projection, kernel-only trusted admission, one bounded V2 query
+  shared by context and capability retrieval, and an all-or-nothing read-only
+  working set. Production remains lexical-only; injected embedding failures are
+  typed and never fall back or return a partial result.
 - [`003 Read-only tool continuation loop`](tasks/003-read-only-tool-loop.md):
   exact `artifact.read` manifest and full schema page-in, bounded same-scope
   verified reads, same-epoch provider-neutral continuation, durable versioned
@@ -36,7 +39,6 @@ mutation route or housekeeping model call.
 
 ## Later
 
-- canonical capability invocation and effect derivation;
 - device registry and local process worker;
 - SSH as placement transport;
 - gateway inspector and approval UX;

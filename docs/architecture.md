@@ -25,7 +25,7 @@ clients and gateways
        ▼
 trusted ingress ──► semantic kernel ──► append-only event spine
                          │                    │
-                         │                    ├─ projections
+                         │                    ├─ context-projection.db
                          │                    └─ replay/follow stream
                          ├─ context compiler
                          ├─ capability pager
@@ -37,6 +37,13 @@ trusted ingress ──► semantic kernel ──► append-only event spine
 Public clients never append arbitrary internal events. The kernel assigns actor
 and kind, persists the event, then publishes it. SQLite sequence is the durable
 resume cursor; ULID is the global event identity.
+
+Durable context uses the same authority boundary: the kernel admits only a
+trusted, non-deserializable session/task draft and emits the fixed
+system-authored `context.node.recorded` event. The event spine remains the sole
+durable source of truth. The separately stored `context-projection.db` is a
+checkpointed, WAL-backed cache that can be deleted and rebuilt from canonical
+events; it never authorizes admission or replaces event history.
 
 The SSE adapter subscribes before capturing a high-water mark, replays the
 bounded snapshot in pages, deduplicates buffered live events, and recovers gaps
@@ -50,7 +57,12 @@ constraints, and expected effects. Retrieval spans personal, task, environment,
 and conversation lenses.
 
 Durable nodes carry origin, epistemic status, scope, confidence, provenance,
-validity, and supersession. Compiler authority is separate:
+validity, and supersession. Version 1 admits only session and task scope through
+the kernel admission boundary; public clients and models cannot mint these
+records. Identity is session-wide `(session_id, node_id)`, while supersession is
+restricted to the exact scope. Canonical admission requires matching actor
+evidence for the claimed origin and derives causation from the cited source with
+the greatest durable sequence. Compiler authority is separate:
 
 ```text
 ranked | user-pinned | policy-required(reason)
@@ -59,6 +71,14 @@ ranked | user-pinned | policy-required(reason)
 A model cannot create a pinned node by serializing a field. Token cost is derived
 locally. Required invalid context blocks the request rather than disappearing
 silently.
+
+Context and capability retrieval can be composed through one bounded V2
+`TaskQuery`. The read-only joint working-set operation captures one projection
+high-water, compiles the context snapshot, and pages capabilities while
+preserving lexical eligibility and capability hard filters. Production is
+honestly lexical-only. An explicitly injected embedding provider is a
+test/explicit-local-composition seam; provider failure is typed and never
+silently falls back to lexical-only or returns a partial working set.
 
 ## Capability pager
 
@@ -75,6 +95,11 @@ Runtime search fails closed against installed placements, prerequisites, allowed
 IDs, and minimum effect. Available placements are a set so a remote primary
 operation can compose with a local artifact reader. An execution epoch has a
 bounded, append-only working set to preserve prompt-cache ordering.
+
+The joint context/capability working set shares the bounded V2 query but does
+not expose embedding vectors or capability credentials to the model. Capability
+retrieval remains read-only in this slice; execution and effectful invocation
+are separate deferred boundaries.
 
 Capability manifests are runtime input. Unknown complements and malformed
 runtime metadata fail catalogue load.

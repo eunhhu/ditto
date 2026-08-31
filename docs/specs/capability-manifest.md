@@ -75,9 +75,11 @@ Available placements are a set, not one global location. A remote primary tool
 may therefore compose with a local artifact reader. Complements are validated at
 catalogue load and deduplicated across ranked roots and expansions.
 
-Descriptions, intents, aliases, negative examples, prerequisites, complements,
-health, and observed latency may influence ranking. Embedding similarity only
-narrows candidates; it never bypasses hard filters or policy.
+Descriptions, intents, aliases, negative examples, prerequisites, and
+complements may influence the historical catalogue ranking. Health and observed
+latency are legacy or future ranking signals only; neither is part of the V2
+ranking tuple. Embedding similarity only reranks already eligible candidates; it
+never bypasses hard filters or policy.
 
 The shared-query V2 path is separately bounded and typed; the historical
 raw-string search remains unchanged. V2 counts installed manifests before
@@ -88,10 +90,18 @@ capability ID or alias; all other query fields are lexical-only. Negative
 examples are whole normalized phrase denials for both roots and complements.
 
 V2 ranks eligible roots by exactness, optional embedding similarity, lexical
-overlap, preferred placement, and finally capability ID. It then emits each
-root followed by its direct, runtime-eligible, non-denied complements in
-manifest order, deduplicating IDs and respecting the expanded capacity.
-Provider-backed retrieval embeds roots only; complements are never embedded.
+overlap, preferred placement, and finally capability ID. Every active,
+positively eligible root, including an exact root, receives one document
+embedding when a provider is configured; complements are never embedded. It
+then emits each root followed by its direct, runtime-eligible, non-denied
+complements in manifest order, deduplicating IDs and respecting the expanded
+capacity.
+
+The V2 path consumes the one validated retrieval query constructed for a joint
+working set. Context and capability retrieval share its normalized terms and,
+when configured, its query embedding and descriptor. Retrieval is read-only:
+capability ranking does not append events, mutate context, persist vectors, or
+invoke a model.
 The exact manifest-document grammar and provider/error ordering are frozen in
 ADR 0010.
 

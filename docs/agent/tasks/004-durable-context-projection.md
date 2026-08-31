@@ -2,7 +2,7 @@
 
 ## Status
 
-Active under [ADR 0010](../../adr/0010-durable-context-projection.md).
+Completed under [ADR 0010](../../adr/0010-durable-context-projection.md).
 
 ## Objective
 
