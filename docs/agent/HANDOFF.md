@@ -48,7 +48,9 @@
 ## Latest verified slice
 
 - Task 004 remains in progress. Its shared retrieval, protocol/event-store,
-  context, capability, and standalone projection foundations are complete.
+  context, capability, standalone projection, and trusted kernel admission
+  slices are complete; joint working-set composition is the next unverified
+  slice.
   `ditto-retrieval` owns bounded canonical task queries, optional injected
   embeddings, exact operational limits, descriptor continuity, and typed
   fail-closed provider errors. Context and capability V2 paths consume the same
@@ -69,6 +71,32 @@
   `./scripts/agent-check.sh` repository gate passed after both the authenticated
   ranking and projection commits; independent code review and manual QA cleared
   with no blockers.
+- `DittoKernel::admit_context_node` accepts only a non-deserializable trusted
+  draft with no actor, kind, causation, correlation, span, event identity,
+  sequence, or timestamp authority. One mutex shared by every clone of a
+  `KernelInner` orders pre-sync, canonical validation, durable append, exact
+  post-append projection catch-up, and one live publication attempt. Source
+  causation is the greatest durable cited sequence, identity is session-wide,
+  and unsupported scopes, unattested origins, invalid provenance, duplicate
+  identities, and exact bound failures are rejected before append or publish.
+- A durable append is acceptance. If post-append projection catch-up fails, the
+  exact committed record is still published once and returned inside the typed
+  `committed_but_projection_unavailable` outcome with a path-free diagnostic
+  bounded to 4,096 UTF-8 bytes. Recovery synchronizes canonical history without
+  another append or live publication; a retry returns the committed identity as
+  a duplicate without comparing payloads. Kernel open eagerly replays the
+  projection and publishes nothing. This slice supports one `KernelInner` and
+  its clones as writers for a data directory; separately opened kernels,
+  cross-process writers, and out-of-band event-store writers remain explicitly
+  unsupported.
+- The admission slice passed 48 kernel tests (five kernel unit tests, five
+  durable-admission integration tests, and the 38 Task 003 turn regressions),
+  two compile-fail doctests, strict Clippy, Rust 1.88 package checking,
+  formatting, and diff hygiene. The full `./scripts/agent-check.sh` repository
+  gate passed. Real SQLite regressions cover an intervening event sequence,
+  publish-after-checkpoint observation, short-path redaction, multibyte detail
+  overflow, and post-append recovery. Independent code review and manual QA
+  cleared with no blockers.
 - Task 003 is complete under ADR 0009. `DittoKernel::run_artifact_read_turn`
   compiles trusted context, validates its provenance cutoff, pages the exact
   installed manifest/card/full schema into one bounded execution epoch, accepts
