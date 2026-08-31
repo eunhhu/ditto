@@ -411,6 +411,7 @@ name = "ditto-context"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ditto-retrieval",
  "serde",
  "serde_json",
  "thiserror",

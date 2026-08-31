@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chrono.workspace = true
+ditto-retrieval = { path = "../retrieval" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

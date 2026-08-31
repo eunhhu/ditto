@@ -856,6 +856,36 @@ impl TaskQuery {
         &self.exact_terms
     }
 
+    /// Return the positive lexical overlap between this canonical query and a
+    /// bounded retrieval document.
+    ///
+    /// Both sides use this crate's canonical lexical tokenizer.  A document is
+    /// already bounded by [`RetrievalDocument`], so lexical tokenization is a
+    /// total operation; malformed candidate identity normalization remains a
+    /// separate fallible exact-match operation below.
+    pub fn lexical_overlap(&self, document: &RetrievalDocument) -> f32 {
+        if self.lexical_tokens.is_empty() {
+            return 0.0;
+        }
+        let document_tokens = lexical_tokens(document.as_str());
+        let overlap = self
+            .lexical_tokens
+            .iter()
+            .filter(|token| document_tokens.binary_search(token).is_ok())
+            .count();
+        overlap as f32 / self.lexical_tokens.len() as f32
+    }
+
+    /// Test one candidate identity against normalized entity/resource terms.
+    ///
+    /// Candidate identity is normalized by the same V2 text normalizer as
+    /// query fields.  Non-whitespace control characters are rejected rather
+    /// than silently changing exact-match authority.
+    pub fn matches_exact_term(&self, candidate: &str) -> Result<bool, RetrievalError> {
+        let candidate = normalize_text("exact_term", candidate)?;
+        Ok(self.exact_terms.iter().any(|term| term == &candidate))
+    }
+
     pub fn query_embedding(&self) -> Option<&EmbeddingVector> {
         self.query_embedding
             .as_ref()
@@ -981,7 +1011,7 @@ fn canonical_text(signature: &TaskSignatureV2) -> String {
 fn lexical_tokens(value: &str) -> Vec<String> {
     let mut tokens = BTreeSet::new();
     let mut current = String::new();
-    for character in value.chars() {
+    for character in value.chars().flat_map(char::to_lowercase) {
         if character.is_alphanumeric() {
             current.push(character);
         } else if !current.is_empty() {
@@ -1057,5 +1087,57 @@ fn provider_error(error: EmbeddingProviderError) -> RetrievalError {
     }
     RetrievalError::ProviderFailure {
         detail: detail.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RetrievalDocument, RetrievalError, TaskQuery, TaskSignatureV2};
+
+    #[test]
+    fn task_query_candidate_helpers_share_canonical_normalization_and_reject_controls() {
+        let query = TaskQuery::new(TaskSignatureV2 {
+            request: "  Deploy\tDÉMO  ".into(),
+            entities: vec![" Workspace ".into()],
+            ..TaskSignatureV2::default()
+        })
+        .expect("canonical query");
+        let document =
+            RetrievalDocument::new("id=WORKSPACE\nkind=resource\nsummary=  deploy\nDÉMO  ")
+                .expect("bounded document");
+
+        assert_eq!(query.lexical_overlap(&document), 1.0);
+        assert!(
+            query
+                .matches_exact_term("  workspace\t")
+                .expect("normalized ID")
+        );
+        assert!(!query.matches_exact_term("other").expect("non-match"));
+        assert_eq!(
+            query
+                .matches_exact_term("workspace\0")
+                .expect_err("control must fail"),
+            RetrievalError::ControlCharacter {
+                field: "exact_term"
+            }
+        );
+
+        let one_character_query = TaskQuery::new(TaskSignatureV2::new("x")).expect("query");
+        let one_character_document =
+            RetrievalDocument::new("id=x\nkind=entity\nsummary=unused").expect("document");
+        assert_eq!(
+            one_character_query.lexical_overlap(&one_character_document),
+            1.0
+        );
+
+        let expanded_lowercase_query =
+            TaskQuery::new(TaskSignatureV2::new("İ")).expect("expanded lowercase query");
+        let expanded_lowercase_document =
+            RetrievalDocument::new("id=other\nkind=entity\nsummary=İ")
+                .expect("expanded lowercase document");
+        assert_eq!(
+            expanded_lowercase_query.lexical_overlap(&expanded_lowercase_document),
+            1.0
+        );
     }
 }
