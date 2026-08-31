@@ -94,10 +94,12 @@ impl EventStore {
     }
 
     pub fn append(&self, event: NewEvent) -> Result<EventRecord, EventStoreError> {
+        let recorded_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+            .expect("a current UTC timestamp is representable at millisecond precision");
         let record = EventRecord {
             seq: 0,
             event_id: Ulid::new().to_string(),
-            recorded_at: Utc::now(),
+            recorded_at,
             session_id: event.session_id,
             task_id: event.task_id,
             actor: event.actor,
@@ -324,6 +326,24 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].task_id.as_deref(), Some("task-1"));
+    }
+
+    #[test]
+    fn append_timestamp_matches_reopened_record() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("state.db");
+        let store = EventStore::open(&path).expect("open store");
+        let appended = store
+            .append(NewEvent::user_input("session", None, "timestamp"))
+            .expect("append event");
+        drop(store);
+
+        let reopened = EventStore::open(&path).expect("reopen store");
+        let persisted = reopened.list(&EventQuery::default()).expect("list event");
+
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].recorded_at, appended.recorded_at);
+        assert_eq!(appended.recorded_at.timestamp_subsec_nanos() % 1_000_000, 0);
     }
 
     #[test]

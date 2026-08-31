@@ -36,6 +36,28 @@ pub enum ArtifactStoreError {
     MetadataMismatch(ArtifactRef),
 }
 
+/// A bounded range read together with the byte count from the verified object.
+///
+/// Both values come from the same open file descriptor after the complete
+/// object has been hashed and checked against its [`ArtifactRef`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedArtifactRange {
+    bytes: Vec<u8>,
+    total_bytes: u64,
+}
+
+impl VerifiedArtifactRange {
+    /// Returns the bytes in the requested range.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns the verified size of the complete object.
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArtifactRef(String);
 
@@ -193,11 +215,7 @@ impl ArtifactStore {
 
     /// Verifies and reads through the same file descriptor, avoiding replacement races.
     pub fn get(&self, reference: &ArtifactRef) -> Result<Vec<u8>, ArtifactStoreError> {
-        let (mut file, bytes) = self.open_verified(reference)?;
-        let capacity = usize::try_from(bytes).unwrap_or(usize::MAX);
-        let mut output = Vec::with_capacity(capacity);
-        file.read_to_end(&mut output)?;
-        Ok(output)
+        Ok(self.read_verified_range(reference, 0, usize::MAX)?.bytes)
     }
 
     /// Verifies and range-reads through the same file descriptor.
@@ -207,18 +225,75 @@ impl ArtifactStore {
         offset: u64,
         length: usize,
     ) -> Result<Vec<u8>, ArtifactStoreError> {
-        let (mut file, bytes) = self.open_verified(reference)?;
-        if offset >= bytes || length == 0 {
-            return Ok(Vec::new());
+        Ok(self.read_verified_range(reference, offset, length)?.bytes)
+    }
+
+    /// Verifies the complete object and reads a bounded range through the
+    /// same file descriptor, returning the verified complete-object size.
+    pub fn read_verified_range(
+        &self,
+        reference: &ArtifactRef,
+        offset: u64,
+        length: usize,
+    ) -> Result<VerifiedArtifactRange, ArtifactStoreError> {
+        self.read_verified_range_internal(reference, offset, length, |_| {})
+    }
+
+    fn read_verified_range_internal<F>(
+        &self,
+        reference: &ArtifactRef,
+        offset: u64,
+        length: usize,
+        after_verification: F,
+    ) -> Result<VerifiedArtifactRange, ArtifactStoreError>
+    where
+        F: FnOnce(&Path),
+    {
+        let path = self.object_path(reference);
+        let mut file = open_regular_file(&path)?;
+        let requested = u64::try_from(length).unwrap_or(u64::MAX);
+        let range_end = offset.saturating_add(requested);
+        let mut hasher = Sha256::new();
+        let mut total_bytes = 0_u64;
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 64 * 1024];
+
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            let chunk_start = total_bytes;
+            total_bytes = total_bytes.saturating_add(read as u64);
+            if total_bytes > self.max_object_bytes {
+                return Err(ArtifactStoreError::TooLarge {
+                    max_bytes: self.max_object_bytes,
+                });
+            }
+            hasher.update(&buffer[..read]);
+
+            let capture_start = offset.max(chunk_start);
+            let capture_end = range_end.min(total_bytes);
+            if capture_start < capture_end {
+                let start = usize::try_from(capture_start - chunk_start).unwrap_or(read);
+                let end = usize::try_from(capture_end - chunk_start).unwrap_or(read);
+                output.extend_from_slice(&buffer[start..end]);
+            }
         }
 
-        let available = bytes - offset;
-        let requested = u64::try_from(length).unwrap_or(u64::MAX);
-        let read_length = usize::try_from(available.min(requested)).unwrap_or(length);
-        file.seek(SeekFrom::Start(offset))?;
-        let mut output = vec![0_u8; read_length];
-        file.read_exact(&mut output)?;
-        Ok(output)
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != reference.sha256() {
+            return Err(ArtifactStoreError::Integrity {
+                expected: reference.to_string(),
+                actual,
+            });
+        }
+        after_verification(&path);
+
+        Ok(VerifiedArtifactRange {
+            bytes: output,
+            total_bytes,
+        })
     }
 
     pub fn metadata(
@@ -370,7 +445,10 @@ fn sync_directory(path: &Path) -> Result<(), ArtifactStoreError> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write,
+    };
 
     use tempfile::tempdir;
 
@@ -396,6 +474,11 @@ mod tests {
                 .expect("read range"),
             b"artifact"
         );
+        let verified = store
+            .read_verified_range(&first.reference, 9, 8)
+            .expect("read verified range");
+        assert_eq!(verified.bytes(), b"artifact");
+        assert_eq!(verified.total_bytes(), b"semantic artifact".len() as u64);
     }
 
     #[test]
@@ -420,6 +503,49 @@ mod tests {
             .get(&metadata.reference)
             .expect_err("detect tampering");
         assert!(matches!(error, ArtifactStoreError::Integrity { .. }));
+    }
+
+    #[test]
+    fn verified_range_returns_captured_bytes_after_same_inode_mutation() {
+        let directory = tempdir().expect("temporary directory");
+        let store = ArtifactStore::open(directory.path()).expect("open store");
+        let metadata = store.put(b"0123456789").expect("put artifact");
+        let object = directory
+            .path()
+            .join("sha256")
+            .join(metadata.reference.sha256());
+
+        #[cfg(unix)]
+        let inode_before = std::os::unix::fs::MetadataExt::ino(
+            &fs::metadata(&object).expect("stat object before mutation"),
+        );
+
+        let verified = store
+            .read_verified_range_internal(&metadata.reference, 2, 4, |path| {
+                let mut writer = OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .expect("open same object inode for mutation");
+                writer
+                    .write_all(b"XXXXXXXXXX")
+                    .expect("mutate same object inode");
+                writer.sync_all().expect("sync same object inode");
+            })
+            .expect("read verified range");
+
+        assert_eq!(verified.bytes(), b"2345");
+        assert_eq!(verified.total_bytes(), 10);
+        #[cfg(unix)]
+        assert_eq!(
+            inode_before,
+            std::os::unix::fs::MetadataExt::ino(
+                &fs::metadata(&object).expect("stat object after mutation"),
+            )
+        );
+        assert!(matches!(
+            store.read_range(&metadata.reference, 0, 4),
+            Err(ArtifactStoreError::Integrity { .. })
+        ));
     }
 
     #[cfg(unix)]

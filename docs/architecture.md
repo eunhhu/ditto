@@ -117,6 +117,10 @@ purpose, session, and task—is rooted in an `artifact.created` event.
 
 Artifact reads reject malformed references and symlink traversal, enforce object
 size limits, and verify content through the same descriptor used to return data.
+The builtin `artifact.read` surface accepts only canonical
+`artifact:sha256:<hex>` references and bounded ranges. A system-authored
+`artifact.created` event must root the exact object in compatible session/task
+scope before the kernel can return its deterministic projection.
 
 Task completion remains a claim until a task-specific verifier supplies evidence
 such as a diff, commit, provider message ID, health response, or artifact hash. A
@@ -134,7 +138,15 @@ separate from emitted features, and unsupported features fail before output.
 Responses profile with a fixed HTTPS origin, redacted transport-only
 credentials, deterministic request projection, bounded raw-stream correlation,
 and explicit ephemeral or provider-managed response storage. Its terminal is a
-model terminal only. No kernel turn loop or task-completion claim is implied.
+model terminal only; the adapter neither selects itself for the daemon nor makes
+a task-completion claim.
+
+The semantic kernel owns the first injected-driver continuation loop. It
+compiles context, pages the complete `artifact.read` schema into one bounded
+epoch, persists validated model/tool transitions before publication, and can
+replay the complete turn without provider or artifact I/O. A final assistant
+response remains explicitly `unverified`, and the loop never emits
+`task.completed`.
 
 ## Improvement compiler
 

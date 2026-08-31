@@ -1,6 +1,8 @@
 [package]
 name = "ditto-artifact-read"
-version.workspace = true
+# The Rust API now enforces projection invariants through private fields and
+# checked constructors. The serialized builtin capability remains 0.1.0.
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,6 +14,7 @@ ditto-artifact-store = { path = "../artifact-store" }
 ditto-capability = { path = "../capability" }
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

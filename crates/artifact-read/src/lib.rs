@@ -10,7 +10,10 @@ use std::{borrow::Borrow, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ditto_artifact_store::{ArtifactRef, ArtifactStore, ArtifactStoreError};
-use ditto_capability::{CapabilitySchema, JSON_SCHEMA_DRAFT_2020_12_URI};
+use ditto_capability::{
+    CapabilityKind, CapabilityManifest, CapabilitySchema, DataAccess, EffectProfile, Externality,
+    JSON_SCHEMA_DRAFT_2020_12_URI, Mutation, Privilege, RuntimeType,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::{Value, json};
 
@@ -22,11 +25,149 @@ pub const ARTIFACT_READ_VERSION: &str = "0.1.0";
 pub const MAX_READ_BYTES: usize = 16 * 1024;
 
 const REFERENCE_PATTERN: &str = r"^artifact:sha256:[0-9a-f]{64}$";
+const CAPABILITY_SUMMARY: &str = "Read a bounded range from a content-addressed artifact.";
+const ARTIFACT_RESOURCE_TEMPLATE: &str = "artifact:{artifact_id}";
+const ARTIFACT_READ_VERIFICATION: &str = "content-hash";
+const ARTIFACT_READ_IDLE_TTL_MS: u64 = 30_000;
+const RETRIEVAL_INTENTS: [&str; 2] = [
+    "inspect the full output of a previous command",
+    "read a bounded range from a large log or file",
+];
+const RETRIEVAL_NEGATIVE_EXAMPLES: [&str; 1] = ["modify a file"];
+const RETRIEVAL_ALIASES: [&str; 2] = ["read output", "open artifact"];
+const RETRIEVAL_COMPLEMENTS: [&str; 0] = [];
 const INVALID_ARGUMENTS_MESSAGE: &str = "artifact.read arguments are invalid";
 const INVALID_REFERENCE_MESSAGE: &str = "artifact reference is invalid";
 const RANGE_MESSAGE: &str = "artifact offset is beyond the end of the artifact";
 const UNAVAILABLE_MESSAGE: &str = "artifact is unavailable";
 const INTEGRITY_MESSAGE: &str = "artifact integrity verification failed";
+
+/// Stable validation failure for the installed `artifact.read` manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ArtifactReadManifestError {
+    #[error("artifact.read manifest does not match the builtin contract ({field})")]
+    Mismatch { field: &'static str },
+}
+
+/// Validate the installed level-1 manifest against the builtin contract.
+pub fn validate_artifact_read_manifest(
+    manifest: &CapabilityManifest,
+) -> Result<(), ArtifactReadManifestError> {
+    let mismatch = |field| Err(ArtifactReadManifestError::Mismatch { field });
+
+    if manifest.id != ARTIFACT_READ_ID {
+        return mismatch("id");
+    }
+    if manifest.version != ARTIFACT_READ_VERSION {
+        return mismatch("version");
+    }
+    if manifest.namespace != "artifact" {
+        return mismatch("namespace");
+    }
+    if manifest.kind != CapabilityKind::Tool {
+        return mismatch("kind");
+    }
+    if manifest.summary != CAPABILITY_SUMMARY {
+        return mismatch("summary");
+    }
+    if manifest.runtime.runtime_type != RuntimeType::Builtin {
+        return mismatch("runtime.type");
+    }
+    if !manifest.runtime.lazy {
+        return mismatch("runtime.lazy");
+    }
+    if manifest.runtime.command.is_some() {
+        return mismatch("runtime.command");
+    }
+    if manifest.runtime.idle_ttl_ms != ARTIFACT_READ_IDLE_TTL_MS {
+        return mismatch("runtime.idle_ttl_ms");
+    }
+    if manifest.placement.modes != ["local"] {
+        return mismatch("placement.modes");
+    }
+    if !manifest.placement.requires.is_empty() {
+        return mismatch("placement.requires");
+    }
+    if !exact_strings(&manifest.retrieval.intents, &RETRIEVAL_INTENTS) {
+        return mismatch("retrieval.intents");
+    }
+    if !exact_strings(
+        &manifest.retrieval.negative_examples,
+        &RETRIEVAL_NEGATIVE_EXAMPLES,
+    ) {
+        return mismatch("retrieval.negative_examples");
+    }
+    if !exact_strings(&manifest.retrieval.aliases, &RETRIEVAL_ALIASES) {
+        return mismatch("retrieval.aliases");
+    }
+    if !exact_strings(&manifest.retrieval.complements, &RETRIEVAL_COMPLEMENTS) {
+        return mismatch("retrieval.complements");
+    }
+
+    let content_effect = EffectProfile {
+        access: DataAccess::Content,
+        mutation: Mutation::None,
+        externality: Externality::Local,
+        privilege: Privilege::User,
+    };
+    if manifest.effects.minimum != content_effect {
+        return mismatch("effects.minimum");
+    }
+    if manifest.effects.maximum != content_effect {
+        return mismatch("effects.maximum");
+    }
+    if manifest.effects.resources != [ARTIFACT_RESOURCE_TEMPLATE] {
+        return mismatch("effects.resources");
+    }
+    if manifest.policy.approval.as_deref() != Some("never") {
+        return mismatch("policy.approval");
+    }
+    if !manifest.policy.secret_handles.is_empty() {
+        return mismatch("policy.secret_handles");
+    }
+    if manifest.verification.default.as_deref() != Some(ARTIFACT_READ_VERIFICATION) {
+        return mismatch("verification.default");
+    }
+    Ok(())
+}
+
+fn valid_read_length(length: u64) -> bool {
+    (1..=MAX_READ_BYTES as u64).contains(&length)
+}
+
+fn exact_strings(actual: &[String], expected: &[&str]) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| actual == expected)
+}
+
+fn serialize_read_arguments<S>(
+    reference: &ArtifactRef,
+    offset: u64,
+    length: u64,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if !valid_read_length(length) {
+        return Err(serde::ser::Error::custom(INVALID_ARGUMENTS_MESSAGE));
+    }
+    #[derive(Serialize)]
+    struct Wire<'a> {
+        reference: &'a ArtifactRef,
+        offset: u64,
+        length: u64,
+    }
+    Wire {
+        reference,
+        offset,
+        length,
+    }
+    .serialize(serializer)
+}
 
 /// Wire arguments for `artifact.read`.
 ///
@@ -34,11 +175,11 @@ const INTEGRITY_MESSAGE: &str = "artifact integrity verification failed";
 /// unknown fields are rejected, references are canonicalized by
 /// [`ArtifactRef`], and the length bound is enforced before an executor can
 /// touch the store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactReadArguments {
-    pub reference: ArtifactRef,
-    pub offset: u64,
-    pub length: u64,
+    reference: ArtifactRef,
+    offset: u64,
+    length: u64,
 }
 
 impl ArtifactReadArguments {
@@ -47,7 +188,7 @@ impl ArtifactReadArguments {
         offset: u64,
         length: u64,
     ) -> Result<Self, ArtifactReadError> {
-        if length == 0 || length > MAX_READ_BYTES as u64 {
+        if !valid_read_length(length) {
             return Err(ArtifactReadError::invalid_arguments());
         }
         Ok(Self {
@@ -57,12 +198,34 @@ impl ArtifactReadArguments {
         })
     }
 
+    /// Convert checked wire arguments into the normalized resource.
     pub fn normalize(self) -> ArtifactReadResource {
         ArtifactReadResource {
             reference: self.reference,
             offset: self.offset,
             length: self.length,
         }
+    }
+
+    pub fn reference(&self) -> &ArtifactRef {
+        &self.reference
+    }
+
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+}
+
+impl Serialize for ArtifactReadArguments {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_read_arguments(&self.reference, self.offset, self.length, serializer)
     }
 }
 
@@ -82,7 +245,7 @@ impl<'de> Deserialize<'de> for ArtifactReadArguments {
         let wire = Wire::deserialize(deserializer)?;
         let reference = ArtifactRef::new(wire.reference)
             .map_err(|_| D::Error::custom(INVALID_ARGUMENTS_MESSAGE))?;
-        if wire.length == 0 || wire.length > MAX_READ_BYTES as u64 {
+        if !valid_read_length(wire.length) {
             return Err(D::Error::custom(INVALID_ARGUMENTS_MESSAGE));
         }
         Ok(Self {
@@ -94,20 +257,44 @@ impl<'de> Deserialize<'de> for ArtifactReadArguments {
 }
 
 /// The normalized, canonical resource passed to the bounded executor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactReadResource {
-    pub reference: ArtifactRef,
-    pub offset: u64,
-    pub length: u64,
+    reference: ArtifactRef,
+    offset: u64,
+    length: u64,
+}
+
+impl Serialize for ArtifactReadResource {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_read_arguments(&self.reference, self.offset, self.length, serializer)
+    }
 }
 
 impl ArtifactReadResource {
+    /// Construct a normalized resource while preserving the legacy checked
+    /// constructor surface.
+    #[deprecated(note = "use ArtifactReadArguments::new and normalize instead")]
     pub fn new(
         reference: ArtifactRef,
         offset: u64,
         length: u64,
     ) -> Result<Self, ArtifactReadError> {
         ArtifactReadArguments::new(reference, offset, length).map(ArtifactReadArguments::normalize)
+    }
+
+    pub fn reference(&self) -> &ArtifactRef {
+        &self.reference
+    }
+
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub const fn length(&self) -> u64 {
+        self.length
     }
 }
 
@@ -121,6 +308,7 @@ impl<'de> Deserialize<'de> for ArtifactReadResource {
 }
 
 /// Alias used by callers that model the normalized value as a request.
+#[deprecated(note = "use ArtifactReadResource")]
 pub type ArtifactReadRequest = ArtifactReadResource;
 
 /// Stable error-code values used in serialized error projections.
@@ -169,17 +357,13 @@ impl Serialize for ArtifactReadErrorCode {
 /// never cross this type boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactReadError {
-    pub code: String,
-    pub message: String,
-    pub reference: Option<ArtifactRef>,
+    code: String,
+    message: String,
+    reference: Option<ArtifactRef>,
 }
 
 impl ArtifactReadError {
-    pub fn new(
-        code: ArtifactReadErrorCode,
-        _message: &'static str,
-        reference: Option<ArtifactRef>,
-    ) -> Self {
+    fn from_code(code: ArtifactReadErrorCode, reference: Option<ArtifactRef>) -> Self {
         Self {
             code: code.as_str().to_owned(),
             message: Self::expected_message(code).to_owned(),
@@ -187,59 +371,72 @@ impl ArtifactReadError {
         }
     }
 
+    /// Construct a canonical error while preserving the legacy constructor
+    /// signature. Invalid reference presence is normalized to a valid
+    /// projection rather than creating a value that strict serialization
+    /// would reject.
+    #[deprecated(note = "use the code-specific constructors instead")]
+    pub fn new(
+        code: ArtifactReadErrorCode,
+        _message: &'static str,
+        reference: Option<ArtifactRef>,
+    ) -> Self {
+        if Self::requires_reference(code) && reference.is_none() {
+            return Self::invalid_reference();
+        }
+        let reference = if Self::requires_reference(code) {
+            reference
+        } else {
+            None
+        };
+        Self::from_code(code, reference)
+    }
+
     pub fn invalid_arguments() -> Self {
-        Self::new(
-            ArtifactReadErrorCode::InvalidArguments,
-            INVALID_ARGUMENTS_MESSAGE,
-            None,
-        )
+        Self::from_code(ArtifactReadErrorCode::InvalidArguments, None)
     }
 
     pub fn invalid_reference() -> Self {
-        Self::new(
-            ArtifactReadErrorCode::InvalidReference,
-            INVALID_REFERENCE_MESSAGE,
-            None,
-        )
+        Self::from_code(ArtifactReadErrorCode::InvalidReference, None)
     }
 
     pub fn range_out_of_bounds(reference: ArtifactRef) -> Self {
-        Self::new(
-            ArtifactReadErrorCode::RangeOutOfBounds,
-            RANGE_MESSAGE,
-            Some(reference),
-        )
+        Self::from_code(ArtifactReadErrorCode::RangeOutOfBounds, Some(reference))
     }
 
     /// Creates the stable scope-denial projection used when the kernel has no
     /// task/session root for the canonical reference.
     pub fn not_authorized(reference: ArtifactRef) -> Self {
-        Self::new(
+        Self::from_code(
             ArtifactReadErrorCode::UnauthorizedReference,
-            "artifact reference is not authorized for this turn",
             Some(reference),
         )
     }
 
     /// Alias for [`not_authorized`](Self::not_authorized).
+    #[deprecated(note = "use not_authorized instead")]
     pub fn unauthorized_reference(reference: ArtifactRef) -> Self {
         Self::not_authorized(reference)
     }
 
     fn unavailable(reference: ArtifactRef) -> Self {
-        Self::new(
-            ArtifactReadErrorCode::ArtifactUnavailable,
-            UNAVAILABLE_MESSAGE,
-            Some(reference),
-        )
+        Self::from_code(ArtifactReadErrorCode::ArtifactUnavailable, Some(reference))
     }
 
     fn integrity(reference: ArtifactRef) -> Self {
-        Self::new(
-            ArtifactReadErrorCode::IntegrityFailure,
-            INTEGRITY_MESSAGE,
-            Some(reference),
-        )
+        Self::from_code(ArtifactReadErrorCode::IntegrityFailure, Some(reference))
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn reference(&self) -> Option<&ArtifactRef> {
+        self.reference.as_ref()
     }
 
     pub fn code_kind(&self) -> Option<ArtifactReadErrorCode> {
@@ -318,47 +515,97 @@ impl<'de> Deserialize<'de> for ArtifactReadError {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            code: String,
-            message: String,
-            #[serde(default)]
-            reference: Option<String>,
+        struct ErrorVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ErrorVisitor {
+            type Value = ArtifactReadError;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an artifact.read error projection object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut code = None;
+                let mut message = None;
+                // The outer Option records key presence; the inner Option
+                // preserves an explicit JSON null for validation below.
+                let mut reference: Option<Option<String>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "code" => {
+                            if code.is_some() {
+                                return Err(A::Error::custom(
+                                    "artifact.read error projection is invalid",
+                                ));
+                            }
+                            code = Some(map.next_value::<String>()?);
+                        }
+                        "message" => {
+                            if message.is_some() {
+                                return Err(A::Error::custom(
+                                    "artifact.read error projection is invalid",
+                                ));
+                            }
+                            message = Some(map.next_value::<String>()?);
+                        }
+                        "reference" => {
+                            if reference.is_some() {
+                                return Err(A::Error::custom(
+                                    "artifact.read error projection is invalid",
+                                ));
+                            }
+                            reference = Some(map.next_value::<Option<String>>()?);
+                        }
+                        _ => {
+                            return Err(A::Error::custom(
+                                "artifact.read error projection is invalid",
+                            ));
+                        }
+                    }
+                }
+
+                let code_value = code
+                    .ok_or_else(|| A::Error::custom("artifact.read error projection is invalid"))?;
+                let message = message
+                    .ok_or_else(|| A::Error::custom("artifact.read error projection is invalid"))?;
+                let Some(code) = (match code_value.as_str() {
+                    "invalid_arguments" => Some(ArtifactReadErrorCode::InvalidArguments),
+                    "invalid_reference" => Some(ArtifactReadErrorCode::InvalidReference),
+                    "range_out_of_bounds" => Some(ArtifactReadErrorCode::RangeOutOfBounds),
+                    "artifact_unavailable" => Some(ArtifactReadErrorCode::ArtifactUnavailable),
+                    "integrity_failure" => Some(ArtifactReadErrorCode::IntegrityFailure),
+                    "unauthorized_reference" => Some(ArtifactReadErrorCode::UnauthorizedReference),
+                    _ => None,
+                }) else {
+                    return Err(A::Error::custom(
+                        "artifact.read error projection is invalid",
+                    ));
+                };
+                let reference_present = reference.is_some();
+                let reference = match reference {
+                    Some(Some(value)) => Some(ArtifactRef::new(value).map_err(|_| {
+                        A::Error::custom("artifact.read error projection is invalid")
+                    })?),
+                    Some(None) | None => None,
+                };
+                let error = ArtifactReadError::from_code(code, reference);
+                if message != error.message
+                    || ArtifactReadError::requires_reference(code) != reference_present
+                    || ArtifactReadError::requires_reference(code) != error.reference.is_some()
+                {
+                    return Err(A::Error::custom(
+                        "artifact.read error projection is invalid",
+                    ));
+                }
+                Ok(error)
+            }
         }
 
-        let wire = Wire::deserialize(deserializer)?;
-        let Some(code) = (match wire.code.as_str() {
-            "invalid_arguments" => Some(ArtifactReadErrorCode::InvalidArguments),
-            "invalid_reference" => Some(ArtifactReadErrorCode::InvalidReference),
-            "range_out_of_bounds" => Some(ArtifactReadErrorCode::RangeOutOfBounds),
-            "artifact_unavailable" => Some(ArtifactReadErrorCode::ArtifactUnavailable),
-            "integrity_failure" => Some(ArtifactReadErrorCode::IntegrityFailure),
-            "unauthorized_reference" => Some(ArtifactReadErrorCode::UnauthorizedReference),
-            _ => None,
-        }) else {
-            return Err(D::Error::custom(
-                "artifact.read error projection is invalid",
-            ));
-        };
-        let reference = wire.reference.map(|value| {
-            ArtifactRef::new(value)
-                .map_err(|_| D::Error::custom("artifact.read error projection is invalid"))
-        });
-        let reference = match reference {
-            Some(Ok(reference)) => Some(reference),
-            Some(Err(error)) => return Err(error),
-            None => None,
-        };
-        let error = Self::new(code, Self::expected_message(code), reference);
-        if wire.message != error.message
-            || Self::requires_reference(code) != error.reference.is_some()
-        {
-            return Err(D::Error::custom(
-                "artifact.read error projection is invalid",
-            ));
-        }
-        Ok(error)
+        deserializer.deserialize_map(ErrorVisitor)
     }
 }
 
@@ -377,16 +624,44 @@ impl std::error::Error for ArtifactReadError {}
 /// Successful binary-safe read projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactReadSuccess {
-    pub reference: ArtifactRef,
-    pub offset: u64,
-    pub requested_bytes: u64,
-    pub returned_bytes: u64,
-    pub total_bytes: u64,
-    pub eof: bool,
-    pub data: String,
+    reference: ArtifactRef,
+    offset: u64,
+    requested_bytes: u64,
+    returned_bytes: u64,
+    total_bytes: u64,
+    eof: bool,
+    data: String,
 }
 
 impl ArtifactReadSuccess {
+    pub fn reference(&self) -> &ArtifactRef {
+        &self.reference
+    }
+
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    pub const fn requested_bytes(&self) -> u64 {
+        self.requested_bytes
+    }
+
+    pub const fn returned_bytes(&self) -> u64 {
+        self.returned_bytes
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    pub const fn eof(&self) -> bool {
+        self.eof
+    }
+
+    pub fn data(&self) -> &str {
+        &self.data
+    }
+
     pub fn decoded_data(&self) -> Result<Vec<u8>, base64::DecodeError> {
         BASE64.decode(&self.data)
     }
@@ -487,48 +762,63 @@ impl<'de> Deserialize<'de> for ArtifactReadSuccess {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum ArtifactReadResultKind {
+    Success(ArtifactReadSuccess),
+    Error(ArtifactReadError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactReadResult {
-    /// `false` for a successful projection and `true` for an error result.
-    pub is_error: bool,
-    success: Option<ArtifactReadSuccess>,
-    error: Option<ArtifactReadError>,
+    kind: ArtifactReadResultKind,
 }
 
 impl ArtifactReadResult {
     pub fn success(value: ArtifactReadSuccess) -> Self {
         Self {
-            is_error: false,
-            success: Some(value),
-            error: None,
+            kind: ArtifactReadResultKind::Success(value),
         }
     }
 
     pub fn error(value: ArtifactReadError) -> Self {
         Self {
-            is_error: true,
-            success: None,
-            error: Some(value),
+            kind: ArtifactReadResultKind::Error(value),
         }
     }
 
     pub fn is_error(&self) -> bool {
-        self.is_error
+        matches!(self.kind, ArtifactReadResultKind::Error(_))
     }
 
     pub fn success_projection(&self) -> Option<&ArtifactReadSuccess> {
-        self.success.as_ref()
+        match &self.kind {
+            ArtifactReadResultKind::Success(success) => Some(success),
+            ArtifactReadResultKind::Error(_) => None,
+        }
     }
 
     pub fn error_projection(&self) -> Option<&ArtifactReadError> {
-        self.error.as_ref()
+        match &self.kind {
+            ArtifactReadResultKind::Success(_) => None,
+            ArtifactReadResultKind::Error(error) => Some(error),
+        }
     }
 
+    /// Consume the result and return its success projection, if present.
+    #[deprecated(note = "use success_projection for a borrowed projection")]
     pub fn into_success(self) -> Option<ArtifactReadSuccess> {
-        self.success
+        match self.kind {
+            ArtifactReadResultKind::Success(success) => Some(success),
+            ArtifactReadResultKind::Error(_) => None,
+        }
     }
 
+    /// Consume the result and return its error projection, if present.
+    #[deprecated(note = "use error_projection for a borrowed projection")]
     pub fn into_error(self) -> Option<ArtifactReadError> {
-        self.error
+        match self.kind {
+            ArtifactReadResultKind::Success(_) => None,
+            ArtifactReadResultKind::Error(error) => Some(error),
+        }
     }
 }
 
@@ -537,39 +827,32 @@ impl Serialize for ArtifactReadResult {
     where
         S: Serializer,
     {
-        if self.is_error {
-            let Some(error) = &self.error else {
-                return Err(serde::ser::Error::custom(
-                    "artifact.read error result has no error projection",
-                ));
-            };
-            #[derive(Serialize)]
-            struct ErrorWire<'a> {
-                is_error: bool,
-                error: &'a ArtifactReadError,
+        match &self.kind {
+            ArtifactReadResultKind::Error(error) => {
+                #[derive(Serialize)]
+                struct ErrorWire<'a> {
+                    is_error: bool,
+                    error: &'a ArtifactReadError,
+                }
+                ErrorWire {
+                    is_error: true,
+                    error,
+                }
+                .serialize(serializer)
             }
-            ErrorWire {
-                is_error: true,
-                error,
+            ArtifactReadResultKind::Success(success) => {
+                #[derive(Serialize)]
+                struct SuccessWire<'a> {
+                    is_error: bool,
+                    #[serde(flatten)]
+                    success: &'a ArtifactReadSuccess,
+                }
+                SuccessWire {
+                    is_error: false,
+                    success,
+                }
+                .serialize(serializer)
             }
-            .serialize(serializer)
-        } else {
-            let Some(success) = &self.success else {
-                return Err(serde::ser::Error::custom(
-                    "artifact.read success result has no success projection",
-                ));
-            };
-            #[derive(Serialize)]
-            struct SuccessWire<'a> {
-                is_error: bool,
-                #[serde(flatten)]
-                success: &'a ArtifactReadSuccess,
-            }
-            SuccessWire {
-                is_error: false,
-                success,
-            }
-            .serialize(serializer)
         }
     }
 }
@@ -652,12 +935,16 @@ impl ArtifactReadNormalizer {
         Ok(arguments.normalize())
     }
 
+    /// Parse one JSON object through the strict normalizer.
+    #[deprecated(note = "use normalize with a serde_json::Value instead")]
     pub fn parse_json(&self, input: &str) -> Result<ArtifactReadResource, ArtifactReadError> {
         let value: Value =
             serde_json::from_str(input).map_err(|_| ArtifactReadError::invalid_arguments())?;
         self.normalize(value)
     }
 
+    /// Parse UTF-8 JSON bytes through the strict normalizer.
+    #[deprecated(note = "use normalize with a serde_json::Value instead")]
     pub fn parse_bytes(&self, input: &[u8]) -> Result<ArtifactReadResource, ArtifactReadError> {
         let value: Value =
             serde_json::from_slice(input).map_err(|_| ArtifactReadError::invalid_arguments())?;
@@ -666,6 +953,7 @@ impl ArtifactReadNormalizer {
 }
 
 /// Normalize one JSON argument object without constructing an executor.
+#[deprecated(note = "use ArtifactReadNormalizer::normalize instead")]
 pub fn normalize_arguments<T>(arguments: T) -> Result<ArtifactReadResource, ArtifactReadError>
 where
     T: Borrow<Value>,
@@ -674,11 +962,12 @@ where
 }
 
 /// Short spelling for [`normalize_arguments`].
+#[deprecated(note = "use ArtifactReadNormalizer::normalize instead")]
 pub fn normalize<T>(arguments: T) -> Result<ArtifactReadResource, ArtifactReadError>
 where
     T: Borrow<Value>,
 {
-    normalize_arguments(arguments)
+    ArtifactReadNormalizer.normalize(arguments)
 }
 
 /// Returns the complete provider-neutral level-2 capability schema.
@@ -686,13 +975,14 @@ pub fn capability_schema() -> CapabilitySchema {
     CapabilitySchema {
         id: ARTIFACT_READ_ID.to_owned(),
         version: ARTIFACT_READ_VERSION.to_owned(),
-        summary: "Read a bounded range from a content-addressed artifact.".to_owned(),
+        summary: CAPABILITY_SUMMARY.to_owned(),
         input_schema: input_schema(),
         output_schema: output_schema(),
     }
 }
 
 /// Alias for [`capability_schema`].
+#[deprecated(note = "use capability_schema instead")]
 pub fn schema() -> CapabilitySchema {
     capability_schema()
 }
@@ -711,6 +1001,7 @@ pub fn input_schema() -> Value {
             "offset": {
                 "type": "integer",
                 "minimum": 0,
+                "maximum": u64::MAX,
             },
             "length": {
                 "type": "integer",
@@ -725,6 +1016,60 @@ pub fn input_schema() -> Value {
 
 /// Returns the deterministic success/error output JSON Schema.
 pub fn output_schema() -> Value {
+    let error_schema = |code: &str, message: &str, has_reference: bool| {
+        let mut properties = serde_json::Map::new();
+        properties.insert("code".to_owned(), json!({"const": code}));
+        properties.insert("message".to_owned(), json!({"const": message}));
+        let mut required = vec![json!("code"), json!("message")];
+        if has_reference {
+            properties.insert(
+                "reference".to_owned(),
+                json!({
+                    "type": "string",
+                    "pattern": REFERENCE_PATTERN,
+                }),
+            );
+            required.push(json!("reference"));
+        }
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        })
+    };
+    let error_schemas = vec![
+        error_schema(
+            ArtifactReadErrorCode::InvalidArguments.as_str(),
+            INVALID_ARGUMENTS_MESSAGE,
+            false,
+        ),
+        error_schema(
+            ArtifactReadErrorCode::InvalidReference.as_str(),
+            INVALID_REFERENCE_MESSAGE,
+            false,
+        ),
+        error_schema(
+            ArtifactReadErrorCode::RangeOutOfBounds.as_str(),
+            RANGE_MESSAGE,
+            true,
+        ),
+        error_schema(
+            ArtifactReadErrorCode::ArtifactUnavailable.as_str(),
+            UNAVAILABLE_MESSAGE,
+            true,
+        ),
+        error_schema(
+            ArtifactReadErrorCode::IntegrityFailure.as_str(),
+            INTEGRITY_MESSAGE,
+            true,
+        ),
+        error_schema(
+            ArtifactReadErrorCode::UnauthorizedReference.as_str(),
+            "artifact reference is not authorized for this turn",
+            true,
+        ),
+    ];
     json!({
         "$schema": JSON_SCHEMA_DRAFT_2020_12_URI,
         "oneOf": [
@@ -736,7 +1081,7 @@ pub fn output_schema() -> Value {
                         "type": "string",
                         "pattern": REFERENCE_PATTERN,
                     },
-                    "offset": {"type": "integer", "minimum": 0},
+                    "offset": {"type": "integer", "minimum": 0, "maximum": u64::MAX},
                     "requested_bytes": {
                         "type": "integer",
                         "minimum": 1,
@@ -747,7 +1092,11 @@ pub fn output_schema() -> Value {
                         "minimum": 0,
                         "maximum": MAX_READ_BYTES,
                     },
-                    "total_bytes": {"type": "integer", "minimum": 0},
+                    "total_bytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": u64::MAX,
+                    },
                     "eof": {"type": "boolean"},
                     "data": {
                         "type": "string",
@@ -771,29 +1120,7 @@ pub fn output_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "is_error": {"const": true},
-                    "error": {
-                        "type": "object",
-                        "properties": {
-                            "code": {
-                                "type": "string",
-                                "enum": [
-                                    "invalid_arguments",
-                                    "invalid_reference",
-                                    "range_out_of_bounds",
-                                    "artifact_unavailable",
-                                    "integrity_failure",
-                                    "unauthorized_reference",
-                                ],
-                            },
-                            "message": {"type": "string"},
-                            "reference": {
-                                "type": "string",
-                                "pattern": REFERENCE_PATTERN,
-                            },
-                        },
-                        "required": ["code", "message"],
-                        "additionalProperties": false,
-                    },
+                    "error": {"oneOf": error_schemas},
                 },
                 "required": ["is_error", "error"],
                 "additionalProperties": false,
@@ -805,45 +1132,52 @@ pub fn output_schema() -> Value {
 /// A bounded local authority for the builtin artifact read.
 ///
 /// This type owns no path or process capability.  Its only storage operation
-/// is the verified `ArtifactStore::read_range` call after metadata and range
-/// checks have passed.
+/// is the verified `ArtifactStore::read_verified_range` call after arguments
+/// have been normalized.
 #[derive(Clone)]
 pub struct ArtifactReadAuthority {
     store: ArtifactStore,
-    normalizer: ArtifactReadNormalizer,
 }
 
 /// Executor spelling retained for callers that use an execution-oriented
-/// name.  Both names refer to the same narrow authority.
+/// name.
+#[deprecated(note = "use ArtifactReadAuthority instead")]
 pub type ArtifactReadExecutor = ArtifactReadAuthority;
 
 impl ArtifactReadAuthority {
     pub fn new(store: ArtifactStore) -> Self {
-        Self {
-            store,
-            normalizer: ArtifactReadNormalizer,
-        }
+        Self { store }
     }
 
+    /// Construct the authority from an artifact store.
+    #[deprecated(note = "use ArtifactReadAuthority::new instead")]
     pub fn from_store(store: ArtifactStore) -> Self {
         Self::new(store)
     }
 
+    /// Return the canonical capability schema.
+    #[deprecated(note = "use capability_schema instead")]
     pub fn schema(&self) -> CapabilitySchema {
         capability_schema()
     }
 
-    pub fn normalizer(&self) -> ArtifactReadNormalizer {
-        self.normalizer
+    /// Return the stateless strict argument normalizer.
+    #[deprecated(note = "construct ArtifactReadNormalizer directly instead")]
+    pub const fn normalizer(&self) -> ArtifactReadNormalizer {
+        ArtifactReadNormalizer
     }
 
+    /// Normalize model arguments before execution.
+    #[deprecated(note = "use ArtifactReadNormalizer::normalize instead")]
     pub fn normalize<T>(&self, arguments: T) -> Result<ArtifactReadResource, ArtifactReadError>
     where
         T: Borrow<Value>,
     {
-        self.normalizer.normalize(arguments)
+        ArtifactReadNormalizer.normalize(arguments)
     }
 
+    /// Alias for [`Self::normalize`].
+    #[deprecated(note = "use ArtifactReadNormalizer::normalize instead")]
     pub fn normalize_arguments<T>(
         &self,
         arguments: T,
@@ -851,21 +1185,23 @@ impl ArtifactReadAuthority {
     where
         T: Borrow<Value>,
     {
-        self.normalize(arguments)
+        ArtifactReadNormalizer.normalize(arguments)
     }
 
+    /// Normalize and execute one model argument object.
+    #[deprecated(note = "normalize explicitly, then call execute instead")]
     pub fn invoke<T>(&self, arguments: T) -> ArtifactReadResult
     where
         T: Borrow<Value>,
     {
-        match self.normalize(arguments) {
+        match ArtifactReadNormalizer.normalize(arguments) {
             Ok(resource) => self.execute(&resource),
             Err(error) => ArtifactReadResult::error(error),
         }
     }
 
     pub fn execute(&self, resource: &ArtifactReadResource) -> ArtifactReadResult {
-        if resource.length == 0 || resource.length > MAX_READ_BYTES as u64 {
+        if !valid_read_length(resource.length) {
             return ArtifactReadResult::error(ArtifactReadError::invalid_arguments());
         }
         let reference = resource.reference.clone();
@@ -874,49 +1210,53 @@ impl ArtifactReadAuthority {
             Err(error) => return ArtifactReadResult::error(map_store_error(error, reference)),
         };
 
-        if resource.offset > metadata.bytes {
-            // Verify the immutable object even for a rejected range.  This
-            // keeps every authority invocation tamper-detecting, including
-            // callers probing beyond the recorded EOF.
-            let length = usize::try_from(resource.length)
-                .expect("artifact.read length is bounded by MAX_READ_BYTES");
-            if let Err(error) = self.store.read_range(&reference, resource.offset, length) {
-                return ArtifactReadResult::error(map_store_error(error, reference));
-            }
+        let length = match usize::try_from(resource.length) {
+            Ok(length) => length,
+            Err(_) => return ArtifactReadResult::error(ArtifactReadError::invalid_arguments()),
+        };
+        let verified = match self
+            .store
+            .read_verified_range(&reference, resource.offset, length)
+        {
+            Ok(verified) => verified,
+            Err(error) => return ArtifactReadResult::error(map_store_error(error, reference)),
+        };
+        let total_bytes = verified.total_bytes();
+        if metadata.bytes != total_bytes {
+            return ArtifactReadResult::error(ArtifactReadError::integrity(reference));
+        }
+        if resource.offset > total_bytes {
             return ArtifactReadResult::error(ArtifactReadError::range_out_of_bounds(reference));
         }
 
-        // `read_range` verifies the complete object through the same open file
-        // descriptor even for an empty range, preserving tamper detection at
-        // EOF while keeping the returned projection bounded.
-        let length = usize::try_from(resource.length)
-            .expect("artifact.read length is bounded by MAX_READ_BYTES");
-        let bytes = match self.store.read_range(&reference, resource.offset, length) {
-            Ok(bytes) => bytes,
-            Err(error) => return ArtifactReadResult::error(map_store_error(error, reference)),
-        };
-        let returned_bytes = bytes.len() as u64;
-        let eof = resource.offset == metadata.bytes
-            || returned_bytes == metadata.bytes.saturating_sub(resource.offset);
+        let returned_bytes = verified.bytes().len() as u64;
+        let eof = resource.offset + returned_bytes == total_bytes;
 
         ArtifactReadResult::success(ArtifactReadSuccess {
             reference,
             offset: resource.offset,
             requested_bytes: resource.length,
             returned_bytes,
-            total_bytes: metadata.bytes,
+            total_bytes,
             eof,
-            data: BASE64.encode(bytes),
+            data: BASE64.encode(verified.bytes()),
         })
     }
 
+    /// Normalize and execute one model argument object.
+    #[deprecated(note = "normalize explicitly, then call execute instead")]
     pub fn execute_arguments<T>(&self, arguments: T) -> ArtifactReadResult
     where
         T: Borrow<Value>,
     {
-        self.invoke(arguments)
+        match ArtifactReadNormalizer.normalize(arguments) {
+            Ok(resource) => self.execute(&resource),
+            Err(error) => ArtifactReadResult::error(error),
+        }
     }
 
+    /// Execute a normalized resource.
+    #[deprecated(note = "use execute instead")]
     pub fn read(&self, resource: &ArtifactReadResource) -> ArtifactReadResult {
         self.execute(resource)
     }
@@ -926,9 +1266,10 @@ fn map_store_error(error: ArtifactStoreError, reference: ArtifactRef) -> Artifac
     match error {
         ArtifactStoreError::Integrity { .. } => ArtifactReadError::integrity(reference),
         ArtifactStoreError::InvalidReference(_) => ArtifactReadError::invalid_reference(),
-        ArtifactStoreError::MetadataMismatch(_) => ArtifactReadError::integrity(reference),
+        ArtifactStoreError::Metadata(_) | ArtifactStoreError::MetadataMismatch(_) => {
+            ArtifactReadError::integrity(reference)
+        }
         ArtifactStoreError::Io(_)
-        | ArtifactStoreError::Metadata(_)
         | ArtifactStoreError::TooLarge { .. }
         | ArtifactStoreError::NotRegularFile(_) => ArtifactReadError::unavailable(reference),
     }
@@ -936,20 +1277,79 @@ fn map_store_error(error: ArtifactStoreError, reference: ArtifactRef) -> Artifac
 
 #[cfg(test)]
 mod tests {
-    use ditto_capability::validate_json_schema;
+    use ditto_capability::{
+        CapabilityKind, CapabilityManifest, DataAccess, EffectProfile, EffectSpec, PlacementSpec,
+        PolicySpec, RetrievalSpec, RuntimeSpec, VerificationSpec, validate_json_schema,
+    };
+    use serde_json::Value;
     use tempfile::tempdir;
 
     use super::{
-        ARTIFACT_READ_ID, ARTIFACT_READ_VERSION, ArtifactReadAuthority, ArtifactReadErrorCode,
-        ArtifactReadNormalizer, ArtifactReadResult, MAX_READ_BYTES, capability_schema,
-        input_schema, output_schema,
+        ARTIFACT_READ_ID, ARTIFACT_READ_IDLE_TTL_MS, ARTIFACT_READ_VERIFICATION,
+        ARTIFACT_READ_VERSION, ARTIFACT_RESOURCE_TEMPLATE, ArtifactReadArguments,
+        ArtifactReadAuthority, ArtifactReadErrorCode, ArtifactReadManifestError,
+        ArtifactReadNormalizer, ArtifactReadResource, ArtifactReadResult, CAPABILITY_SUMMARY,
+        MAX_READ_BYTES, RETRIEVAL_ALIASES, RETRIEVAL_COMPLEMENTS, RETRIEVAL_INTENTS,
+        RETRIEVAL_NEGATIVE_EXAMPLES, capability_schema, input_schema, output_schema,
+        validate_artifact_read_manifest,
     };
+
+    fn canonical_manifest() -> CapabilityManifest {
+        CapabilityManifest {
+            id: ARTIFACT_READ_ID.to_owned(),
+            version: ARTIFACT_READ_VERSION.to_owned(),
+            namespace: "artifact".to_owned(),
+            kind: CapabilityKind::Tool,
+            summary: CAPABILITY_SUMMARY.to_owned(),
+            runtime: RuntimeSpec {
+                runtime_type: ditto_capability::RuntimeType::Builtin,
+                command: None,
+                lazy: true,
+                idle_ttl_ms: ARTIFACT_READ_IDLE_TTL_MS,
+            },
+            placement: PlacementSpec {
+                modes: vec!["local".to_owned()],
+                requires: Vec::new(),
+            },
+            retrieval: RetrievalSpec {
+                intents: RETRIEVAL_INTENTS.iter().map(ToString::to_string).collect(),
+                negative_examples: RETRIEVAL_NEGATIVE_EXAMPLES
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                complements: RETRIEVAL_COMPLEMENTS
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                aliases: RETRIEVAL_ALIASES.iter().map(ToString::to_string).collect(),
+            },
+            effects: EffectSpec {
+                minimum: EffectProfile::read_content(),
+                maximum: EffectProfile::read_content(),
+                resources: vec![ARTIFACT_RESOURCE_TEMPLATE.to_owned()],
+            },
+            policy: PolicySpec {
+                approval: Some("never".to_owned()),
+                secret_handles: Vec::new(),
+            },
+            verification: VerificationSpec {
+                default: Some(ARTIFACT_READ_VERIFICATION.to_owned()),
+            },
+        }
+    }
 
     fn authority() -> (tempfile::TempDir, ArtifactReadAuthority) {
         let directory = tempdir().expect("temporary directory");
         let store = ditto_artifact_store::ArtifactStore::open(directory.path())
             .expect("open artifact store");
         (directory, ArtifactReadAuthority::new(store))
+    }
+
+    fn invoke(authority: &ArtifactReadAuthority, arguments: Value) -> ArtifactReadResult {
+        match ArtifactReadNormalizer.normalize(arguments) {
+            Ok(resource) => authority.execute(&resource),
+            Err(error) => ArtifactReadResult::error(error),
+        }
     }
 
     #[test]
@@ -971,7 +1371,131 @@ mod tests {
             input["properties"]["reference"]["pattern"],
             "^artifact:sha256:[0-9a-f]{64}$"
         );
+        assert_eq!(input["properties"]["offset"]["maximum"], u64::MAX);
         assert_eq!(input["properties"]["length"]["maximum"], MAX_READ_BYTES);
+    }
+
+    #[test]
+    fn canonical_manifest_is_accepted_and_contract_mutations_are_rejected() {
+        assert!(validate_artifact_read_manifest(&canonical_manifest()).is_ok());
+
+        let mut manifest = canonical_manifest();
+        manifest.namespace = "other".to_owned();
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch { field: "namespace" })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.runtime.lazy = false;
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "runtime.lazy"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.placement.requires.push("network".to_owned());
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "placement.requires"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.retrieval.intents.swap(0, 1);
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "retrieval.intents"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.retrieval.negative_examples[0] = "read a file".to_owned();
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "retrieval.negative_examples"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.retrieval.aliases.reverse();
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "retrieval.aliases"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest
+            .retrieval
+            .complements
+            .push("other.capability".to_owned());
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "retrieval.complements"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.effects.maximum.access = DataAccess::Metadata;
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "effects.maximum"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.effects.resources[0] = "artifact:any".to_owned();
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "effects.resources"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.policy.approval = Some("risk-based".to_owned());
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "policy.approval"
+            })
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.verification.default = None;
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch {
+                field: "verification.default"
+            })
+        );
+    }
+
+    #[test]
+    fn wire_argument_serialization_rejects_invalid_lengths() {
+        let reference =
+            ditto_artifact_store::ArtifactRef::from_sha256("a".repeat(64)).expect("reference");
+        let arguments = ArtifactReadArguments {
+            reference: reference.clone(),
+            offset: 0,
+            length: 0,
+        };
+        assert!(serde_json::to_value(&arguments).is_err());
+        let resource = ArtifactReadResource {
+            reference,
+            offset: 0,
+            length: MAX_READ_BYTES as u64 + 1,
+        };
+        assert!(serde_json::to_value(&resource).is_err());
     }
 
     #[test]
@@ -1050,11 +1574,14 @@ mod tests {
     fn store_error_projection_never_exposes_path_or_calculated_hash() {
         let (_directory, authority) = authority();
         let reference = format!("artifact:sha256:{}", "b".repeat(64));
-        let result = authority.invoke(serde_json::json!({
-            "reference": reference,
-            "offset": 0,
-            "length": 1,
-        }));
+        let result = invoke(
+            &authority,
+            serde_json::json!({
+                "reference": reference,
+                "offset": 0,
+                "length": 1,
+            }),
+        );
         let encoded = serde_json::to_string(&result).expect("serialize unavailable result");
         assert!(result.is_error());
         assert!(encoded.contains("artifact_unavailable"));

@@ -47,7 +47,8 @@ runtime components. The default daemon exposes no arbitrary event-append route.
 
 - `seq`: durable resume cursor; never reused.
 - `event_id`: global identity.
-- `recorded_at`: daemon timestamp, never client supplied.
+- `recorded_at`: daemon timestamp, never client supplied; append canonicalizes it
+  to the millisecond precision preserved by durable storage and publication.
 - `session_id`: conversational continuity boundary.
 - `task_id`: durable work boundary.
 - `actor`: user, model, capability, policy, scheduler, or system.
@@ -56,6 +57,39 @@ runtime components. The default daemon exposes no arbitrary event-append route.
 - `causation_id`: event that directly caused this event.
 - `correlation_id`: root operation or request.
 - `span_id`: tracing span when available.
+
+## Kernel artifact-read turns
+
+The kernel owns version 1 of the durable read-only turn state machine. Clients
+cannot select its actors, kinds, correlations, or spans. The fixed mapping is:
+
+```text
+input.received          user
+context.compiled        system
+capabilities.selected   system
+model.requested         system
+model.output            model
+capability.requested    model
+execution.started       capability
+execution.output        capability
+turn.finished           system
+turn.failed             system
+```
+
+All versioned payloads carry `event_version = 1` and a kernel-assigned `turn_id`.
+Model request/output events use the request ID as their span; capability and
+execution events use the call ID. Every transition is durably appended before it
+is published or returned. Each `model.output` also records the
+integer-millisecond instant at which the fully validated, bounded semantic event
+was admitted.
+
+Replay selects an explicit turn from one session snapshot and validates the
+context provenance cutoff, exact selected manifest/epoch/schema, request and
+stream order, output-admission time, call/result correlation, bounds,
+cancellation/deadline failure stage and typed effective-deadline evidence,
+terminal state, and absence of a `task.completed` claim. It reconstructs the complete transcript without calling
+the provider or reading an artifact again. A pre-existing completion for the
+target task rejects live turn admission without creating new events.
 
 ## Streaming
 

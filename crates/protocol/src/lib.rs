@@ -20,6 +20,23 @@ pub mod event_kind {
     pub const TASK_CANCEL_REQUESTED: &str = "task.cancel_requested";
     pub const IMPROVEMENT_CANDIDATE_CREATED: &str = "improvement.candidate_created";
     pub const IMPROVEMENT_PROMOTED: &str = "improvement.promoted";
+    pub const MODEL_REQUESTED: &str = "model.requested";
+    pub const MODEL_OUTPUT: &str = "model.output";
+    pub const TURN_FINISHED: &str = "turn.finished";
+    pub const TURN_FAILED: &str = "turn.failed";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_kind;
+
+    #[test]
+    fn task_003_turn_event_kinds_are_stable() {
+        assert_eq!(event_kind::MODEL_REQUESTED, "model.requested");
+        assert_eq!(event_kind::MODEL_OUTPUT, "model.output");
+        assert_eq!(event_kind::TURN_FINISHED, "turn.finished");
+        assert_eq!(event_kind::TURN_FAILED, "turn.failed");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

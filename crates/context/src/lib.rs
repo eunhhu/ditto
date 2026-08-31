@@ -278,6 +278,13 @@ impl ContextDirective {
     const fn is_required(&self) -> bool {
         !matches!(self, Self::Ranked)
     }
+
+    fn validate(&self) -> Result<(), ()> {
+        match self {
+            Self::PolicyRequired { reason } if reason.trim().is_empty() => Err(()),
+            Self::Ranked | Self::UserPinned | Self::PolicyRequired { .. } => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -530,6 +537,10 @@ impl ContextCapsule {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ContextCompileError {
+    #[error("context candidate {node_id} appears more than once")]
+    DuplicateCandidate { node_id: String },
+    #[error("policy-required context {node_id} has an empty reason")]
+    InvalidPolicyReason { node_id: String },
     #[error("required context {node_id} is invalid: {reason}")]
     InvalidRequiredContext { node_id: String, reason: String },
     #[error(
@@ -564,6 +575,20 @@ impl ContextCompiler {
         let token_budget = token_budget.unwrap_or(self.default_budget);
         let selection_budget = token_budget.min(self.absolute_budget);
         let query_tokens = tokenize(&signature.searchable_text());
+        let candidates = candidates.into_iter().collect::<Vec<_>>();
+        let mut candidate_ids = HashSet::with_capacity(candidates.len());
+        for candidate in &candidates {
+            if !candidate_ids.insert(candidate.node.id.clone()) {
+                return Err(ContextCompileError::DuplicateCandidate {
+                    node_id: candidate.node.id.clone(),
+                });
+            }
+            if candidate.directive.validate().is_err() {
+                return Err(ContextCompileError::InvalidPolicyReason {
+                    node_id: candidate.node.id.clone(),
+                });
+            }
+        }
         let mut required = Vec::new();
         let mut ranked = Vec::new();
         let mut excluded = Vec::new();
@@ -685,6 +710,246 @@ impl ContextCompiler {
             },
         })
     }
+
+    /// Validate a compiled context and its model-facing capsule against the
+    /// compiler's deterministic selection contract.
+    ///
+    /// The compiler is the authority for ranking, tokenization, receipt
+    /// grammar, and token accounting. Keeping this check here lets runtime and
+    /// replay use the same pure implementation without persisting ephemeral
+    /// directives or candidate inputs.
+    pub fn validate_compiled(
+        &self,
+        signature: &TaskSignature,
+        compiled: &CompiledContext,
+        capsule: &ContextCapsule,
+        token_budget: Option<u32>,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<(), CompiledContextValidationError> {
+        capsule
+            .validate_at_with_budget(accepted_at, self.absolute_budget)
+            .map_err(CompiledContextValidationError::InvalidCapsule)?;
+
+        if ContextCapsule::from(compiled) != *capsule {
+            return Err(CompiledContextValidationError::CapsuleMismatch);
+        }
+        if compiled.nodes.len() != compiled.receipt.included.len()
+            || compiled.nodes.len() != capsule.nodes.len()
+        {
+            return Err(CompiledContextValidationError::NodeReceiptLengthMismatch {
+                nodes: compiled.nodes.len(),
+                included: compiled.receipt.included.len(),
+                capsule: capsule.nodes.len(),
+            });
+        }
+
+        let expected_token_budget = token_budget.unwrap_or(self.default_budget);
+        if compiled.receipt.token_budget != expected_token_budget
+            || compiled.receipt.absolute_budget != self.absolute_budget
+        {
+            return Err(CompiledContextValidationError::BudgetMismatch {
+                expected_token_budget,
+                actual_token_budget: compiled.receipt.token_budget,
+                expected_absolute_budget: self.absolute_budget,
+                actual_absolute_budget: compiled.receipt.absolute_budget,
+            });
+        }
+
+        let query_tokens = tokenize(&signature.searchable_text());
+        let mut total_token_cost = 0_u32;
+        let selection_budget = expected_token_budget.min(self.absolute_budget);
+        let mut required_token_cost = 0_u32;
+        let mut selection_token_cost = 0_u32;
+        let mut seen_ids = HashSet::with_capacity(
+            compiled
+                .receipt
+                .included
+                .len()
+                .saturating_add(compiled.receipt.excluded.len()),
+        );
+
+        for entry in &compiled.receipt.excluded {
+            if !seen_ids.insert(entry.node_id.clone()) {
+                return Err(CompiledContextValidationError::DuplicateReceiptId {
+                    node_id: entry.node_id.clone(),
+                });
+            }
+        }
+
+        let mut previous_key = None;
+        for ((node, receipt), capsule_item) in compiled
+            .nodes
+            .iter()
+            .zip(&compiled.receipt.included)
+            .zip(&capsule.nodes)
+        {
+            if !seen_ids.insert(receipt.node_id.clone()) {
+                return Err(CompiledContextValidationError::DuplicateReceiptId {
+                    node_id: receipt.node_id.clone(),
+                });
+            }
+
+            node.validate()
+                .map_err(|error| CompiledContextValidationError::InvalidNode {
+                    node_id: node.id.clone(),
+                    reason: error.to_string(),
+                })?;
+            if !node.is_valid_at(accepted_at) {
+                return Err(CompiledContextValidationError::NodeNotValidAt {
+                    node_id: node.id.clone(),
+                });
+            }
+
+            let expected_score = relevance_score(node, &query_tokens);
+            let expected_token_cost = capsule_item.token_cost();
+            let priority = receipt_reason_priority(&receipt.reason).ok_or_else(|| {
+                CompiledContextValidationError::InvalidReceiptReason {
+                    node_id: node.id.clone(),
+                    reason: receipt.reason.clone(),
+                }
+            })?;
+
+            if receipt.node_id != node.id
+                || receipt.source_event_ids != node.source_event_ids
+                || receipt.epistemic != node.epistemic
+            {
+                return Err(CompiledContextValidationError::ReceiptNodeMismatch {
+                    node_id: node.id.clone(),
+                });
+            }
+            if receipt.token_cost != expected_token_cost {
+                return Err(CompiledContextValidationError::TokenCostMismatch {
+                    node_id: node.id.clone(),
+                    expected: expected_token_cost,
+                    actual: receipt.token_cost,
+                });
+            }
+            if receipt.score.to_bits() != expected_score.to_bits() {
+                return Err(CompiledContextValidationError::ScoreMismatch {
+                    node_id: node.id.clone(),
+                });
+            }
+            if receipt.reason == "task-relevance" && receipt.score <= 0.0 {
+                return Err(CompiledContextValidationError::NonPositiveTaskRelevance {
+                    node_id: node.id.clone(),
+                });
+            }
+
+            let key = (priority, receipt.score, receipt.node_id.as_str());
+            if let Some((previous_priority, previous_score, previous_id)) = previous_key
+                && (priority > previous_priority
+                    || (priority == previous_priority
+                        && (receipt.score.total_cmp(&previous_score).is_gt()
+                            || (receipt.score.to_bits() == previous_score.to_bits()
+                                && receipt.node_id.as_str() < previous_id))))
+            {
+                return Err(CompiledContextValidationError::NonCanonicalOrder {
+                    node_id: node.id.clone(),
+                });
+            }
+
+            if priority > 0 {
+                required_token_cost = required_token_cost.saturating_add(receipt.token_cost);
+                if required_token_cost > self.absolute_budget {
+                    return Err(
+                        CompiledContextValidationError::RequiredSelectionBudgetExceeded {
+                            used: required_token_cost,
+                            absolute_budget: self.absolute_budget,
+                        },
+                    );
+                }
+            } else if required_token_cost > selection_budget
+                || selection_token_cost.saturating_add(receipt.token_cost) > selection_budget
+            {
+                return Err(CompiledContextValidationError::SelectionBudgetExceeded {
+                    node_id: node.id.clone(),
+                    used: selection_token_cost.saturating_add(receipt.token_cost),
+                    token_budget: selection_budget,
+                });
+            }
+            selection_token_cost = selection_token_cost.saturating_add(receipt.token_cost);
+            previous_key = Some(key);
+            total_token_cost = total_token_cost.saturating_add(receipt.token_cost);
+        }
+
+        if compiled.receipt.total_token_cost != total_token_cost
+            || capsule.token_cost() != total_token_cost
+            || total_token_cost > self.absolute_budget
+            || compiled.receipt.over_soft_budget != (total_token_cost > expected_token_budget)
+        {
+            return Err(CompiledContextValidationError::TokenAccountingMismatch {
+                expected: total_token_cost,
+                actual: compiled.receipt.total_token_cost,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error, PartialEq)]
+pub enum CompiledContextValidationError {
+    #[error("compiled context capsule is invalid: {0}")]
+    InvalidCapsule(ContextCapsuleValidationError),
+    #[error("compiled context, receipt, and capsule do not describe the same nodes")]
+    CapsuleMismatch,
+    #[error(
+        "compiled context node/receipt lengths differ (nodes={nodes}, included={included}, capsule={capsule})"
+    )]
+    NodeReceiptLengthMismatch {
+        nodes: usize,
+        included: usize,
+        capsule: usize,
+    },
+    #[error("compiled context node {node_id} is invalid: {reason}")]
+    InvalidNode { node_id: String, reason: String },
+    #[error("compiled context node {node_id} is not valid at the acceptance time")]
+    NodeNotValidAt { node_id: String },
+    #[error("compiled context receipt id {node_id} occurs more than once")]
+    DuplicateReceiptId { node_id: String },
+    #[error("compiled context receipt for node {node_id} does not match the node")]
+    ReceiptNodeMismatch { node_id: String },
+    #[error(
+        "compiled context receipt for node {node_id} has token cost {actual}, expected {expected}"
+    )]
+    TokenCostMismatch {
+        node_id: String,
+        expected: u32,
+        actual: u32,
+    },
+    #[error("compiled context receipt for node {node_id} has a non-canonical score")]
+    ScoreMismatch { node_id: String },
+    #[error("compiled context receipt for node {node_id} has a non-positive task-relevance score")]
+    NonPositiveTaskRelevance { node_id: String },
+    #[error("compiled context receipt for node {node_id} has an invalid reason {reason:?}")]
+    InvalidReceiptReason { node_id: String, reason: String },
+    #[error("compiled context receipt is not in canonical order at node {node_id}")]
+    NonCanonicalOrder { node_id: String },
+    #[error(
+        "required compiled context costs {used} tokens, exceeding the absolute ceiling {absolute_budget}"
+    )]
+    RequiredSelectionBudgetExceeded { used: u32, absolute_budget: u32 },
+    #[error(
+        "ranked compiled context node {node_id} would exceed the selection budget ({used} > {token_budget})"
+    )]
+    SelectionBudgetExceeded {
+        node_id: String,
+        used: u32,
+        token_budget: u32,
+    },
+    #[error(
+        "compiled context budget differs from the compiler (token={actual_token_budget}, expected={expected_token_budget}; absolute={actual_absolute_budget}, expected={expected_absolute_budget})"
+    )]
+    BudgetMismatch {
+        expected_token_budget: u32,
+        actual_token_budget: u32,
+        expected_absolute_budget: u32,
+        actual_absolute_budget: u32,
+    },
+    #[error(
+        "compiled context token accounting is inconsistent (actual={actual}, expected={expected})"
+    )]
+    TokenAccountingMismatch { expected: u32, actual: u32 },
 }
 
 struct PreparedCandidate {
@@ -716,6 +981,20 @@ fn receipt_entry(
         reason: directive.receipt_reason(),
         score,
         token_cost,
+    }
+}
+
+fn receipt_reason_priority(reason: &str) -> Option<u8> {
+    match reason {
+        "task-relevance" => Some(0),
+        "user-pinned" => Some(1),
+        _ if reason
+            .strip_prefix("policy-required: ")
+            .is_some_and(|policy_reason| !policy_reason.trim().is_empty()) =>
+        {
+            Some(2)
+        }
+        _ => None,
     }
 }
 
@@ -786,11 +1065,11 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use super::{
-        CAPSULE_ITEM_FIXED_OVERHEAD_TOKENS, ContextCandidate, ContextCapsule, ContextCapsuleItem,
-        ContextCapsuleValidationError, ContextCompileError, ContextCompiler, ContextEdge,
-        ContextEdgeKind, ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin,
-        ContextScope, ContextValidationError, DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus,
-        TaskSignature,
+        CAPSULE_ITEM_FIXED_OVERHEAD_TOKENS, CompiledContextValidationError, ContextCandidate,
+        ContextCapsule, ContextCapsuleItem, ContextCapsuleValidationError, ContextCompileError,
+        ContextCompiler, ContextEdge, ContextEdgeKind, ContextExclusion, ContextExclusionReason,
+        ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope,
+        ContextValidationError, DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus, TaskSignature,
     };
 
     fn node(id: &str, summary: &str) -> ContextNode {
@@ -1247,6 +1526,361 @@ mod tests {
                 absolute_budget: DEFAULT_CONTEXT_ABSOLUTE_BUDGET,
                 ..
             })
+        ));
+    }
+
+    fn validation_fixture() -> (
+        ContextCompiler,
+        TaskSignature,
+        super::CompiledContext,
+        ContextCapsule,
+        chrono::DateTime<Utc>,
+    ) {
+        let compiler = ContextCompiler::default();
+        let signature = TaskSignature {
+            request: "database service".into(),
+            ..TaskSignature::default()
+        };
+        let accepted_at = Utc::now();
+        let compiled = compiler
+            .compile(
+                &signature,
+                [
+                    ContextCandidate::user_pinned(node("pinned", "database approval")),
+                    ContextCandidate::ranked(node("ranked", "database service")),
+                ],
+                Some(compiler.default_budget),
+                accepted_at,
+            )
+            .expect("valid context compiles");
+        let capsule = ContextCapsule::from(&compiled);
+        (compiler, signature, compiled, capsule, accepted_at)
+    }
+
+    #[test]
+    fn compiler_rejects_duplicate_candidate_ids_before_selection() {
+        let duplicate = ContextCompiler::default()
+            .compile(
+                &TaskSignature {
+                    request: "database".into(),
+                    ..TaskSignature::default()
+                },
+                [
+                    ContextCandidate::ranked(node("duplicate", "database")),
+                    ContextCandidate::user_pinned(node("duplicate", "database")),
+                ],
+                None,
+                Utc::now(),
+            )
+            .expect_err("duplicate candidate ids must be rejected before selection");
+        assert!(matches!(
+            duplicate,
+            ContextCompileError::DuplicateCandidate { ref node_id }
+                if node_id == "duplicate"
+        ));
+    }
+
+    #[test]
+    fn compiler_rejects_empty_policy_reason_before_selection() {
+        for reason in ["", "   ", "\n\t"] {
+            let error = ContextCompiler::default()
+                .compile(
+                    &TaskSignature::default(),
+                    [ContextCandidate::policy_required(
+                        node("policy", "protect credentials"),
+                        reason,
+                    )],
+                    None,
+                    Utc::now(),
+                )
+                .expect_err("empty policy reason must be rejected");
+            assert!(matches!(
+                error,
+                ContextCompileError::InvalidPolicyReason { ref node_id }
+                    if node_id == "policy"
+            ));
+        }
+    }
+
+    #[test]
+    fn compiled_context_validation_accepts_exact_compiler_output_and_caller_budget() {
+        let (compiler, signature, compiled, capsule, accepted_at) = validation_fixture();
+        compiler
+            .validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            )
+            .expect("exact compiled context validates");
+    }
+
+    #[test]
+    fn compiled_context_validation_accepts_policy_reason_priority_order() {
+        let compiler = ContextCompiler::default();
+        let signature = TaskSignature {
+            request: "database service".into(),
+            ..TaskSignature::default()
+        };
+        let accepted_at = Utc::now();
+        let compiled = compiler
+            .compile(
+                &signature,
+                [
+                    ContextCandidate::ranked(node("ranked", "database service")),
+                    ContextCandidate::user_pinned(node("pinned", "database approval")),
+                    ContextCandidate::policy_required(
+                        node("policy", "database credentials"),
+                        "protect secret material",
+                    ),
+                ],
+                None,
+                accepted_at,
+            )
+            .expect("policy context compiles");
+        let capsule = ContextCapsule::from(&compiled);
+        compiler
+            .validate_compiled(&signature, &compiled, &capsule, None, accepted_at)
+            .expect("policy reason and priority order validate");
+        assert_eq!(
+            compiled
+                .receipt
+                .included
+                .iter()
+                .map(|entry| entry.reason.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "policy-required: protect secret material",
+                "user-pinned",
+                "task-relevance"
+            ]
+        );
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_score_mutation() {
+        let (compiler, signature, mut compiled, capsule, accepted_at) = validation_fixture();
+        compiled.receipt.included[0].score += 1.0;
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::ScoreMismatch { ref node_id })
+                if node_id == "pinned"
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_noncanonical_order() {
+        let (compiler, signature, mut compiled, _, accepted_at) = validation_fixture();
+        compiled.nodes.swap(0, 1);
+        compiled.receipt.included.swap(0, 1);
+        let capsule = ContextCapsule::from(&compiled);
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::NonCanonicalOrder { ref node_id })
+                if node_id == "pinned"
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_invalid_reason_grammar() {
+        let (compiler, signature, mut compiled, capsule, accepted_at) = validation_fixture();
+        compiled.receipt.included[0].reason = "policy-required: ".into();
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::InvalidReceiptReason {
+                ref node_id,
+                ref reason,
+            }) if node_id == "pinned" && reason == "policy-required: "
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_token_cost_mutation() {
+        let (compiler, signature, mut compiled, capsule, accepted_at) = validation_fixture();
+        compiled.receipt.included[0].token_cost += 1;
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::TokenCostMismatch { ref node_id, .. })
+                if node_id == "pinned"
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_capsule_mutation() {
+        let (compiler, signature, compiled, mut capsule, accepted_at) = validation_fixture();
+        capsule.nodes[0].summary.push_str(" forged");
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::CapsuleMismatch)
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_node_receipt_length_mismatch() {
+        let (compiler, signature, mut compiled, capsule, accepted_at) = validation_fixture();
+        compiled.receipt.included.pop();
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::NodeReceiptLengthMismatch {
+                nodes: 2,
+                included: 1,
+                capsule: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_budget_and_accounting_mutations() {
+        let (compiler, signature, mut compiled, capsule, accepted_at) = validation_fixture();
+        compiled.receipt.token_budget -= 1;
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::BudgetMismatch { .. })
+        ));
+
+        let (compiler, signature, mut compiled, capsule, accepted_at) = validation_fixture();
+        compiled.receipt.total_token_cost += 1;
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::TokenAccountingMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_ranked_selection_over_soft_budget() {
+        let (compiler, signature, mut compiled, capsule, accepted_at) = validation_fixture();
+        compiled.receipt.token_budget = 1;
+        compiled.receipt.over_soft_budget = true;
+        assert!(matches!(
+            compiler.validate_compiled(&signature, &compiled, &capsule, Some(1), accepted_at),
+            Err(CompiledContextValidationError::SelectionBudgetExceeded {
+                ref node_id,
+                token_budget: 1,
+                ..
+            }) if node_id == "ranked"
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_duplicate_included_and_excluded_ids() {
+        let (compiler, signature, mut compiled, capsule, accepted_at) = validation_fixture();
+        compiled.receipt.excluded.push(ContextExclusion {
+            node_id: "pinned".into(),
+            reason: ContextExclusionReason::Irrelevant,
+            detail: None,
+        });
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::DuplicateReceiptId { ref node_id })
+                if node_id == "pinned"
+        ));
+    }
+
+    #[test]
+    fn task_relevance_receipts_require_a_positive_score() {
+        let compiler = ContextCompiler::default();
+        let signature = TaskSignature {
+            request: "database".into(),
+            ..TaskSignature::default()
+        };
+        let accepted_at = Utc::now();
+        let compiled = compiler
+            .compile(
+                &signature,
+                [ContextCandidate::user_pinned(node(
+                    "pinned",
+                    "vacation destination",
+                ))],
+                None,
+                accepted_at,
+            )
+            .expect("pinned context is included even when irrelevant");
+        let mut mutated = compiled.clone();
+        mutated.receipt.included[0].reason = "task-relevance".into();
+        let capsule = ContextCapsule::from(&mutated);
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &mutated,
+                &capsule,
+                None,
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::NonPositiveTaskRelevance { ref node_id })
+                if node_id == "pinned"
+        ));
+    }
+
+    #[test]
+    fn compiled_context_validation_rejects_capsule_expiry_at_acceptance() {
+        let (compiler, signature, compiled, mut capsule, accepted_at) = validation_fixture();
+        capsule.nodes[0].valid_until = Some(accepted_at - Duration::seconds(1));
+        assert!(matches!(
+            compiler.validate_compiled(
+                &signature,
+                &compiled,
+                &capsule,
+                Some(compiler.default_budget),
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::InvalidCapsule(
+                ContextCapsuleValidationError::NotValidAt { ref item_id }
+            )) if item_id == "pinned"
         ));
     }
 }
