@@ -6,7 +6,7 @@ use std::{
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use ditto_protocol::{EventActor, EventQuery, EventRecord, NewEvent};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -176,21 +176,7 @@ impl EventStore {
                 query.task_id.as_deref(),
                 limit,
             ],
-            |row| {
-                Ok(RawEventRecord {
-                    seq: row.get(0)?,
-                    event_id: row.get(1)?,
-                    recorded_at: row.get(2)?,
-                    session_id: row.get(3)?,
-                    task_id: row.get(4)?,
-                    actor: row.get(5)?,
-                    kind: row.get(6)?,
-                    payload_json: row.get(7)?,
-                    causation_id: row.get(8)?,
-                    correlation_id: row.get(9)?,
-                    span_id: row.get(10)?,
-                })
-            },
+            raw_event_record_from_row,
         )?;
 
         let mut events = Vec::new();
@@ -198,6 +184,46 @@ impl EventStore {
             events.push(row?.try_into()?);
         }
         Ok(events)
+    }
+
+    /// Returns the event with the exact globally unique event ID, if present.
+    pub fn get_by_event_id(&self, event_id: &str) -> Result<Option<EventRecord>, EventStoreError> {
+        let connection = self.connection()?;
+        let raw = connection
+            .query_row(
+                r#"
+                SELECT
+                    seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+                FROM events
+                WHERE event_id = ?1
+                "#,
+                [event_id],
+                raw_event_record_from_row,
+            )
+            .optional()?;
+
+        raw.map(TryInto::try_into).transpose()
+    }
+
+    /// Returns the event with the exact durable sequence, if present.
+    pub fn get_by_seq(&self, seq: i64) -> Result<Option<EventRecord>, EventStoreError> {
+        let connection = self.connection()?;
+        let raw = connection
+            .query_row(
+                r#"
+                SELECT
+                    seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+                FROM events
+                WHERE seq = ?1
+                "#,
+                [seq],
+                raw_event_record_from_row,
+            )
+            .optional()?;
+
+        raw.map(TryInto::try_into).transpose()
     }
 
     pub fn latest_seq(&self) -> Result<i64, EventStoreError> {
@@ -256,6 +282,22 @@ struct RawEventRecord {
     causation_id: Option<String>,
     correlation_id: Option<String>,
     span_id: Option<String>,
+}
+
+fn raw_event_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawEventRecord> {
+    Ok(RawEventRecord {
+        seq: row.get(0)?,
+        event_id: row.get(1)?,
+        recorded_at: row.get(2)?,
+        session_id: row.get(3)?,
+        task_id: row.get(4)?,
+        actor: row.get(5)?,
+        kind: row.get(6)?,
+        payload_json: row.get(7)?,
+        causation_id: row.get(8)?,
+        correlation_id: row.get(9)?,
+        span_id: row.get(10)?,
+    })
 }
 
 impl TryFrom<RawEventRecord> for EventRecord {
@@ -326,6 +368,145 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].task_id.as_deref(), Some("task-1"));
+    }
+
+    #[test]
+    fn looks_up_exact_events_by_id_and_sequence_after_reopen() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("state.db");
+        let store = EventStore::open(&path).expect("open store");
+        let appended = store
+            .append(NewEvent::user_input(
+                "session",
+                Some("task".into()),
+                "lookup",
+            ))
+            .expect("append event");
+
+        let by_id = store
+            .get_by_event_id(&appended.event_id)
+            .expect("lookup by event ID")
+            .expect("event ID is present");
+        let by_seq = store
+            .get_by_seq(appended.seq)
+            .expect("lookup by sequence")
+            .expect("sequence is present");
+        assert_eq!(
+            serde_json::to_string(&by_id).expect("serialize ID lookup"),
+            serde_json::to_string(&appended).expect("serialize appended event")
+        );
+        assert_eq!(
+            serde_json::to_string(&by_seq).expect("serialize sequence lookup"),
+            serde_json::to_string(&appended).expect("serialize appended event")
+        );
+        assert!(
+            store
+                .get_by_event_id("01J00000000000000000000000")
+                .expect("lookup absent event ID")
+                .is_none()
+        );
+        assert!(
+            store
+                .get_by_seq(appended.seq + 1)
+                .expect("lookup absent sequence")
+                .is_none()
+        );
+
+        drop(store);
+        let reopened = EventStore::open(&path).expect("reopen store");
+        let reopened_by_id = reopened
+            .get_by_event_id(&appended.event_id)
+            .expect("lookup reopened event by ID")
+            .expect("reopened event ID is present");
+        let reopened_by_seq = reopened
+            .get_by_seq(appended.seq)
+            .expect("lookup reopened event by sequence")
+            .expect("reopened sequence is present");
+        assert_eq!(
+            serde_json::to_string(&reopened_by_id).expect("serialize reopened ID lookup"),
+            serde_json::to_string(&appended).expect("serialize appended event")
+        );
+        assert_eq!(
+            serde_json::to_string(&reopened_by_seq).expect("serialize reopened sequence lookup"),
+            serde_json::to_string(&appended).expect("serialize appended event")
+        );
+    }
+
+    #[test]
+    fn exact_event_lookup_distinguishes_missing_from_invalid_persisted_rows() {
+        let directory = tempdir().expect("temporary directory");
+        let store = EventStore::open(directory.path().join("state.db")).expect("open store");
+        let invalid_actor = store
+            .append(NewEvent::user_input("session", None, "invalid actor"))
+            .expect("append actor fixture");
+        let invalid_timestamp = store
+            .append(NewEvent::user_input("session", None, "invalid timestamp"))
+            .expect("append timestamp fixture");
+        let invalid_payload = store
+            .append(NewEvent::user_input("session", None, "invalid payload"))
+            .expect("append payload fixture");
+
+        assert!(
+            store
+                .get_by_event_id("01J00000000000000000000000")
+                .expect("lookup missing event ID")
+                .is_none()
+        );
+        assert!(
+            store
+                .get_by_seq(0)
+                .expect("lookup missing sequence")
+                .is_none()
+        );
+
+        let connection = store.connection().expect("lock connection");
+        connection
+            .execute_batch("DROP TRIGGER events_reject_update;")
+            .expect("drop update guard for malformed-row fixture");
+        connection
+            .execute(
+                "UPDATE events SET actor = 'forged' WHERE seq = ?1",
+                [invalid_actor.seq],
+            )
+            .expect("corrupt actor fixture");
+        connection
+            .execute(
+                "UPDATE events SET recorded_at = 'not-a-timestamp' WHERE seq = ?1",
+                [invalid_timestamp.seq],
+            )
+            .expect("corrupt timestamp fixture");
+        connection
+            .execute(
+                "UPDATE events SET payload_json = '{not-json' WHERE seq = ?1",
+                [invalid_payload.seq],
+            )
+            .expect("corrupt payload fixture");
+        drop(connection);
+
+        assert!(matches!(
+            store.get_by_event_id(&invalid_actor.event_id),
+            Err(super::EventStoreError::InvalidActor(actor)) if actor == "forged"
+        ));
+        assert!(matches!(
+            store.get_by_seq(invalid_actor.seq),
+            Err(super::EventStoreError::InvalidActor(actor)) if actor == "forged"
+        ));
+        assert!(matches!(
+            store.get_by_event_id(&invalid_timestamp.event_id),
+            Err(super::EventStoreError::Timestamp(_))
+        ));
+        assert!(matches!(
+            store.get_by_seq(invalid_timestamp.seq),
+            Err(super::EventStoreError::Timestamp(_))
+        ));
+        assert!(matches!(
+            store.get_by_event_id(&invalid_payload.event_id),
+            Err(super::EventStoreError::Payload(_))
+        ));
+        assert!(matches!(
+            store.get_by_seq(invalid_payload.seq),
+            Err(super::EventStoreError::Payload(_))
+        ));
     }
 
     #[test]
