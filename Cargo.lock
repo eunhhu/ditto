@@ -419,6 +419,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ditto-context-projection"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ditto-context",
+ "ditto-event-store",
+ "ditto-protocol",
+ "ditto-retrieval",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "ditto-daemon"
 version = "0.1.0"
 dependencies = [
