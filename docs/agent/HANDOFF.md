@@ -47,30 +47,54 @@
 
 ## Latest verified slice
 
-- Task 004 remains in progress. Its shared retrieval, protocol/event-store,
-  context, capability, standalone projection, and trusted kernel admission
-  slices are complete; joint working-set composition is the next unverified
-  slice.
-  `ditto-retrieval` owns bounded canonical task queries, optional injected
-  embeddings, exact operational limits, descriptor continuity, and typed
-  fail-closed provider errors. Context and capability V2 paths consume the same
-  query contract without changing their legacy APIs; embeddings cannot bypass
-  lexical eligibility or runtime hard filters.
-- `ditto-context-projection` owns a separate WAL SQLite cache with atomic
-  page/checkpoint commits, stable high-water replay, anchor/schema recovery,
-  source-immutable rebuilds, session-wide node identity, exact-scope
-  supersession, and detached scope snapshots. Live draft identity and
-  supersession authority comes only from bounded pages of canonical event
-  history; relevant cache corruption permits one rebuild and one recheck but
-  never authorizes admission. The fixed `state.db` source filename is rejected
-  before filesystem mutation.
-- The context projection enforces actor, envelope, scope, provenance, origin,
-  causation, trust, and exact durable N/N+1 bounds. Its 21 integration tests,
-  including the five Task 004 acceptance scenarios and real SQLite corruption/
-  rollback cases, passed with strict Clippy and Rust 1.88. The full
-  `./scripts/agent-check.sh` repository gate passed after both the authenticated
-  ranking and projection commits; independent code review and manual QA cleared
-  with no blockers.
+- Task 004 is complete under ADR 0010. The immutable event spine is the sole
+  durable authority for version-1, system-authored `context.node.recorded`
+  events. `ditto-context-projection` owns a separate WAL SQLite cache with
+  atomic page/checkpoint commits, stable high-water replay, anchor/schema
+  recovery, source-immutable rebuilds, and detached scope snapshots. The fixed
+  source filename `state.db` is rejected before filesystem mutation; the cache
+  can be deleted and rebuilt without changing source events.
+- Durable admission is limited to session- and task-scoped nodes. Identity is
+  session-wide `(session_id, node_id)` while supersession is exact-scope.
+  Provenance must resolve to prior same-session events, task provenance remains
+  task-compatible, and each origin requires matching actor evidence; user-origin
+  assertions require user-authored evidence and model-origin assertions are
+  rejected. The kernel derives causation from the greatest durable source
+  sequence, independent of source-list order.
+- `ditto-retrieval` owns `TaskSignatureV2` and version-1 `TaskQuery`, bounded
+  canonical normalization, optional injected embeddings, descriptor continuity,
+  and typed fail-closed provider errors. Context summaries accept at most 65,000
+  bytes and the fixed `id=...\nkind=...\nsummary=...` document is bounded at
+  65,287 bytes. Context and capability V2 scans count scope/catalogue candidates
+  before inactive, supersession, lexical, or hard filters; source candidate
+  10,001 fails. Context results and capability roots accept 1 through 256, and
+  expanded epoch cards accept 1 through 512. Zero and N+1 are rejected without
+  clamping or a partial value.
+- Historical five-field context signatures, compilers, and raw-string
+  capability searches remain separate V1 paths with their existing behavior.
+  The explicit fallible V1-to-V2 adapter supplies `resources = []` and applies
+  V2 bounds; legacy APIs do not silently delegate to V2.
+- `DittoKernel::retrieve_working_set` validates raw limits in fixed
+  context/root/epoch precedence, builds one V2 query, captures one canonical
+  high-water and one evaluation instant under the clone-shared admission gate,
+  then returns one detached projection checkpoint, compiled context and capsule,
+  and bounded execution epoch or one typed error. It appends no event, invokes
+  no model, persists no query/vector state, and never returns a partial working
+  set. Production `DittoKernel::open` is lexical-only. The explicit injected
+  provider constructor stores the caller-owned provider; each subsequent joint
+  retrieval performs one shared query embedding. Configured provider,
+  descriptor, dimension, or vector failures do not fall back, and embeddings
+  cannot revive candidates excluded by lexical eligibility or capability hard
+  filters.
+- Projection synchronization validates canonical delta semantics before cache
+  application, compares exact canonical rows, identities, and supersession edges
+  for the requested snapshot, and permits one rebuild and one recheck for
+  logical cache drift. Bounded affected-session history uses file-backed
+  temporary state. Cache-only rows, edges, event IDs, sequences, or a fake
+  10,001st row cannot authorize admission or forge a retrieval denial; malformed
+  canonical history and SQLite operational failures propagate without a repair
+  retry. Persistent drift is the typed
+  `ProjectionSnapshotIntegrityMismatch` failure.
 - `DittoKernel::admit_context_node` accepts only a non-deserializable trusted
   draft with no actor, kind, causation, correlation, span, event identity,
   sequence, or timestamp authority. One mutex shared by every clone of a
@@ -85,18 +109,27 @@
   bounded to 4,096 UTF-8 bytes. Recovery synchronizes canonical history without
   another append or live publication; a retry returns the committed identity as
   a duplicate without comparing payloads. Kernel open eagerly replays the
-  projection and publishes nothing. This slice supports one `KernelInner` and
-  its clones as writers for a data directory; separately opened kernels,
+  projection and publishes nothing. The single-writer support boundary is one
+  `KernelInner` and its clones for a data directory; separately opened kernels,
   cross-process writers, and out-of-band event-store writers remain explicitly
   unsupported.
-- The admission slice passed 48 kernel tests (five kernel unit tests, five
-  durable-admission integration tests, and the 38 Task 003 turn regressions),
-  two compile-fail doctests, strict Clippy, Rust 1.88 package checking,
-  formatting, and diff hygiene. The full `./scripts/agent-check.sh` repository
-  gate passed. Real SQLite regressions cover an intervening event sequence,
-  publish-after-checkpoint observation, short-path redaction, multibyte detail
-  overflow, and post-append recovery. Independent code review and manual QA
-  cleared with no blockers.
+- The final focused command
+  `rtk cargo test -p ditto-retrieval -p ditto-context -p ditto-capability -p ditto-event-store -p ditto-context-projection -p ditto-protocol -p ditto-kernel --locked --all-targets`
+  passed 178 tests across 11 suites; the projection package passed 32 tests
+  across two suites and the durable kernel projection/working-set integration
+  target passed 13. The matching strict
+  `rtk cargo clippy -p ditto-retrieval -p ditto-context -p ditto-capability -p ditto-event-store -p ditto-context-projection -p ditto-protocol -p ditto-kernel --locked --all-targets -- -D warnings`
+  command was clean. `rtk cargo fmt --all -- --check`,
+  `rtk git diff --check`, and scoped `git grep -qE` secret,
+  absolute-path, database, and build-artifact canaries passed.
+- The canonical `rtk ./scripts/agent-check.sh` gate passed 310 workspace tests,
+  and
+  `rtk cargo +1.88.0 check --locked --workspace --all-targets`
+  passed the repository MSRV. Independent final code review approved with no
+  blockers after the source-authority repair, and post-fix manual QA cleared the
+  cache-collision, supersession, edge, malformed canonical-history, SQLite
+  no-retry, and one-rebuild-budget scenarios. No model, network, credential, or
+  billable embedding operation ran.
 - Task 003 is complete under ADR 0009. `DittoKernel::run_artifact_read_turn`
   compiles trusted context, validates its provenance cutoff, pages the exact
   installed manifest/card/full schema into one bounded execution epoch, accepts
@@ -150,6 +183,9 @@
 - Artifact range reads verify the whole object for integrity; optimize only with
   a design that preserves immutable-object trust.
 - Context graph edges are validated but not yet used in ranking.
+- The context-projection authority workflow is large; split it into internal
+  modules later without weakening its single-gate, single-rebuild, or atomic
+  checkpoint semantics.
 - V2 retrieval supports one injected provider, but production remains lexical
   until the embedding worker slice.
 - Version-1 replay recognizes several closed validator failures through stable

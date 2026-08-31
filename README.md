@@ -24,12 +24,22 @@ The executable foundation includes:
   and bounded execution epochs;
 - typed Context IR with provenance validation, trusted compiler directives, and
   locally derived token cost;
+- kernel-only trusted admission of session/task context nodes as fixed
+  `context.node.recorded` events in the canonical event spine, plus a separate,
+  checkpointed and rebuildable `context-projection.db` cache;
+- one bounded V2 `TaskQuery` shared by read-only joint context/capability
+  working-set retrieval, with production lexical ranking and an explicit
+  injected embedding seam for tests and explicit local composition;
 - orthogonal effect profiles and fail-closed lease primitives;
+- versioned provider-neutral model IR, a closed OpenAI Responses adapter, and an
+  injected-driver read-only artifact continuation loop;
 - repository-native instructions for long-running coding agents.
 
-Production model drivers, capability execution, SSH, embeddings, authenticated
-remote gateways, completion verifiers, and the improvement compiler are still
-deferred. They are not represented by fake success paths.
+Daemon provider selection and paid-request scheduling, additional model
+providers, effectful capability execution, SSH, a production embedding
+worker/cache, authenticated remote gateways, completion verifiers, and the
+improvement compiler are still deferred. They are not represented by fake
+success paths.
 
 ## Quick start
 
@@ -74,8 +84,10 @@ flowchart TB
     UI[Web · CLI · Gateways · ACP] --> CMD[Typed Commands]
     CMD --> KERNEL[Semantic Agent Microkernel]
     KERNEL --> STORE[(Append-only Event Spine)]
+    STORE --> PROJ[(Rebuildable context-projection.db)]
     KERNEL --> ART[Content-addressed Artifacts]
     KERNEL --> CTX[Context Compiler]
+    PROJ --> CTX
     KERNEL --> PAGER[Capability Pager]
     KERNEL --> MODEL[Frontier Model Drivers]
     MODEL --> EXEC[Canonical Invocation]
@@ -101,8 +113,8 @@ Long-running Codex or other coding-agent work starts at [`AGENTS.md`](AGENTS.md)
 and [`docs/agent/NEXT.md`](docs/agent/NEXT.md). A paste-ready autonomous-run
 prompt lives in [`docs/agent/CODEX-RUN.md`](docs/agent/CODEX-RUN.md).
 
-The next active slice is the provider-neutral model IR, specified in
-[`docs/agent/tasks/001-model-ir.md`](docs/agent/tasks/001-model-ir.md).
+The implementation frontier and next priority are tracked in
+[`docs/agent/NEXT.md`](docs/agent/NEXT.md).
 
 ## Invariants
 

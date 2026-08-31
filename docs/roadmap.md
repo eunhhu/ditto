@@ -18,7 +18,9 @@ named in `docs/agent/NEXT.md`.
 Exit criterion: a client can disconnect, reconnect from a sequence number, and
 reconstruct the same durable session without manufacturing trusted events.
 
-## B. Semantic working set — started
+## B. Semantic working set — in progress
+
+Existing foundations:
 
 - typed Context IR, graph edges, provenance validation, and Context Receipt
 - trusted ephemeral pin/policy directives and derived token cost
@@ -26,12 +28,25 @@ reconstruct the same durable session without manufacturing trusted events.
 - validated complements and strict runtime hard filters
 - bounded, append-only execution-epoch ordering
 - namespace map and full-schema page-in
-- pluggable local embedding worker
-- temporal and graph reranking
 
-Exit criterion: with 1,000 synthetic capabilities, the model sees only the
-relevant working set and the UI explains every selected context node and
-capability.
+Task 004 delivered:
+
+- kernel-only version-1 durable `context.node.recorded` events for session/task
+  context, with provenance, supersession, and session-wide node identity
+- source-authoritative, rebuildable `context-projection.db` with checkpointed
+  recovery and committed-but-projection-unavailable handling
+- one bounded V2 query shared by context and capability retrieval, with an
+  all-or-nothing lexical production working set and an injected provider seam
+
+Still deferred:
+
+- production local embedding worker and persisted embeddings
+- temporal and graph reranking
+- UI that explains every selected context node and capability
+
+Exit criterion remains open: with 1,000 synthetic capabilities, the model must
+see only the relevant working set and the UI must explain every selected
+context node and capability.
 
 ## C. Provider-neutral model IR — completed
 

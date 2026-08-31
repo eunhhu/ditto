@@ -58,6 +58,43 @@ runtime components. The default daemon exposes no arbitrary event-append route.
 - `correlation_id`: root operation or request.
 - `span_id`: tracing span when available.
 
+## Durable context nodes
+
+`context.node.recorded` is an internal, kernel-authored event. Its fixed
+version-1 envelope is `actor=system`, `kind=context.node.recorded`, and a
+payload containing `event_version=1` plus the validated `ContextNode`. The
+trusted draft is non-deserializable and carries only the node and its requested
+session/task scope; it cannot choose an actor, kind, event identity, sequence,
+timestamp, causation, or correlation. Only session and task scopes are
+admitted. Node identity is `(session_id, node_id)` across both scopes, while
+supersession is restricted to the exact same scope.
+
+Every source event must already exist in the same session and provide valid
+provenance with actor evidence matching the node origin. User-origin assertions
+require user-authored evidence, and model-origin assertions are not admissible.
+The kernel assigns causation to the cited source with the greatest durable
+sequence, independent of caller ordering. The event spine remains the sole
+authority; nodes and source events are immutable, and replacements use a new
+node with `supersedes` rather than in-place mutation.
+
+The derived `context-projection.db` is a separate, deletable cache. Its
+checkpoint (`schema_version`, `through_seq`, `through_event_id`) is rebuilt from
+canonical events and never repairs or rewrites them. A durable append is the
+acceptance point. If post-append projection synchronization fails, the kernel
+still makes one live publication attempt and returns the committed event in a
+typed `committed_but_projection_unavailable` outcome; later open or retrieval
+replays the event spine to recover the cache. Recovery publishes no substitute
+event, and a retry resolves the already committed identity without appending a
+duplicate.
+
+The read-only V2 working-set operation is all-or-nothing: it builds one bounded
+`TaskQuery` and shares it between context and capability retrieval, then returns
+the complete verified snapshot or a typed error, never a partial result.
+Production behavior is explicitly lexical-only. An embedding provider may be
+injected for tests or internal experiments; provider failure is surfaced rather
+than silently falling back to lexical retrieval, and embeddings cannot bypass
+scope or other hard filters.
+
 ## Kernel artifact-read turns
 
 The kernel owns version 1 of the durable read-only turn state machine. Clients
