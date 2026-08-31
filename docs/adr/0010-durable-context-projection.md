@@ -356,6 +356,41 @@ or below the ceiling are inspected once in capability-ID order. Before any
 embedding call, the V2 path verifies every direct complement reference and
 preprocesses every hard-filter-eligible root in that same ID order.
 
+#### Joint working-set operation contract
+
+The joint working-set request validates its raw operational limits in this
+fixed order: context-result limit, capability-root limit, then expanded
+execution-epoch limit. These validations happen before building the query,
+calling an embedding provider, entering the shared gate, or synchronizing the
+projection. After they pass, the operation builds its one `TaskQuery` and
+performs the query/provider work, acquires the shared gate, synchronizes and
+captures a detached projection snapshot, then releases the gate. Context
+ranking, compilation, and compiled-query validation run from that detached
+snapshot before capability search and execution-epoch paging. Any failure at
+any stage is one typed working-set error and returns no partial working-set
+object.
+
+The request carries an `Option<u32>` context token budget. `None` delegates to
+the existing `ContextCompiler` default, while `Some(0)` is valid and means a
+zero requested budget; neither changes the compiler's existing absolute token
+ceiling or other compiler semantics.
+
+After the detached projection snapshot is captured under the shared gate, the
+operation captures `Utc::now` exactly once before releasing the gate. That one
+`evaluated_at` value is used for context ranking, validity evaluation, and
+compilation; later phases do not take another wall-clock reading. The returned
+working-set value owns its retrieval mode, optional embedding descriptor,
+complete projection checkpoint/high-water, `evaluated_at`, `CompiledContext`,
+`ContextCapsule`, and `ExecutionEpoch`. It never owns or exposes an embedding
+vector. The context receipt is exposed by `CompiledContext` and is not
+duplicated on the working-set value. An `ExecutionEpoch` ULID is an issuance
+identity and is therefore not stable across process restart or replay.
+
+The working-set error is distinct from the context and capability search error
+types and includes a poisoned shared gate. A provider query may already have
+been evaluated before a later gate-poison error; that does not authorize a
+partial result, lexical downgrade, event, or persistence.
+
 Capability exactness uses only the `TaskQuery` exact terms derived from
 normalized entities and resources. A capability ID or alias is exact when its
 normalized whole value equals one of those terms. The request, active goal,
@@ -434,13 +469,17 @@ for this slice: production is lexical-only. Ditto supplies no production
 embedding implementation, worker, service, network API, credentials, mandatory
 runtime, or persisted vector.
 
-With an explicitly injected provider, the joint operation computes exactly one
-query embedding and shares the same descriptor and validated vector with both
-context and capability retrieval. Any document embeddings are ephemeral and
-must match the query descriptor and dimension. A provider error, empty or
-oversized descriptor, dimension change, non-finite vector, or zero vector fails
-the whole configured joint retrieval with a typed bounded error. It does not
-silently downgrade to lexical, report semantic retrieval, or return a partial
+Production `DittoKernel::open` has no embedding-provider parameter and installs
+no provider. An explicit constructor accepting an `Arc<dyn EmbeddingProvider>`
+exists only for test or internal composition of the configured path; it is not
+a production-open or public wire-discovery mechanism. With such an explicitly
+injected provider, the joint operation computes exactly one query embedding and
+shares the same descriptor and validated vector with both context and
+capability retrieval. Any document embeddings are ephemeral and must match the
+query descriptor and dimension. A provider error, empty or oversized
+descriptor, dimension change, non-finite vector, or zero vector fails the whole
+configured joint retrieval with a typed bounded error. It does not silently
+downgrade to lexical, report semantic retrieval, or return a partial
 context/capability working set.
 
 Neither lexical nor embedded retrieval appends an event, mutates context,
