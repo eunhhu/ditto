@@ -14,12 +14,15 @@
   provider-neutral level-2 input/output schema records. Recognized schema
   keywords are checked recursively against JSON Schema Draft 2020-12 while
   unknown extension keywords remain opaque.
-- Context state: typed provenance graph and deterministic compiler. Pinning and
-  policy-required inclusion are trusted ephemeral directives; token cost is
-  derived locally. A compact model-facing capsule projects ordered selected
-  nodes without exposing the compiler receipt, lens, or supersession metadata;
-  its exact serialized fields are charged locally and revalidated for trust,
-  time, and the absolute budget at the model boundary.
+- Context state: typed provenance graph, deterministic compiler, shared bounded
+  V2 task query, and a standalone rebuildable SQLite projection of canonical
+  `context.node.recorded` events. Pinning and policy-required inclusion remain
+  trusted ephemeral directives; token cost is derived locally. A compact
+  model-facing capsule projects ordered selected nodes without exposing the
+  compiler receipt, lens, or supersession metadata; its exact serialized fields
+  are charged locally and revalidated for trust, time, and the absolute budget
+  at the model boundary. V2 embedded ordering is carried only by an opaque,
+  non-serializable context-owned ranking and is revalidated after compilation.
 - Policy state: leases authorize canonical invocations against orthogonal effect
   dimensions. No effectful executor is connected yet; the sole executable
   builtin is the structurally bounded, lease-free `artifact.read` exception from
@@ -44,6 +47,28 @@
 
 ## Latest verified slice
 
+- Task 004 remains in progress. Its shared retrieval, protocol/event-store,
+  context, capability, and standalone projection foundations are complete.
+  `ditto-retrieval` owns bounded canonical task queries, optional injected
+  embeddings, exact operational limits, descriptor continuity, and typed
+  fail-closed provider errors. Context and capability V2 paths consume the same
+  query contract without changing their legacy APIs; embeddings cannot bypass
+  lexical eligibility or runtime hard filters.
+- `ditto-context-projection` owns a separate WAL SQLite cache with atomic
+  page/checkpoint commits, stable high-water replay, anchor/schema recovery,
+  source-immutable rebuilds, session-wide node identity, exact-scope
+  supersession, and detached scope snapshots. Live draft identity and
+  supersession authority comes only from bounded pages of canonical event
+  history; relevant cache corruption permits one rebuild and one recheck but
+  never authorizes admission. The fixed `state.db` source filename is rejected
+  before filesystem mutation.
+- The context projection enforces actor, envelope, scope, provenance, origin,
+  causation, trust, and exact durable N/N+1 bounds. Its 21 integration tests,
+  including the five Task 004 acceptance scenarios and real SQLite corruption/
+  rollback cases, passed with strict Clippy and Rust 1.88. The full
+  `./scripts/agent-check.sh` repository gate passed after both the authenticated
+  ranking and projection commits; independent code review and manual QA cleared
+  with no blockers.
 - Task 003 is complete under ADR 0009. `DittoKernel::run_artifact_read_turn`
   compiles trusted context, validates its provenance cutoff, pages the exact
   installed manifest/card/full schema into one bounded execution epoch, accepts
@@ -86,7 +111,7 @@
   and explicit prompt-cache breakpoints;
 - capability worker protocol and lifecycle;
 - device registry, local process runner, SSH transport, and secrets;
-- persistent context projections and embeddings;
+- a production embedding worker/provider and persisted embedding cache;
 - completion verifiers and improvement compiler;
 - authenticated remote gateway and web inspector.
 
@@ -97,12 +122,14 @@
 - Artifact range reads verify the whole object for integrity; optimize only with
   a design that preserves immutable-object trust.
 - Context graph edges are validated but not yet used in ranking.
-- Search remains lexical until the embedding worker slice.
+- V2 retrieval supports one injected provider, but production remains lexical
+  until the embedding worker slice.
 - Version-1 replay recognizes several closed validator failures through stable
   display-message grammar; introduce typed subcodes before changing those
   messages.
-- Excluded context receipts are trusted but do not yet have an independent
-  encoded payload ceiling; the durable context-projection slice must bound them.
+- Legacy excluded context receipts are trusted but do not yet have an
+  independent encoded payload ceiling; address that before making them a new
+  durable wire input.
 - Task-completion admission is a high-water check followed by append rather than
   an atomic verifier/admission transaction; no verifier producer exists yet.
 
