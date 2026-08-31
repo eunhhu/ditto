@@ -261,10 +261,13 @@ and walks ordered, bounded pages of canonical event history through that
 high-water for the requested namespace: all session-scoped rows for the
 requested session plus task-scoped rows for the exact requested task. This
 canonical view is bounded by the same pre-filter rule as projection search:
-the canonical 10,001st selected scope row and the cache 10,001st selected scope
-row each fail with a typed scan-limit error before active, supersession, or
-relevance filtering. The canonical walk uses O(session-history) time and
-O(page + 10,000 scoped identities/digests) memory; it does not retain or
+the canonical 10,001st selected scope row fails with a typed scan-limit error
+before active, supersession, or relevance filtering. The cache comparison reads
+at most 10,001 selected rows as a bounded integrity sentinel, but a cache-only
+10,001st row cannot manufacture a canonical scan-limit denial. Any cache
+cardinality, key-set, or digest divergence is an integrity mismatch and follows
+the rebuild/recheck path below. The canonical walk uses O(session-history) time
+and O(page + 10,000 scoped identities/digests) memory; it does not retain or
 materialize an unbounded session history.
 
 Before exposing the detached snapshot, one consistent read transaction in the
@@ -274,9 +277,13 @@ task/event sequence and event ID, each serialized-node digest, and the exact
 incoming and outgoing supersession-edge shapes. The canonical event history is
 the authority for every comparison input: a projection row may neither
 authorize, hide, rewrite, nor otherwise alter a context node. If the comparison
-finds a mismatch, the projection resets and replays once at the same captured
-high-water, then performs one recheck. A persistent mismatch returns a typed
-projection/retrieval failure, and no snapshot or partial result is returned.
+finds a relevant-scope logical cache mismatch, the projection resets and replays
+once at the same captured high-water, then performs one recheck. A persistent
+mismatch returns a dedicated typed `ProjectionSnapshotIntegrityMismatch`
+failure, and no snapshot or partial result is returned. Canonical validation,
+event-store, SQLite, and I/O failures propagate immediately rather than being
+misclassified as repairable cache drift. Corruption outside the requested
+session-root plus exact-task scope is not consulted until that scope is queried.
 There is no source mutation in this process.
 
 Concurrent or out-of-band projection-cache writers are unsupported in this
