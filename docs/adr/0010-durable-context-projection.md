@@ -290,6 +290,64 @@ manifest, including a complement-only or hard-denied one, was already counted
 once by the pre-filter catalogue pass. A complement must still pass its runtime
 filters, and each expanded card counts against the 512-card epoch ceiling.
 
+The V2 capability path accepts the already validated `CapabilityRootLimit` and
+`ExecutionEpochLimit` newtypes and returns the expanded `Vec<CapabilityCard>`
+or one typed `CapabilitySearchError`. The returned order is each ranked root
+followed by that root's direct complements in manifest order, with capability
+IDs deduplicated across the whole result. Expansion stops at the requested
+epoch capacity. Root membership is not a second public result.
+
+The catalogue-length gate precedes sorting, filtering, document construction,
+and provider work. A catalogue longer than 10,000 reports 10,001 as the
+overflow sentinel; that sentinel manifest is counted only to establish the
+error and is never filtered, documented, matched, or embedded. Catalogues at
+or below the ceiling are inspected once in capability-ID order. Before any
+embedding call, the V2 path verifies every direct complement reference and
+preprocesses every hard-filter-eligible root in that same ID order.
+
+Capability exactness uses only the `TaskQuery` exact terms derived from
+normalized entities and resources. A capability ID or alias is exact when its
+normalized whole value equals one of those terms. The request, active goal,
+constraints, and expected effect contribute lexical terms but cannot create an
+exact capability match.
+
+The canonical V2 capability document is the following UTF-8 byte sequence:
+
+```text
+id=<raw id>\nnamespace=<raw namespace>\nsummary=<raw summary>
+[\nalias=<raw alias>]...
+[\nintent=<raw intent>]...
+```
+
+Aliases and intents are independently sorted by raw UTF-8 byte order. Manifest
+validation already rejects exact duplicates; normalized-equivalent but
+byte-distinct values remain separate raw lines. Fields are not escaped, and
+there is no trailing newline. The final sequence must fit the shared 65,536
+byte `RetrievalDocument` ceiling. This raw repetition can influence an injected
+embedding provider, but the shared lexical tokenizer still deduplicates terms;
+production remains lexical-only in this slice.
+
+A negative example denies a root or complement only when its non-empty V2
+normalized whole phrase occurs at whitespace boundaries in the canonical query
+text. The retrieval crate owns this normalization. An example longer than the
+4,096-byte component ceiling or containing a non-whitespace control character
+returns the wrapped typed retrieval error for the whole operation; there is no
+legacy token-overlap penalty or fallback in V2. Hard runtime filters run before
+this denial predicate. Complements must pass both the same runtime filters and
+the same negative-example denial before expansion, but are not required to be
+lexically eligible and are never embedded.
+
+Eligible roots have an exact match or positive lexical overlap. Their complete
+deterministic ranking tuple is exact match descending, embedding cosine
+descending when configured, lexical overlap descending, preferred-placement
+match descending, then capability ID ascending. Every eligible root, including
+an exact root, receives one document-embedding call in capability-ID order
+when the query is embedded. A lexical-only query requires no provider, and an
+embedded query requires one; the opposite pairings are typed errors before
+catalogue work. Search itself never performs a query-embedding call. Query and
+document descriptor/dimension continuity is the enforceable provider boundary;
+provider object identity is neither exposed nor claimed.
+
 Context and capability retrieval consume the same `TaskQuery`. Exact context
 entity/resource-to-node-ID matches and exact capability IDs and aliases remain
 ahead of embedding reranking. Domain hard filters run before optional embedding
