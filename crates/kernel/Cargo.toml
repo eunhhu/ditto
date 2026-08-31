@@ -16,6 +16,7 @@ ditto-context-projection = { path = "../context-projection" }
 ditto-event-store = { path = "../event-store" }
 ditto-model = { path = "../model" }
 ditto-protocol = { path = "../protocol" }
+ditto-retrieval = { path = "../retrieval" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

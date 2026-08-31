@@ -483,6 +483,7 @@ dependencies = [
  "ditto-event-store",
  "ditto-model",
  "ditto-protocol",
+ "ditto-retrieval",
  "futures-util",
  "rusqlite",
  "serde",

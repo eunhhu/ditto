@@ -12,16 +12,21 @@ use ditto_event_store::{EventStore, EventStoreError};
 use ditto_protocol::{
     EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
 };
+use ditto_retrieval::EmbeddingProvider;
 use serde_json::json;
 use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
 mod context_admission;
+mod context_retrieval;
 pub mod turn;
 
 pub use context_admission::{
     COMMITTED_BUT_PROJECTION_UNAVAILABLE, ContextProjectionUnavailable, TrustedContextNodeDraft,
+};
+pub use context_retrieval::{
+    WorkingSet, WorkingSetError, WorkingSetRequest, WorkingSetRetrievalSummary,
 };
 
 pub use turn::{
@@ -113,6 +118,7 @@ struct KernelInner {
     capabilities: CapabilityCatalog,
     context_projection: ContextProjection,
     context_admission_gate: Mutex<()>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     event_sender: broadcast::Sender<EventRecord>,
 }
 
@@ -133,6 +139,25 @@ pub struct StoredArtifact {
 
 impl DittoKernel {
     pub fn open(config: KernelConfig) -> Result<Self, KernelError> {
+        Self::open_with_provider(config, None)
+    }
+
+    /// Open a kernel with an explicitly injected embedding provider.
+    ///
+    /// Production callers should use [`DittoKernel::open`], which is
+    /// intentionally lexical-only. This constructor is for tests and local
+    /// composition that have a provider they own.
+    pub fn open_with_embedding_provider(
+        config: KernelConfig,
+        provider: Arc<dyn EmbeddingProvider>,
+    ) -> Result<Self, KernelError> {
+        Self::open_with_provider(config, Some(provider))
+    }
+
+    fn open_with_provider(
+        config: KernelConfig,
+        embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Result<Self, KernelError> {
         let events = EventStore::open(config.data_dir.join("state.db"))?;
         let context_projection = ContextProjection::open_in(&config.data_dir)?;
         context_projection.synchronize(&events)?;
@@ -150,6 +175,7 @@ impl DittoKernel {
                 capabilities,
                 context_projection,
                 context_admission_gate: Mutex::new(()),
+                embedding_provider,
                 event_sender,
             }),
         })

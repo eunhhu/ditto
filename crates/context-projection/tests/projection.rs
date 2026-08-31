@@ -176,6 +176,20 @@ fn snapshot_ids(snapshot: &ContextProjectionSnapshot) -> Vec<String> {
         .collect()
 }
 
+fn verified_snapshot(
+    fixture: &Fixture,
+    session_id: &str,
+    task_id: Option<&str>,
+) -> Result<ContextProjectionSnapshot, ContextProjectionError> {
+    let high_water = fixture
+        .store
+        .latest_seq()
+        .expect("verified snapshot high-water");
+    fixture
+        .projection
+        .synchronize_and_verified_snapshot_through(&fixture.store, high_water, session_id, task_id)
+}
+
 fn lookup_committed_identity(
     fixture: &Fixture,
     session_id: &str,
@@ -1388,6 +1402,17 @@ fn context_document_and_prefilter_v2_limits_are_exact_and_never_clamped() {
         .expect_err("10,001st selected row must fail");
     assert!(matches!(
         error,
+        ContextProjectionError::Retrieval(RetrievalError::CandidateCountExceeded {
+            actual: 10_001,
+            maximum: 10_000
+        })
+    ));
+    let verified_error = fixture
+        .projection
+        .synchronize_and_verified_snapshot_through(&fixture.store, overflow.seq, SESSION, None)
+        .expect_err("canonical 10,001st row must remain the authoritative scan error");
+    assert!(matches!(
+        verified_error,
         ContextProjectionError::Retrieval(RetrievalError::CandidateCountExceeded {
             actual: 10_001,
             maximum: 10_000
@@ -3922,4 +3947,1213 @@ fn unsupported_scopes_and_reference_shape_errors_fail_closed_before_checkpoint_a
         self_supersedes,
         ContextProjectionError::SelfSupersession { .. }
     ));
+}
+
+#[test]
+fn verified_snapshot_is_clean_and_exactly_isolates_session_and_task_scopes() {
+    let fixture = fixture();
+    let source = append_source_event(
+        &fixture.store,
+        SESSION,
+        None,
+        EventActor::User,
+        "verified.scope.source",
+    );
+    record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "session-root",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "session root",
+        ),
+    );
+    record_node(
+        &fixture.store,
+        SESSION,
+        Some(TASK_A),
+        node(
+            "task-a-node",
+            ContextScope::Task,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "task A",
+        ),
+    );
+    record_node(
+        &fixture.store,
+        SESSION,
+        Some(TASK_B),
+        node(
+            "task-b-node",
+            ContextScope::Task,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id],
+            Vec::new(),
+            "task B",
+        ),
+    );
+    let other_source = append_source_event(
+        &fixture.store,
+        "session-other",
+        None,
+        EventActor::User,
+        "verified.other.source",
+    );
+    record_node(
+        &fixture.store,
+        "session-other",
+        None,
+        node(
+            "other-session-node",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![other_source.event_id],
+            Vec::new(),
+            "other session",
+        ),
+    );
+
+    let task_a = verified_snapshot(&fixture, SESSION, Some(TASK_A)).expect("task A snapshot");
+    assert_eq!(snapshot_ids(&task_a), vec!["session-root", "task-a-node"]);
+    assert_eq!(task_a.scanned_rows(), 2);
+    let session = verified_snapshot(&fixture, SESSION, None).expect("session snapshot");
+    assert_eq!(snapshot_ids(&session), vec!["session-root"]);
+    let task_b = verified_snapshot(&fixture, SESSION, Some(TASK_B)).expect("task B snapshot");
+    assert_eq!(snapshot_ids(&task_b), vec!["session-root", "task-b-node"]);
+    let other = verified_snapshot(&fixture, "session-other", None).expect("other session");
+    assert_eq!(snapshot_ids(&other), vec!["other-session-node"]);
+
+    let connection = Connection::open(&fixture.projection_path).expect("sibling cache connection");
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE projected_nodes SET node_json = '{}' WHERE session_id = ?1 AND node_id = ?2",
+                params![SESSION, "task-b-node"],
+            )
+            .expect("corrupt sibling task row"),
+        1
+    );
+    drop(connection);
+    assert_eq!(
+        snapshot_ids(
+            &verified_snapshot(&fixture, SESSION, Some(TASK_A))
+                .expect("sibling corruption is outside task A scope")
+        ),
+        vec!["session-root", "task-a-node"]
+    );
+    let connection = Connection::open(&fixture.projection_path).expect("inspect sibling cache");
+    let still_corrupt: String = connection
+        .query_row(
+            "SELECT node_json FROM projected_nodes WHERE session_id = ?1 AND node_id = ?2",
+            params![SESSION, "task-b-node"],
+            |row| row.get(0),
+        )
+        .expect("sibling row remains untouched");
+    assert_eq!(still_corrupt, "{}");
+    drop(connection);
+    assert_eq!(
+        snapshot_ids(
+            &verified_snapshot(&fixture, SESSION, Some(TASK_B))
+                .expect("queried sibling corruption is rebuilt")
+        ),
+        vec!["session-root", "task-b-node"]
+    );
+}
+
+#[test]
+fn verified_snapshot_repairs_deleted_altered_identity_and_cache_only_rows() {
+    for case in [
+        "deleted",
+        "altered-json",
+        "altered-identity",
+        "altered-task",
+        "altered-sequence",
+        "altered-event-id",
+        "cache-only",
+    ] {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "verified.row.source",
+        );
+        let canonical = node(
+            "canonical-row",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "canonical summary",
+        );
+        let committed = record_node(&fixture.store, SESSION, None, canonical.clone());
+        fixture
+            .projection
+            .synchronize(&fixture.store)
+            .expect("initial row projection");
+        let source_count = fixture.store.count().expect("source count");
+        let connection = Connection::open(&fixture.projection_path).expect("row cache connection");
+        match case {
+            "deleted" => {
+                connection
+                    .execute(
+                        "DELETE FROM projected_nodes WHERE session_id = ?1 AND node_id = ?2",
+                        params![SESSION, "canonical-row"],
+                    )
+                    .expect("delete canonical cache row");
+            }
+            "altered-json" => {
+                let mut altered = canonical.clone();
+                altered.summary = "cache altered summary".into();
+                connection
+                    .execute(
+                        "UPDATE projected_nodes SET node_json = ?1 WHERE session_id = ?2 AND node_id = ?3",
+                        params![serde_json::to_string(&altered).expect("altered JSON"), SESSION, "canonical-row"],
+                    )
+                    .expect("alter serialized cache node");
+            }
+            "altered-identity" => {
+                connection
+                    .execute(
+                        "UPDATE projected_nodes SET node_id = ?1 WHERE session_id = ?2 AND node_id = ?3",
+                        params!["cache-renamed-row", SESSION, "canonical-row"],
+                    )
+                    .expect("alter cache row identity");
+            }
+            "altered-task" => {
+                connection
+                    .execute(
+                        "UPDATE projected_nodes SET task_id = ?1 WHERE session_id = ?2 AND node_id = ?3",
+                        params![TASK_A, SESSION, "canonical-row"],
+                    )
+                    .expect("alter cache row task identity");
+            }
+            "altered-sequence" => {
+                connection
+                    .execute(
+                        "UPDATE projected_nodes SET event_seq = event_seq + 1000 WHERE session_id = ?1 AND node_id = ?2",
+                        params![SESSION, "canonical-row"],
+                    )
+                    .expect("alter cache event sequence");
+            }
+            "altered-event-id" => {
+                connection
+                    .execute(
+                        "UPDATE projected_nodes SET event_id = ?1 WHERE session_id = ?2 AND node_id = ?3",
+                        params!["cache-altered-event", SESSION, "canonical-row"],
+                    )
+                    .expect("alter cache event identity");
+            }
+            "cache-only" => {
+                let ghost = node(
+                    "cache-only-row",
+                    ContextScope::Session,
+                    ContextOrigin::User,
+                    EpistemicStatus::Verified,
+                    vec![source.event_id],
+                    Vec::new(),
+                    "cache only",
+                );
+                connection
+                    .execute(
+                        "INSERT INTO projected_nodes (session_id, task_id, node_id, event_seq, event_id, node_json) VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+                        params![SESSION, ghost.id, committed.seq + 10_000, "cache-only-event", serde_json::to_string(&ghost).expect("ghost JSON")],
+                    )
+                    .expect("insert cache-only row");
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+
+        let repaired = verified_snapshot(&fixture, SESSION, None).expect("verified row repair");
+        assert_eq!(snapshot_ids(&repaired), vec!["canonical-row"], "{case}");
+        assert_eq!(
+            repaired.candidates()[0].summary,
+            "canonical summary",
+            "{case}"
+        );
+        assert_eq!(
+            fixture.store.count().expect("source count after repair"),
+            source_count,
+            "{case}"
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("inspect row repair");
+        let ids = connection
+            .prepare("SELECT node_id FROM projected_nodes WHERE session_id = ?1 ORDER BY event_seq")
+            .expect("prepare repaired IDs")
+            .query_map(params![SESSION], |row| row.get::<_, String>(0))
+            .expect("read repaired IDs")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect repaired IDs");
+        assert_eq!(ids, vec!["canonical-row"], "{case}");
+    }
+}
+
+#[test]
+fn verified_snapshot_treats_fake_cache_row_10001_as_integrity_not_canonical_overflow() {
+    let fixture = fixture();
+    let high_water = noise(&fixture.store, Some(SESSION), None).seq;
+    fixture
+        .projection
+        .synchronize_through(&fixture.store, high_water)
+        .expect("initial empty-scope checkpoint");
+    let source_count = fixture.store.count().expect("canonical source count");
+
+    let mut connection = Connection::open(&fixture.projection_path).expect("fake cache connection");
+    let transaction = connection.transaction().expect("fake cache transaction");
+    {
+        let mut statement = transaction
+            .prepare(
+                "INSERT INTO projected_nodes (session_id, task_id, node_id, event_seq, event_id, node_json) VALUES (?1, NULL, ?2, ?3, ?4, '{}')",
+            )
+            .expect("prepare fake cache rows");
+        for index in 0..=MAX_CANDIDATE_COUNT {
+            statement
+                .execute(params![
+                    SESSION,
+                    format!("fake-cache-{index:05}"),
+                    i64::try_from(index).expect("fake sequence") + 10_000,
+                    format!("fake-cache-event-{index:05}"),
+                ])
+                .expect("insert fake cache row");
+        }
+    }
+    transaction.commit().expect("commit fake cache rows");
+    drop(connection);
+
+    let repaired = fixture
+        .projection
+        .synchronize_and_verified_snapshot_through(&fixture.store, high_water, SESSION, None)
+        .expect("fake cache overflow rebuilds instead of acquiring scan authority");
+    assert_eq!(repaired.scanned_rows(), 0);
+    assert!(repaired.candidates().is_empty());
+    assert_eq!(
+        fixture
+            .store
+            .count()
+            .expect("canonical source count after repair"),
+        source_count
+    );
+    let connection = Connection::open(&fixture.projection_path).expect("inspect fake cache repair");
+    let projected_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM projected_nodes WHERE session_id = ?1",
+            params![SESSION],
+            |row| row.get(0),
+        )
+        .expect("count repaired fake cache rows");
+    assert_eq!(projected_count, 0);
+}
+
+#[test]
+fn verified_snapshot_repairs_complete_incoming_and_outgoing_edge_shapes() {
+    let fixture = fixture();
+    let source = append_source_event(
+        &fixture.store,
+        SESSION,
+        None,
+        EventActor::User,
+        "verified.edge.source",
+    );
+    let target = record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "edge-target",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "target",
+        ),
+    );
+    record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "other-target",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "other target",
+        ),
+    );
+    let replacement = record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "edge-replacement",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id],
+            vec!["edge-target".into()],
+            "replacement",
+        ),
+    );
+    fixture
+        .projection
+        .synchronize(&fixture.store)
+        .expect("initial edge projection");
+    let source_count = fixture.store.count().expect("edge source count");
+
+    let mutations = [
+        "missing",
+        "altered-target",
+        "altered-sequence",
+        "cache-only-incoming",
+        "cache-only-outgoing",
+        "edge-only-identities",
+    ];
+    for mutation in mutations {
+        let connection = Connection::open(&fixture.projection_path).expect("edge cache connection");
+        match mutation {
+            "missing" => {
+                connection
+                    .execute(
+                        "DELETE FROM supersession_edges WHERE session_id = ?1",
+                        params![SESSION],
+                    )
+                    .expect("delete canonical edge");
+            }
+            "altered-target" => {
+                connection
+                    .execute(
+                        "UPDATE supersession_edges SET superseded_node_id = ?1 WHERE session_id = ?2",
+                        params!["other-target", SESSION],
+                    )
+                    .expect("alter edge target");
+            }
+            "altered-sequence" => {
+                connection
+                    .execute(
+                        "UPDATE supersession_edges SET event_seq = event_seq + 1 WHERE session_id = ?1",
+                        params![SESSION],
+                    )
+                    .expect("alter outgoing edge sequence");
+            }
+            "cache-only-incoming" => {
+                connection
+                    .execute(
+                        "INSERT INTO supersession_edges (session_id, task_key, superseding_node_id, superseded_node_id, event_seq) VALUES (?1, '', ?2, ?3, ?4)",
+                        params![SESSION, "ghost-superseder", "edge-target", replacement.seq + 10],
+                    )
+                    .expect("insert cache-only incoming edge");
+            }
+            "cache-only-outgoing" => {
+                connection
+                    .execute(
+                        "INSERT INTO supersession_edges (session_id, task_key, superseding_node_id, superseded_node_id, event_seq) VALUES (?1, '', ?2, ?3, ?4)",
+                        params![SESSION, "edge-replacement", "ghost-target", replacement.seq],
+                    )
+                    .expect("insert cache-only outgoing edge");
+            }
+            "edge-only-identities" => {
+                connection
+                    .execute(
+                        "INSERT INTO supersession_edges (session_id, task_key, superseding_node_id, superseded_node_id, event_seq) VALUES (?1, '', ?2, ?3, ?4)",
+                        params![SESSION, "ghost-source", "ghost-target", replacement.seq + 20],
+                    )
+                    .expect("insert edge-only cache identities");
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+
+        let repaired = verified_snapshot(&fixture, SESSION, None).expect("verified edge repair");
+        assert_eq!(
+            snapshot_ids(&repaired),
+            vec!["other-target", "edge-replacement"],
+            "{mutation}"
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("inspect edge repair");
+        let edge: (String, String, i64) = connection
+            .query_row(
+                "SELECT superseding_node_id, superseded_node_id, event_seq FROM supersession_edges WHERE session_id = ?1",
+                params![SESSION],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("canonical repaired edge");
+        assert_eq!(
+            edge,
+            (
+                "edge-replacement".into(),
+                "edge-target".into(),
+                replacement.seq
+            ),
+            "{mutation}"
+        );
+    }
+    assert_eq!(
+        fixture
+            .store
+            .count()
+            .expect("edge source count after repairs"),
+        source_count
+    );
+    assert!(target.seq < replacement.seq);
+}
+
+#[test]
+fn behind_checkpoint_cache_identity_and_global_event_collisions_rebuild_once() {
+    for collision in ["node-id", "event-seq", "event-id"] {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "delta.identity.source",
+        );
+        fixture
+            .projection
+            .synchronize_through(&fixture.store, source.seq)
+            .expect("checkpoint before canonical node");
+        let canonical = record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "delta-canonical-node",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id.clone()],
+                Vec::new(),
+                "canonical delta node",
+            ),
+        );
+        let (ghost_session, ghost_id, ghost_seq, ghost_event_id) = match collision {
+            "node-id" => (
+                SESSION,
+                "delta-canonical-node",
+                canonical.seq + 10_000,
+                "cache-only-node-event".to_owned(),
+            ),
+            "event-seq" => (
+                "cache-only-session",
+                "cache-only-sequence-node",
+                canonical.seq,
+                "cache-only-sequence-event".to_owned(),
+            ),
+            "event-id" => (
+                "cache-only-session",
+                "cache-only-event-node",
+                canonical.seq + 10_000,
+                canonical.event_id.clone(),
+            ),
+            _ => unreachable!(),
+        };
+        let ghost = node(
+            ghost_id,
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "derived cache collision",
+        );
+        let connection =
+            Connection::open(&fixture.projection_path).expect("cache collision connection");
+        connection
+            .execute(
+                "INSERT INTO projected_nodes (session_id, task_id, node_id, event_seq, event_id, node_json) VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+                params![
+                    ghost_session,
+                    ghost_id,
+                    ghost_seq,
+                    ghost_event_id,
+                    serde_json::to_string(&ghost).expect("ghost node JSON"),
+                ],
+            )
+            .expect("insert derived cache collision");
+        drop(connection);
+
+        let source_count = fixture.store.count().expect("canonical source count");
+        let snapshot = fixture
+            .projection
+            .synchronize_and_verified_snapshot_through(&fixture.store, canonical.seq, SESSION, None)
+            .expect("derived collision must rebuild before canonical catch-up");
+        assert_eq!(snapshot_ids(&snapshot), vec!["delta-canonical-node"]);
+        assert_eq!(snapshot.checkpoint().through_seq, canonical.seq);
+        assert_eq!(
+            fixture.store.count().expect("source count after repair"),
+            source_count,
+            "{collision}"
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("inspect repair");
+        let rows: Vec<(String, String, i64, String)> = connection
+            .prepare(
+                "SELECT session_id, node_id, event_seq, event_id FROM projected_nodes ORDER BY event_seq",
+            )
+            .expect("prepare repaired rows")
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .expect("read repaired rows")
+            .collect::<Result<_, _>>()
+            .expect("collect repaired rows");
+        assert_eq!(
+            rows,
+            vec![(
+                SESSION.to_owned(),
+                "delta-canonical-node".to_owned(),
+                canonical.seq,
+                canonical.event_id,
+            )],
+            "{collision}"
+        );
+    }
+}
+
+#[test]
+fn behind_checkpoint_deleted_or_altered_supersession_target_rebuilds_before_apply() {
+    for corruption in ["deleted", "altered-task", "altered-json"] {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "delta.target.source",
+        );
+        let target_node = node(
+            "delta-target",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "canonical target",
+        );
+        let target = record_node(&fixture.store, SESSION, None, target_node.clone());
+        fixture
+            .projection
+            .synchronize_through(&fixture.store, target.seq)
+            .expect("checkpoint through canonical target");
+        let replacement = record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "delta-replacement",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id],
+                vec!["delta-target".into()],
+                "canonical replacement",
+            ),
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("target corruption");
+        match corruption {
+            "deleted" => {
+                connection
+                    .execute(
+                        "DELETE FROM projected_nodes WHERE session_id = ?1 AND node_id = 'delta-target'",
+                        params![SESSION],
+                    )
+                    .expect("delete target row");
+            }
+            "altered-task" => {
+                connection
+                    .execute(
+                        "UPDATE projected_nodes SET task_id = ?1 WHERE session_id = ?2 AND node_id = 'delta-target'",
+                        params![TASK_A, SESSION],
+                    )
+                    .expect("alter target task");
+            }
+            "altered-json" => {
+                let mut altered = target_node.clone();
+                altered.summary = "derived altered target".into();
+                connection
+                    .execute(
+                        "UPDATE projected_nodes SET node_json = ?1 WHERE session_id = ?2 AND node_id = 'delta-target'",
+                        params![serde_json::to_string(&altered).expect("altered target JSON"), SESSION],
+                    )
+                    .expect("alter target JSON");
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+
+        let snapshot = fixture
+            .projection
+            .synchronize_and_verified_snapshot_through(
+                &fixture.store,
+                replacement.seq,
+                SESSION,
+                None,
+            )
+            .expect("target corruption must rebuild before supersession apply");
+        assert_eq!(snapshot.scanned_rows(), 2, "{corruption}");
+        assert_eq!(
+            snapshot_ids(&snapshot),
+            vec!["delta-replacement"],
+            "{corruption}"
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("inspect target repair");
+        let (task_id, node_json): (Option<String>, String) = connection
+            .query_row(
+                "SELECT task_id, node_json FROM projected_nodes WHERE session_id = ?1 AND node_id = 'delta-target'",
+                params![SESSION],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("canonical target restored");
+        assert_eq!(task_id, None, "{corruption}");
+        let restored: ContextNode = serde_json::from_str(&node_json).expect("restored target JSON");
+        assert_eq!(restored.summary, "canonical target", "{corruption}");
+        let edge_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM supersession_edges WHERE session_id = ?1 AND superseding_node_id = 'delta-replacement' AND superseded_node_id = 'delta-target'",
+                params![SESSION],
+                |row| row.get(0),
+            )
+            .expect("canonical replacement edge");
+        assert_eq!(edge_count, 1, "{corruption}");
+    }
+}
+
+#[test]
+fn behind_checkpoint_cache_only_or_altered_edges_rebuild_before_apply() {
+    for corruption in [
+        "outgoing-collision",
+        "incoming-collision",
+        "altered-prior-edge",
+    ] {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "delta.edge.source",
+        );
+        record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "delta-edge-target",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id.clone()],
+                Vec::new(),
+                "edge target",
+            ),
+        );
+        let prior = if corruption == "altered-prior-edge" {
+            Some(record_node(
+                &fixture.store,
+                SESSION,
+                None,
+                node(
+                    "delta-edge-prior",
+                    ContextScope::Session,
+                    ContextOrigin::User,
+                    EpistemicStatus::Verified,
+                    vec![source.event_id.clone()],
+                    vec!["delta-edge-target".into()],
+                    "prior replacement",
+                ),
+            ))
+        } else {
+            None
+        };
+        let before = fixture
+            .store
+            .latest_seq()
+            .expect("edge checkpoint high-water");
+        fixture
+            .projection
+            .synchronize_through(&fixture.store, before)
+            .expect("checkpoint before next edge");
+        let superseded_id = prior
+            .as_ref()
+            .map_or("delta-edge-target", |_| "delta-edge-prior");
+        let replacement = record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "delta-edge-next",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id],
+                vec![superseded_id.into()],
+                "next replacement",
+            ),
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("edge corruption");
+        match corruption {
+            "outgoing-collision" => {
+                connection
+                    .execute(
+                        "INSERT INTO supersession_edges (session_id, task_key, superseding_node_id, superseded_node_id, event_seq) VALUES (?1, '', 'delta-edge-next', 'delta-edge-target', ?2)",
+                        params![SESSION, replacement.seq],
+                    )
+                    .expect("insert exact future edge collision");
+            }
+            "incoming-collision" => {
+                connection
+                    .execute(
+                        "INSERT INTO supersession_edges (session_id, task_key, superseding_node_id, superseded_node_id, event_seq) VALUES (?1, '', 'cache-only-superseder', 'delta-edge-next', ?2)",
+                        params![SESSION, replacement.seq + 10_000],
+                    )
+                    .expect("insert future incoming edge collision");
+            }
+            "altered-prior-edge" => {
+                connection
+                    .execute(
+                        "UPDATE supersession_edges SET superseded_node_id = 'cache-altered-target' WHERE session_id = ?1 AND superseding_node_id = 'delta-edge-prior'",
+                        params![SESSION],
+                    )
+                    .expect("alter prior canonical edge");
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+
+        let snapshot = fixture
+            .projection
+            .synchronize_and_verified_snapshot_through(
+                &fixture.store,
+                replacement.seq,
+                SESSION,
+                None,
+            )
+            .expect("edge corruption must rebuild before apply");
+        assert_eq!(
+            snapshot_ids(&snapshot),
+            vec!["delta-edge-next"],
+            "{corruption}"
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("inspect edge repair");
+        let ghost_edges: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM supersession_edges WHERE session_id = ?1 AND (superseding_node_id LIKE 'cache-%' OR superseded_node_id LIKE 'cache-%')",
+                params![SESSION],
+                |row| row.get(0),
+            )
+            .expect("count cache-only edges");
+        assert_eq!(ghost_edges, 0, "{corruption}");
+        let next_edges: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM supersession_edges WHERE session_id = ?1 AND superseding_node_id = 'delta-edge-next' AND superseded_node_id = ?2",
+                params![SESSION, superseded_id],
+                |row| row.get(0),
+            )
+            .expect("count canonical next edge");
+        assert_eq!(next_edges, 1, "{corruption}");
+    }
+}
+
+#[test]
+fn canonical_delta_failures_win_over_masking_cache_and_unrelated_requested_scope() {
+    {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "delta.duplicate.source",
+        );
+        let original = record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "masked-duplicate",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id.clone()],
+                Vec::new(),
+                "original",
+            ),
+        );
+        fixture
+            .projection
+            .synchronize_through(&fixture.store, original.seq)
+            .expect("duplicate prefix sync");
+        let duplicate = record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "masked-duplicate",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id],
+                Vec::new(),
+                "duplicate",
+            ),
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("delete duplicate row");
+        connection
+            .execute(
+                "DELETE FROM projected_nodes WHERE session_id = ?1 AND node_id = 'masked-duplicate'",
+                params![SESSION],
+            )
+            .expect("delete prior canonical identity from cache");
+        drop(connection);
+        let error = fixture
+            .projection
+            .synchronize_and_verified_snapshot_through(
+                &fixture.store,
+                duplicate.seq,
+                "unrelated-request-session",
+                None,
+            )
+            .expect_err("deleted cache row cannot authorize a canonical duplicate");
+        assert!(matches!(
+            error,
+            ContextProjectionError::DuplicateNodeIdentity { event_id, seq, .. }
+                if event_id == original.event_id && seq == original.seq
+        ));
+        assert_eq!(
+            fixture
+                .projection
+                .checkpoint()
+                .expect("duplicate checkpoint")
+                .through_seq,
+            original.seq
+        );
+        let connection =
+            Connection::open(&fixture.projection_path).expect("inspect duplicate cache");
+        let rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM projected_nodes WHERE session_id = ?1 AND node_id = 'masked-duplicate'",
+                params![SESSION],
+                |row| row.get(0),
+            )
+            .expect("count masked duplicate cache row");
+        assert_eq!(
+            rows, 0,
+            "canonical failure must not consume the rebuild budget"
+        );
+    }
+
+    {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "delta.missing.source",
+        );
+        fixture
+            .projection
+            .synchronize_through(&fixture.store, source.seq)
+            .expect("missing-target prefix sync");
+        let invalid = record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "masked-missing-replacement",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id.clone()],
+                vec!["masked-missing-target".into()],
+                "invalid missing target",
+            ),
+        );
+        let fake_target = node(
+            "masked-missing-target",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id],
+            Vec::new(),
+            "cache-only target",
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("fake target cache");
+        connection
+            .execute(
+                "INSERT INTO projected_nodes (session_id, task_id, node_id, event_seq, event_id, node_json) VALUES (?1, NULL, 'masked-missing-target', ?2, 'masked-cache-target-event', ?3)",
+                params![SESSION, invalid.seq + 10_000, serde_json::to_string(&fake_target).expect("fake target JSON")],
+            )
+            .expect("insert cache-only exact-scope target");
+        drop(connection);
+        let error = fixture
+            .projection
+            .synchronize_and_verified_snapshot_through(
+                &fixture.store,
+                invalid.seq,
+                "unrelated-request-session",
+                None,
+            )
+            .expect_err("cache-only target cannot authorize canonical missing supersession");
+        assert!(matches!(
+            error,
+            ContextProjectionError::MissingSupersededNode { node_id, superseded_id }
+                if node_id == "masked-missing-replacement"
+                    && superseded_id == "masked-missing-target"
+        ));
+        assert_eq!(
+            fixture
+                .projection
+                .checkpoint()
+                .expect("missing checkpoint")
+                .through_seq,
+            source.seq
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("inspect fake target");
+        let fake_still_present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projected_nodes WHERE session_id = ?1 AND node_id = 'masked-missing-target')",
+                params![SESSION],
+                |row| row.get(0),
+            )
+            .expect("fake target remains after canonical failure");
+        assert!(fake_still_present);
+    }
+
+    {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "delta.scope.source",
+        );
+        let target = record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "masked-cross-scope-target",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id.clone()],
+                Vec::new(),
+                "session target",
+            ),
+        );
+        fixture
+            .projection
+            .synchronize_through(&fixture.store, target.seq)
+            .expect("cross-scope prefix sync");
+        let invalid = record_node(
+            &fixture.store,
+            SESSION,
+            Some(TASK_A),
+            node(
+                "masked-cross-scope-replacement",
+                ContextScope::Task,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id],
+                vec!["masked-cross-scope-target".into()],
+                "task replacement",
+            ),
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("alter target scope");
+        connection
+            .execute(
+                "UPDATE projected_nodes SET task_id = ?1 WHERE session_id = ?2 AND node_id = 'masked-cross-scope-target'",
+                params![TASK_A, SESSION],
+            )
+            .expect("mask canonical cross-scope target");
+        drop(connection);
+        let error = fixture
+            .projection
+            .synchronize_and_verified_snapshot_through(
+                &fixture.store,
+                invalid.seq,
+                "unrelated-request-session",
+                None,
+            )
+            .expect_err("altered cache scope cannot authorize cross-scope supersession");
+        assert!(matches!(
+            error,
+            ContextProjectionError::SupersessionScopeMismatch { node_id, superseded_id }
+                if node_id == "masked-cross-scope-replacement"
+                    && superseded_id == "masked-cross-scope-target"
+        ));
+        assert_eq!(
+            fixture
+                .projection
+                .checkpoint()
+                .expect("scope checkpoint")
+                .through_seq,
+            target.seq
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("inspect altered scope");
+        let cached_task: Option<String> = connection
+            .query_row(
+                "SELECT task_id FROM projected_nodes WHERE session_id = ?1 AND node_id = 'masked-cross-scope-target'",
+                params![SESSION],
+                |row| row.get(0),
+            )
+            .expect("altered cache task remains");
+        assert_eq!(cached_task.as_deref(), Some(TASK_A));
+    }
+}
+
+#[test]
+fn malformed_delta_and_sqlite_trigger_failures_are_not_rebuilt_or_retried() {
+    {
+        let fixture = fixture();
+        let prefix = noise(&fixture.store, Some(SESSION), None);
+        fixture
+            .projection
+            .synchronize_through(&fixture.store, prefix.seq)
+            .expect("malformed prefix sync");
+        let malformed = context_event(
+            &fixture.store,
+            Some(SESSION),
+            None,
+            EventActor::System,
+            json!({"node": {"id": "malformed-delta"}}),
+            None,
+            Some(SESSION.into()),
+            None,
+        );
+        let ghost = node(
+            "malformed-occupancy",
+            ContextScope::Session,
+            ContextOrigin::System,
+            EpistemicStatus::Verified,
+            vec![prefix.event_id],
+            Vec::new(),
+            "malformed occupancy",
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("malformed cache");
+        connection
+            .execute(
+                "INSERT INTO projected_nodes (session_id, task_id, node_id, event_seq, event_id, node_json) VALUES ('cache-session', NULL, 'malformed-occupancy', ?1, 'malformed-cache-event', ?2)",
+                params![malformed.seq, serde_json::to_string(&ghost).expect("ghost JSON")],
+            )
+            .expect("insert malformed event occupancy");
+        drop(connection);
+        let error = fixture
+            .projection
+            .synchronize_and_verified_snapshot_through(
+                &fixture.store,
+                malformed.seq,
+                "unrelated-request-session",
+                None,
+            )
+            .expect_err("malformed canonical event must win before cache repair");
+        assert!(
+            matches!(error, ContextProjectionError::MalformedPayload { seq, .. } if seq == malformed.seq)
+        );
+        assert_eq!(
+            fixture
+                .projection
+                .checkpoint()
+                .expect("malformed checkpoint")
+                .through_seq,
+            prefix.seq
+        );
+        let connection =
+            Connection::open(&fixture.projection_path).expect("inspect malformed cache");
+        let ghost_present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projected_nodes WHERE node_id = 'malformed-occupancy')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("malformed occupancy remains");
+        assert!(ghost_present);
+    }
+
+    {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "delta.trigger.source",
+        );
+        fixture
+            .projection
+            .synchronize_through(&fixture.store, source.seq)
+            .expect("trigger prefix sync");
+        let canonical = record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "trigger-delta-node",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id],
+                Vec::new(),
+                "trigger delta",
+            ),
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("trigger connection");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_verified_delta BEFORE INSERT ON projected_nodes
+                 WHEN NEW.node_id = 'trigger-delta-node'
+                 BEGIN SELECT RAISE(ABORT, 'verified delta operational failure'); END;",
+            )
+            .expect("install operational trigger");
+        drop(connection);
+        let error = fixture
+            .projection
+            .synchronize_and_verified_snapshot_through(&fixture.store, canonical.seq, SESSION, None)
+            .expect_err("SQLite trigger failure must propagate without repair retry");
+        assert!(matches!(error, ContextProjectionError::Sqlite(_)));
+        assert_eq!(
+            fixture
+                .projection
+                .checkpoint()
+                .expect("trigger checkpoint")
+                .through_seq,
+            source.seq
+        );
+        let connection = Connection::open(&fixture.projection_path).expect("inspect trigger");
+        let trigger_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'fail_verified_delta')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("trigger remains installed");
+        let projected: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projected_nodes WHERE node_id = 'trigger-delta-node')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("failed node absent");
+        assert!(
+            trigger_exists,
+            "a catch-all rebuild would have dropped the trigger"
+        );
+        assert!(!projected);
+    }
 }
