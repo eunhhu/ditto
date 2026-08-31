@@ -24,6 +24,7 @@ pub mod event_kind {
     pub const MODEL_OUTPUT: &str = "model.output";
     pub const TURN_FINISHED: &str = "turn.finished";
     pub const TURN_FAILED: &str = "turn.failed";
+    pub const CONTEXT_NODE_RECORDED: &str = "context.node.recorded";
 }
 
 #[cfg(test)]
@@ -36,6 +37,11 @@ mod tests {
         assert_eq!(event_kind::MODEL_OUTPUT, "model.output");
         assert_eq!(event_kind::TURN_FINISHED, "turn.finished");
         assert_eq!(event_kind::TURN_FAILED, "turn.failed");
+    }
+
+    #[test]
+    fn task_004_context_event_kind_is_stable() {
+        assert_eq!(event_kind::CONTEXT_NODE_RECORDED, "context.node.recorded");
     }
 }
 
