@@ -74,8 +74,19 @@ receipt are not serialized into the capsule. Selection charges the exact
 serialized item length through the local token estimator plus fixed envelope
 overhead, so provenance or other retained metadata cannot bypass the ceiling.
 Deserialized capsules are revalidated at the model request boundary before use.
+The compiler also revalidates a serialized compiled result and receipt for
+internal consistency against the original signature and exact capsule: IDs are
+unique, scores, reasons, and ordering are canonical, and token accounting
+satisfies both soft and absolute budgets. Candidate selection itself remains a
+trusted live compiler operation; replay does not claim to reconstruct candidates
+that were never persisted.
 
 The receipt explains source events, epistemic status, inclusion directive,
 score, derived token cost, and exclusion reason. Clients pin, dispute, delete,
 or rescope nodes by emitting commands that become events; they never mutate
 history or set compiler authority directly.
+
+When a turn persists compiled context, it captures a provenance high-water
+sequence. The kernel resolves every included source within the same trusted
+session/task snapshot and rechecks validity at model-request admission; later
+events cannot retroactively authorize an earlier request.

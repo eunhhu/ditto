@@ -13,6 +13,17 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
+pub mod turn;
+
+pub use turn::{
+    ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
+    CapabilitiesSelectedPayload, CapabilityRequestedPayload, ContextCompiledPayload,
+    ExecutionOutputPayload, ExecutionStartedPayload, ModelOutputPayload, ModelRequestedPayload,
+    ReadOnlyTurnControl, ReplayError, ReplayedArtifactReadCall, ReplayedReadOnlyTurn,
+    TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFinishedPayload, TurnRunError,
+    TurnSequenceSpan, replay_artifact_read_turn,
+};
+
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 
@@ -116,15 +127,7 @@ impl DittoKernel {
         &self,
         command: SubmitInputCommand,
     ) -> Result<EventRecord, KernelError> {
-        let text = command.text.trim();
-        if text.is_empty() {
-            return Err(KernelError::InvalidCommand("input text is empty".into()));
-        }
-        if text.len() > MAX_INPUT_BYTES {
-            return Err(KernelError::InvalidCommand(format!(
-                "input exceeds {MAX_INPUT_BYTES} bytes"
-            )));
-        }
+        let text = normalize_input_text(&command.text)?;
 
         let session_id = normalize_identifier(command.session_id, "session")?;
         let task_id = command
@@ -247,6 +250,19 @@ impl DittoKernel {
         let _ = self.inner.event_sender.send(event.clone());
         Ok(event)
     }
+}
+
+fn normalize_input_text(value: &str) -> Result<String, KernelError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(KernelError::InvalidCommand("input text is empty".into()));
+    }
+    if value.len() > MAX_INPUT_BYTES {
+        return Err(KernelError::InvalidCommand(format!(
+            "input exceeds {MAX_INPUT_BYTES} bytes"
+        )));
+    }
+    Ok(value.to_owned())
 }
 
 fn normalize_identifier(value: Option<String>, prefix: &str) -> Result<String, KernelError> {

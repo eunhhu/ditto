@@ -87,6 +87,23 @@ run ID, capability ID and version, normalized arguments, resolved placement,
 derived effect profile, lease handle, timeout, resource limits, idempotency key,
 and expected evidence.
 
+### Bounded builtin artifact read
+
+`artifact.read` is the sole narrow lease-free exception. The
+`ditto-artifact-read` crate owns its exact installed manifest and level-2 schema.
+Arguments are exactly `reference`, `offset`, and `length`: the reference must be
+canonical SHA-256 form, offsets are non-negative, and one read is limited to
+16 KiB. Results deterministically report the requested and returned range, total
+size, EOF state, and base64 bytes; validation, authorization, range,
+availability, and integrity failures are stable structured error results.
+
+The builtin can inspect local artifact metadata and return bytes verified through
+the same storage read. It has no path, process, network, credential, mutation,
+approval, or secret-handle surface. Authorization requires an actor=`system`
+`artifact.created` event for the exact reference in compatible session/task
+scope at or before the execution-start cutoff. Selection and replay validate the
+complete manifest/card/schema relationship, not only capability ID and version.
+
 ## Disclosure levels
 
 - L0 namespace map: stable and tiny.

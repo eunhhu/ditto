@@ -33,7 +33,7 @@ Exit criterion: with 1,000 synthetic capabilities, the model sees only the
 relevant working set and the UI explains every selected context node and
 capability.
 
-## C. Provider-neutral model IR — active
+## C. Provider-neutral model IR — completed
 
 - stable/volatile request separation
 - structured text and tool-call streaming
@@ -45,7 +45,7 @@ capability.
 Exit criterion: two representative provider response shapes map losslessly into
 the same IR, and provider completion never creates task verification.
 
-## D. First provider and read-only agent loop
+## D. First provider and read-only agent loop — completed
 
 - one frontier provider adapter with mock transport tests
 - full `artifact.read` schema page-in

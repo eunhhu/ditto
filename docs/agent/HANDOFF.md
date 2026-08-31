@@ -21,7 +21,9 @@
   its exact serialized fields are charged locally and revalidated for trust,
   time, and the absolute budget at the model boundary.
 - Policy state: leases authorize canonical invocations against orthogonal effect
-  dimensions. No executor is connected yet.
+  dimensions. No effectful executor is connected yet; the sole executable
+  builtin is the structurally bounded, lease-free `artifact.read` exception from
+  ADR 0009.
 - Model state: `ditto-model` owns version 1 of the provider-neutral request,
   driver, and backpressured stream-event contract. It preserves ordered stable
   prefix/volatile turn data, structured tool-call lifecycles, final structured
@@ -36,48 +38,50 @@
   redirect-disabled reqwest/rustls transport, redacted transport-only
   credentials, bounded SSE decoding and correlation, exact model/storage/
   continuation checks, optional-versus-required usage handling, and explicit
-  ephemeral or provider-managed remote response state. No kernel turn loop
-  exists yet, and provider completion is not task completion.
+  ephemeral or provider-managed remote response state. The kernel now owns an
+  injected-driver `artifact.read` continuation loop and pure replay projector;
+  provider completion still is not task completion.
 
 ## Latest verified slice
 
-- Task 002 is complete under ADR 0008. Public adapter types include
-  `OpenAiResponsesDriver`, `OpenAiRetryPolicy`, `OpenAiStoragePolicy`,
-  `OpenAiApiKey`, `OpenAiConfigError`, `OpenAiTransportConfig`,
-  `OpenAiReqwestTransport`, `OpenAiTransport`, `OpenAiHttpRequest`,
-  `OpenAiHttpResponse`, `OpenAiTransportError`,
-  `OpenAiTransportErrorKind`, and `OpenAiTransportFuture`.
-- The production constructor sends only to
-  `https://api.openai.com/v1/responses`; CI uses the credential-free injected
-  transport. Ephemeral mode sends `store: false`. Provider-managed mode sends
-  `store: true` and alone advertises and emits exact
-  `openai/responses-previous-response-id-v1` continuation state. No live or
-  billable provider request was run.
-- Exact request fixtures cover stable system and context epistemic projection,
-  complete ordered tool schemas, deterministic provider-name mapping, tool
-  choice, structured output, prompt-cache controls, and continuation suffix
-  rejection. Stream fixtures cover split-at-every-byte text, interleaved tool
-  arguments, final item correlation, usage, finish reasons, provider errors,
-  unknown and post-terminal events, bounded active and historical state,
-  cancellation/deadline during handshake, body, and backoff, and the
-  pre-response-only retry cutoff.
-- Security and boundary regressions include
-  `production_http_errors_scrub_exact_and_masked_credentials_everywhere`,
-  `in_band_provider_failures_scrub_exact_and_masked_credential_tokens`,
-  `terminal_usage_object_null_and_omission_follow_request_requirement`,
-  `terminal_status_is_optional_but_present_contradictions_fail_closed`,
-  `response_profile_storage_and_previous_id_are_correlated_before_completion`,
-  `total_sequential_output_history_accepts_n_and_rejects_n_plus_one`, and
-  `post_terminal_failure_preserves_chunk_independent_prefix_and_allows_done`.
-- `cargo test -p ditto-model-openai --all-targets` passed 43 tests; the package
-  suite including its credential non-serialization doctest passed 44.
-  `./scripts/agent-check.sh` passed 140 workspace tests, and
-  `cargo +1.88.0 check --locked --workspace --all-targets` passed against the
-  repository MSRV. Independent code review and manual QA reported no blockers.
+- Task 003 is complete under ADR 0009. `DittoKernel::run_artifact_read_turn`
+  compiles trusted context, validates its provenance cutoff, pages the exact
+  installed manifest/card/full schema into one bounded execution epoch, accepts
+  at most one structured call per request, executes a same-scope bounded read,
+  and continues the complete provider-neutral conversation to an explicitly
+  `unverified` final response. The daemon remains record-only and does not select
+  a provider or trigger an automatic paid request.
+- `ditto-artifact-read` owns strict arguments, the canonical
+  `artifact:sha256:<hex>` resource, a 16 KiB range ceiling, binary-safe
+  deterministic projections, stable structured failures, and exact manifest/
+  schema validation. Artifact bytes are captured through the same sequential
+  descriptor pass that verifies their SHA-256 content. The invariant-safe Rust
+  package is version 0.2.0 with checked deprecated 0.1 API wrappers; the valid
+  serialized capability contract remains version 0.1.0.
+- Version-1 turn events durably record compiled context, selected capability
+  evidence, complete model requests and admitted outputs, calls/results, and the
+  terminal. Append timestamps and output admission evidence use canonical
+  millisecond precision. Kernel deadline failures carry the effective deadline;
+  provider deadline reports remain model failures. Cancellation/deadline stages,
+  journal/request/text bounds, manifest/epoch/schema continuity, task-completion
+  absence, and call correlation are all replay-validated.
+- `replay_artifact_read_turn` reconstructs an explicit turn from one session
+  snapshot without provider or artifact I/O. It rejects missing, reordered,
+  duplicated, out-of-scope, forged, temporally impossible, oversized, or
+  contradictory records. A pre-existing completion rejects live admission
+  without adding events; the loop itself never emits `task.completed`.
+- Focused Task 003 gates passed 95 tests across context, event store, artifact
+  store/read, protocol, and kernel. `./scripts/agent-check.sh` passed 213 workspace
+  tests, and `cargo +1.88.0 check --locked --workspace --all-targets` passed the
+  repository MSRV. Strict Clippy, formatting, diff hygiene, and secret/path
+  canaries were clean. Independent code and contract reviews approved with no
+  blockers, and repaired-edge manual QA passed. No live or billable provider
+  request was run.
 
 ## Intentionally deferred
 
-- kernel provider selection and the model/tool continuation loop;
+- daemon provider selection, paid-request scheduling, and general/effectful tool
+  continuation;
 - additional providers, OpenAI model profiles, reasoning replay, remote cancel,
   and explicit prompt-cache breakpoints;
 - capability worker protocol and lifecycle;
@@ -94,5 +98,12 @@
   a design that preserves immutable-object trust.
 - Context graph edges are validated but not yet used in ranking.
 - Search remains lexical until the embedding worker slice.
+- Version-1 replay recognizes several closed validator failures through stable
+  display-message grammar; introduce typed subcodes before changing those
+  messages.
+- Excluded context receipts are trusted but do not yet have an independent
+  encoded payload ceiling; the durable context-projection slice must bound them.
+- Task-completion admission is a high-water check followed by append rather than
+  an atomic verifier/admission transaction; no verifier producer exists yet.
 
 Update this file only after code and checks establish a new fact.
