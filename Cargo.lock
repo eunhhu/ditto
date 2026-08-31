@@ -386,6 +386,7 @@ dependencies = [
 name = "ditto-capability"
 version = "0.1.0"
 dependencies = [
+ "ditto-retrieval",
  "serde",
  "serde_json",
  "tempfile",

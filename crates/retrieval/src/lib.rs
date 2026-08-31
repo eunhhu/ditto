@@ -886,6 +886,19 @@ impl TaskQuery {
         Ok(self.exact_terms.iter().any(|term| term == &candidate))
     }
 
+    /// Return whether a non-empty phrase occurs in the canonical query text
+    /// as a whole, normalized phrase.  Matching is constrained to whitespace
+    /// boundaries, so an example such as `mail` does not deny `email`.
+    ///
+    /// The raw and normalized phrase are both bounded by the V2 component
+    /// ceiling.  Non-whitespace control characters are rejected rather than
+    /// being silently rewritten, and an empty normalized phrase is invalid.
+    pub fn contains_normalized_phrase(&self, phrase: &str) -> Result<bool, RetrievalError> {
+        let normalized = normalize_phrase(phrase)?;
+        let padded_query = format!(" {} ", self.canonical_text);
+        Ok(padded_query.contains(&format!(" {normalized} ")))
+    }
+
     pub fn query_embedding(&self) -> Option<&EmbeddingVector> {
         self.query_embedding
             .as_ref()
@@ -944,6 +957,31 @@ fn normalize_optional(
     value
         .map(|value| normalize_required(field, value, MAX_COMPONENT_BYTES))
         .transpose()
+}
+
+fn normalize_phrase(phrase: &str) -> Result<String, RetrievalError> {
+    if phrase.len() > MAX_COMPONENT_BYTES {
+        return Err(RetrievalError::ComponentTooLong {
+            field: "negative_example",
+            actual: phrase.len(),
+            maximum: MAX_COMPONENT_BYTES,
+        });
+    }
+    let normalized = normalize_text("negative_example", phrase)?;
+    if normalized.is_empty() {
+        return Err(RetrievalError::EmptyComponent {
+            field: "negative_example",
+            index: None,
+        });
+    }
+    if normalized.len() > MAX_COMPONENT_BYTES {
+        return Err(RetrievalError::ComponentTooLong {
+            field: "negative_example",
+            actual: normalized.len(),
+            maximum: MAX_COMPONENT_BYTES,
+        });
+    }
+    Ok(normalized)
 }
 
 fn normalize_set(field: &'static str, values: &[String]) -> Result<Vec<String>, RetrievalError> {
@@ -1092,7 +1130,9 @@ fn provider_error(error: EmbeddingProviderError) -> RetrievalError {
 
 #[cfg(test)]
 mod tests {
-    use super::{RetrievalDocument, RetrievalError, TaskQuery, TaskSignatureV2};
+    use super::{
+        MAX_COMPONENT_BYTES, RetrievalDocument, RetrievalError, TaskQuery, TaskSignatureV2,
+    };
 
     #[test]
     fn task_query_candidate_helpers_share_canonical_normalization_and_reject_controls() {
@@ -1139,5 +1179,71 @@ mod tests {
             expanded_lowercase_query.lexical_overlap(&expanded_lowercase_document),
             1.0
         );
+    }
+
+    #[test]
+    fn normalized_phrase_matching_is_bounded_and_whole_at_whitespace_boundaries() {
+        let query = TaskQuery::new(TaskSignatureV2::new("send mail to alice")).expect("query");
+
+        assert!(
+            query
+                .contains_normalized_phrase("mail")
+                .expect("normalized phrase")
+        );
+        assert!(
+            query
+                .contains_normalized_phrase("to alice")
+                .expect("normalized phrase")
+        );
+        assert!(
+            !query
+                .contains_normalized_phrase("mail alice")
+                .expect("non-contiguous phrase")
+        );
+        assert!(
+            !query
+                .contains_normalized_phrase("email")
+                .expect("whole phrase boundary")
+        );
+        let email_query =
+            TaskQuery::new(TaskSignatureV2::new("send email to alice")).expect("email query");
+        assert!(
+            !email_query
+                .contains_normalized_phrase("mail")
+                .expect("substring must not match")
+        );
+
+        let at_limit = "x".repeat(MAX_COMPONENT_BYTES);
+        let at_limit_query = TaskQuery::new(TaskSignatureV2::new(at_limit.clone())).expect("query");
+        assert!(
+            at_limit_query
+                .contains_normalized_phrase(&at_limit)
+                .expect("N-byte phrase")
+        );
+
+        let over_limit = "x".repeat(MAX_COMPONENT_BYTES + 1);
+        assert!(matches!(
+            query.contains_normalized_phrase(&over_limit),
+            Err(RetrievalError::ComponentTooLong {
+                field: "negative_example",
+                actual,
+                maximum: MAX_COMPONENT_BYTES,
+            }) if actual == MAX_COMPONENT_BYTES + 1
+        ));
+        assert!(matches!(
+            query.contains_normalized_phrase("mail\0to"),
+            Err(RetrievalError::ControlCharacter {
+                field: "negative_example"
+            })
+        ));
+
+        let expanded = "İ".repeat(MAX_COMPONENT_BYTES / "İ".len());
+        assert!(matches!(
+            query.contains_normalized_phrase(&expanded),
+            Err(RetrievalError::ComponentTooLong {
+                field: "negative_example",
+                ..
+            })
+        ));
     }
 }
