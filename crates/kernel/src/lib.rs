@@ -1,9 +1,13 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 pub use ditto_artifact_store::{ArtifactMetadata, ArtifactRef};
 use ditto_artifact_store::{ArtifactStore, ArtifactStoreError, DEFAULT_MAX_OBJECT_BYTES};
 use ditto_capability::{CapabilityCard, CapabilityCatalog, CapabilityError};
 pub use ditto_capability::{ExecutionEpoch, SearchContext};
+use ditto_context_projection::{ContextProjection, ContextProjectionError};
 use ditto_event_store::{EventStore, EventStoreError};
 use ditto_protocol::{
     EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
@@ -13,7 +17,12 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
+mod context_admission;
 pub mod turn;
+
+pub use context_admission::{
+    COMMITTED_BUT_PROJECTION_UNAVAILABLE, ContextProjectionUnavailable, TrustedContextNodeDraft,
+};
 
 pub use turn::{
     ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
@@ -54,8 +63,43 @@ pub enum KernelError {
     Capability(#[from] CapabilityError),
     #[error(transparent)]
     ArtifactStore(#[from] ArtifactStoreError),
+    #[error(transparent)]
+    ContextProjection(#[from] ContextProjectionError),
+    #[error("context admission gate mutex was poisoned")]
+    ContextAdmissionGatePoisoned,
+    #[error(
+        "duplicate_context_node_identity: context node identity ({session_id}, {node_id}) was already committed in event {event_id} at sequence {event_seq}"
+    )]
+    DuplicateContextNodeIdentity {
+        session_id: String,
+        node_id: String,
+        event_id: String,
+        event_seq: i64,
+    },
+    #[error(
+        "committed_but_projection_unavailable: the durable context event was committed but its projection is unavailable: {source}"
+    )]
+    CommittedButProjectionUnavailable {
+        event: Box<EventRecord>,
+        #[source]
+        source: ContextProjectionUnavailable,
+    },
+    #[error("trusted context payload serialization failed: {0}")]
+    ContextPayloadSerialization(#[from] serde_json::Error),
     #[error("invalid command: {0}")]
     InvalidCommand(String),
+}
+
+impl KernelError {
+    /// Stable machine outcome for the one accepted-but-not-yet-projected case.
+    pub const fn outcome_code(&self) -> Option<&'static str> {
+        match self {
+            Self::CommittedButProjectionUnavailable { .. } => {
+                Some(COMMITTED_BUT_PROJECTION_UNAVAILABLE)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -67,6 +111,8 @@ struct KernelInner {
     events: EventStore,
     artifacts: ArtifactStore,
     capabilities: CapabilityCatalog,
+    context_projection: ContextProjection,
+    context_admission_gate: Mutex<()>,
     event_sender: broadcast::Sender<EventRecord>,
 }
 
@@ -88,6 +134,8 @@ pub struct StoredArtifact {
 impl DittoKernel {
     pub fn open(config: KernelConfig) -> Result<Self, KernelError> {
         let events = EventStore::open(config.data_dir.join("state.db"))?;
+        let context_projection = ContextProjection::open_in(&config.data_dir)?;
+        context_projection.synchronize(&events)?;
         let artifacts = ArtifactStore::with_max_object_bytes(
             config.data_dir.join("artifacts"),
             config.artifact_max_object_bytes,
@@ -100,6 +148,8 @@ impl DittoKernel {
                 events,
                 artifacts,
                 capabilities,
+                context_projection,
+                context_admission_gate: Mutex::new(()),
                 event_sender,
             }),
         })
@@ -246,9 +296,17 @@ impl DittoKernel {
     }
 
     fn append_and_publish(&self, event: NewEvent) -> Result<EventRecord, KernelError> {
-        let event = self.inner.events.append(event)?;
-        let _ = self.inner.event_sender.send(event.clone());
+        let event = self.append_without_publish(event)?;
+        self.publish(&event);
         Ok(event)
+    }
+
+    fn append_without_publish(&self, event: NewEvent) -> Result<EventRecord, KernelError> {
+        Ok(self.inner.events.append(event)?)
+    }
+
+    fn publish(&self, event: &EventRecord) {
+        let _ = self.inner.event_sender.send(event.clone());
     }
 }
 
