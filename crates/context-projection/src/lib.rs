@@ -13,7 +13,7 @@ use std::{
 use ditto_context::{ContextNode, ContextOrigin, ContextScope, ContextValidationError};
 use ditto_event_store::{EventStore, EventStoreError};
 use ditto_protocol::{EventActor, EventQuery, EventRecord, event_kind};
-use ditto_retrieval::{CandidateCount, RetrievalError};
+use ditto_retrieval::{CandidateCount, MAX_CANDIDATE_COUNT, RetrievalError};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -257,7 +257,9 @@ impl ContextProjectionSnapshot {
     ///
     /// This detached slice carries no ranking authority. `ditto-context`
     /// applies active/validity policy, relevance, optional embedding ranking,
-    /// and the requested result limit.
+    /// and the requested result limit. It carries source authority only when
+    /// returned by
+    /// [`ContextProjection::synchronize_and_verified_snapshot_through`].
     pub fn candidates(&self) -> &[ContextNode] {
         &self.candidates
     }
@@ -392,6 +394,10 @@ pub enum ContextProjectionError {
     },
     #[error("projection row at sequence {seq} is corrupt: {reason}")]
     CorruptProjectionRow { seq: i64, reason: String },
+    #[error(
+        "context projection snapshot remains inconsistent with canonical history through sequence {high_water} after one rebuild"
+    )]
+    ProjectionSnapshotIntegrityMismatch { high_water: i64 },
     #[error("projection singleton checkpoint disappeared during page application")]
     MissingCheckpointDuringPage,
 }
@@ -402,7 +408,12 @@ pub struct ContextProjection {
     connection: Arc<Mutex<Connection>>,
     sync_gate: Arc<Mutex<()>>,
     path: Arc<PathBuf>,
+    #[cfg(test)]
+    post_rebuild_snapshot_hook: Arc<Mutex<Option<PostRebuildSnapshotHook>>>,
 }
+
+#[cfg(test)]
+type PostRebuildSnapshotHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 impl ContextProjection {
     /// Open the fixed projection database inside a Ditto data directory.
@@ -448,6 +459,8 @@ impl ContextProjection {
             connection: Arc::new(Mutex::new(connection)),
             sync_gate: Arc::new(Mutex::new(())),
             path: Arc::new(path.to_path_buf()),
+            #[cfg(test)]
+            post_rebuild_snapshot_hook: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -534,9 +547,11 @@ impl ContextProjection {
         self.synchronize_through_locked(event_store, high_water, true)
     }
 
-    /// Synchronize and copy one immutable query scope under the projection's
-    /// own gate. A kernel may additionally hold its clone-shared admission gate
-    /// across this call to establish its stronger visibility guarantee.
+    /// Synchronize and copy one immutable derived query scope under the
+    /// projection's own gate.
+    ///
+    /// This low-level compatibility helper does not compare the cache with
+    /// canonical scoped history and therefore conveys no source authority.
     pub fn synchronize_and_snapshot(
         &self,
         event_store: &EventStore,
@@ -549,8 +564,91 @@ impl ContextProjection {
         self.capture_snapshot_locked(session_id, task_id)
     }
 
+    /// Synchronize through an explicit canonical high-water and return one
+    /// source-verified session-root plus exact-task snapshot.
+    ///
+    /// The canonical event spine defines the complete requested scope. The
+    /// projection is compared with that bounded view inside the same SQLite
+    /// read transaction that materializes the detached snapshot. A logical
+    /// mismatch resets and replays the derived cache exactly once at the same
+    /// high-water; a repeated mismatch fails without returning partial rows.
+    pub fn synchronize_and_verified_snapshot_through(
+        &self,
+        event_store: &EventStore,
+        high_water: i64,
+        session_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<ContextProjectionSnapshot, ContextProjectionError> {
+        let _gate = self.sync_gate()?;
+        validate_query_scope(session_id, task_id)?;
+        let available = event_store.latest_seq()?;
+        if high_water < 0 || high_water > available {
+            return Err(ContextProjectionError::HighWaterAhead {
+                requested: high_water,
+                available,
+            });
+        }
+
+        let synchronized =
+            match self.synchronize_through_locked_internal(event_store, high_water, false) {
+                Ok(synchronized) => synchronized,
+                Err(SynchronizeThroughError::Public(error)) => return Err(error),
+                Err(SynchronizeThroughError::PersistentCacheDivergence { .. }) => {
+                    return Err(
+                        ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water },
+                    );
+                }
+            };
+        #[cfg(test)]
+        if synchronized.rebuilt {
+            self.run_post_rebuild_snapshot_hook()?;
+        }
+        let canonical =
+            canonical_scope_snapshot_view(event_store, high_water, session_id, task_id)?;
+        if let Some(snapshot) = self.verified_snapshot_attempt(
+            &canonical,
+            &synchronized.checkpoint,
+            session_id,
+            task_id,
+        )? {
+            return Ok(snapshot);
+        }
+
+        if synchronized.rebuilt {
+            return Err(ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water });
+        }
+
+        {
+            let mut connection = self.connection()?;
+            reset_schema(&mut connection)?;
+        }
+        let rebuilt = match self.synchronize_through_locked_internal(event_store, high_water, true)
+        {
+            Ok(rebuilt) => rebuilt,
+            Err(SynchronizeThroughError::Public(error)) => return Err(error),
+            Err(SynchronizeThroughError::PersistentCacheDivergence { .. }) => {
+                return Err(
+                    ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water },
+                );
+            }
+        };
+        #[cfg(test)]
+        self.run_post_rebuild_snapshot_hook()?;
+        if let Some(snapshot) =
+            self.verified_snapshot_attempt(&canonical, &rebuilt.checkpoint, session_id, task_id)?
+        {
+            return Ok(snapshot);
+        }
+
+        Err(ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water })
+    }
+
     /// Copy the currently projected session-root plus exact-task namespace.
     /// Every selected row is counted before active/relevance filtering.
+    ///
+    /// This is a low-level derived-cache inspection helper. Its result has no
+    /// source authority without the canonical comparison performed by
+    /// [`Self::synchronize_and_verified_snapshot_through`].
     pub fn capture_snapshot(
         &self,
         session_id: &str,
@@ -760,12 +858,33 @@ impl ContextProjection {
         high_water: i64,
         already_rebuilt: bool,
     ) -> Result<ProjectionSync, ContextProjectionError> {
-        let available = event_store.latest_seq()?;
+        match self.synchronize_through_locked_internal(event_store, high_water, already_rebuilt) {
+            Ok(synchronized) => Ok(synchronized),
+            Err(SynchronizeThroughError::Public(error)) => Err(error),
+            Err(SynchronizeThroughError::PersistentCacheDivergence { checkpoint }) => {
+                Err(ContextProjectionError::ProjectionNotSynchronized {
+                    checkpoint,
+                    high_water,
+                })
+            }
+        }
+    }
+
+    fn synchronize_through_locked_internal(
+        &self,
+        event_store: &EventStore,
+        high_water: i64,
+        already_rebuilt: bool,
+    ) -> Result<ProjectionSync, SynchronizeThroughError> {
+        let available = event_store
+            .latest_seq()
+            .map_err(ContextProjectionError::from)?;
         if high_water < 0 || high_water > available {
             return Err(ContextProjectionError::HighWaterAhead {
                 requested: high_water,
                 available,
-            });
+            }
+            .into());
         }
 
         let mut rebuilt = already_rebuilt;
@@ -797,21 +916,113 @@ impl ContextProjection {
             return Err(ContextProjectionError::HighWaterBehindCheckpoint {
                 requested: high_water,
                 checkpoint: checkpoint.through_seq,
-            });
+            }
+            .into());
         }
 
+        if checkpoint.through_seq < high_water
+            && !self.delta_dependencies_match_cache(
+                event_store,
+                checkpoint.through_seq,
+                high_water,
+            )?
+        {
+            if rebuilt {
+                return Err(SynchronizeThroughError::PersistentCacheDivergence {
+                    checkpoint: checkpoint.through_seq,
+                });
+            }
+            {
+                let mut connection = self.connection()?;
+                reset_schema(&mut connection)?;
+            }
+            rebuilt = true;
+            checkpoint = ProjectionCheckpoint::zero();
+        }
+
+        let checkpoint = match self.catch_up_from_checkpoint(event_store, high_water, checkpoint) {
+            Ok(checkpoint) => checkpoint,
+            Err(CatchUpError::Public(error)) => return Err(error.into()),
+            Err(CatchUpError::RepairableCacheDivergence) if !rebuilt => {
+                {
+                    let mut connection = self.connection()?;
+                    reset_schema(&mut connection)?;
+                }
+                rebuilt = true;
+                match self.catch_up_from_checkpoint(
+                    event_store,
+                    high_water,
+                    ProjectionCheckpoint::zero(),
+                ) {
+                    Ok(checkpoint) => checkpoint,
+                    Err(CatchUpError::Public(error)) => return Err(error.into()),
+                    Err(CatchUpError::RepairableCacheDivergence) => {
+                        return Err(SynchronizeThroughError::PersistentCacheDivergence {
+                            checkpoint: self.checkpoint()?.through_seq,
+                        });
+                    }
+                }
+            }
+            Err(CatchUpError::RepairableCacheDivergence) => {
+                return Err(SynchronizeThroughError::PersistentCacheDivergence {
+                    checkpoint: self.checkpoint()?.through_seq,
+                });
+            }
+        };
+
+        Ok(ProjectionSync {
+            captured_high_water: high_water,
+            checkpoint,
+            rebuilt,
+        })
+    }
+
+    fn delta_dependencies_match_cache(
+        &self,
+        event_store: &EventStore,
+        after_seq: i64,
+        through_seq: i64,
+    ) -> Result<bool, ContextProjectionError> {
+        let mut connection = self.connection()?;
+        ensure_delta_preflight_tables(&connection)?;
+        let transaction = connection.transaction()?;
+        clear_delta_preflight_tables(&transaction)?;
+        collect_delta_dependencies(&transaction, event_store, after_seq, through_seq)?;
+        seed_canonical_delta_dependencies(&transaction, event_store, after_seq)?;
+        let matches = delta_dependency_cache_matches(&transaction)?;
+        validate_delta_against_canonical_dependencies(
+            &transaction,
+            event_store,
+            after_seq,
+            through_seq,
+        )?;
+        clear_delta_preflight_tables(&transaction)?;
+        transaction.commit()?;
+        Ok(matches)
+    }
+
+    fn catch_up_from_checkpoint(
+        &self,
+        event_store: &EventStore,
+        high_water: i64,
+        mut checkpoint: ProjectionCheckpoint,
+    ) -> Result<ProjectionCheckpoint, CatchUpError> {
         let mut cursor = checkpoint.through_seq;
         while cursor < high_water {
-            let page = event_store.list_through(
-                &EventQuery {
-                    after_seq: Some(cursor),
-                    limit: Some(SYNC_PAGE_SIZE),
-                    ..EventQuery::default()
-                },
-                high_water,
-            )?;
+            let page = event_store
+                .list_through(
+                    &EventQuery {
+                        after_seq: Some(cursor),
+                        limit: Some(SYNC_PAGE_SIZE),
+                        ..EventQuery::default()
+                    },
+                    high_water,
+                )
+                .map_err(ContextProjectionError::from)?;
             let Some(last) = page.last().cloned() else {
-                return Err(ContextProjectionError::HighWaterUnreachable { cursor, high_water });
+                return Err(
+                    ContextProjectionError::HighWaterUnreachable { cursor, high_water }.into(),
+                );
             };
             let mut previous = cursor;
             for event in &page {
@@ -819,14 +1030,17 @@ impl ContextProjection {
                     return Err(ContextProjectionError::NonMonotonicPage {
                         after: previous,
                         found: event.seq,
-                    });
+                    }
+                    .into());
                 }
                 previous = event.seq;
             }
 
             {
                 let mut connection = self.connection()?;
-                let transaction = connection.transaction()?;
+                let transaction = connection
+                    .transaction()
+                    .map_err(ContextProjectionError::from)?;
                 for event in &page {
                     if event.kind == event_kind::CONTEXT_NODE_RECORDED {
                         apply_context_event(&transaction, event_store, event)?;
@@ -839,11 +1053,12 @@ impl ContextProjection {
                         last.seq,
                         &last.event_id
                     ],
-                )?;
+                )
+                .map_err(ContextProjectionError::from)?;
                 if updated != 1 {
-                    return Err(ContextProjectionError::MissingCheckpointDuringPage);
+                    return Err(ContextProjectionError::MissingCheckpointDuringPage.into());
                 }
-                transaction.commit()?;
+                transaction.commit().map_err(ContextProjectionError::from)?;
             }
             cursor = last.seq;
             checkpoint = ProjectionCheckpoint {
@@ -852,12 +1067,7 @@ impl ContextProjection {
                 through_event_id: Some(last.event_id),
             };
         }
-
-        Ok(ProjectionSync {
-            captured_high_water: high_water,
-            checkpoint,
-            rebuilt,
-        })
+        Ok(checkpoint)
     }
 
     fn capture_snapshot_locked(
@@ -880,6 +1090,7 @@ impl ContextProjection {
                 n.task_id,
                 n.node_id,
                 n.event_seq,
+                n.event_id,
                 n.node_json,
                 EXISTS (
                     SELECT 1
@@ -904,8 +1115,9 @@ impl ContextProjection {
                 task_id: row.get(1)?,
                 node_id: row.get(2)?,
                 event_seq: row.get(3)?,
-                node_json: row.get(4)?,
-                superseded: row.get(5)?,
+                event_id: row.get(4)?,
+                node_json: row.get(5)?,
+                superseded: row.get(6)?,
             })
         })?;
         let mut raw_rows = Vec::new();
@@ -927,6 +1139,39 @@ impl ContextProjection {
             scanned_rows,
             candidates,
         })
+    }
+
+    fn verified_snapshot_attempt(
+        &self,
+        canonical: &CanonicalAdmissionView,
+        expected_checkpoint: &ProjectionCheckpoint,
+        session_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<Option<ContextProjectionSnapshot>, ContextProjectionError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let snapshot = verified_snapshot_from_cache(
+            &transaction,
+            canonical,
+            expected_checkpoint,
+            session_id,
+            task_id,
+        )?;
+        transaction.commit()?;
+        Ok(snapshot)
+    }
+
+    #[cfg(test)]
+    fn run_post_rebuild_snapshot_hook(&self) -> Result<(), ContextProjectionError> {
+        let hook = self
+            .post_rebuild_snapshot_hook
+            .lock()
+            .map_err(|_| ContextProjectionError::Poisoned)?
+            .clone();
+        if let Some(hook) = hook {
+            hook(self.database_path());
+        }
+        Ok(())
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, ContextProjectionError> {
@@ -953,6 +1198,7 @@ struct RawProjectedRow {
     task_id: Option<String>,
     node_id: String,
     event_seq: i64,
+    event_id: String,
     node_json: String,
     superseded: bool,
 }
@@ -970,6 +1216,48 @@ struct ValidatedRecordedNode {
     node: ContextNode,
     session_id: String,
     task_id: Option<String>,
+}
+
+enum ApplyContextEventError {
+    Public(ContextProjectionError),
+    RepairableCacheDivergence,
+}
+
+impl From<ContextProjectionError> for ApplyContextEventError {
+    fn from(error: ContextProjectionError) -> Self {
+        Self::Public(error)
+    }
+}
+
+enum CatchUpError {
+    Public(ContextProjectionError),
+    RepairableCacheDivergence,
+}
+
+impl From<ContextProjectionError> for CatchUpError {
+    fn from(error: ContextProjectionError) -> Self {
+        Self::Public(error)
+    }
+}
+
+impl From<ApplyContextEventError> for CatchUpError {
+    fn from(error: ApplyContextEventError) -> Self {
+        match error {
+            ApplyContextEventError::Public(error) => Self::Public(error),
+            ApplyContextEventError::RepairableCacheDivergence => Self::RepairableCacheDivergence,
+        }
+    }
+}
+
+enum SynchronizeThroughError {
+    Public(ContextProjectionError),
+    PersistentCacheDivergence { checkpoint: i64 },
+}
+
+impl From<ContextProjectionError> for SynchronizeThroughError {
+    fn from(error: ContextProjectionError) -> Self {
+        Self::Public(error)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1118,6 +1406,447 @@ fn checkpoint_anchor_matches(
         }))
 }
 
+fn ensure_delta_preflight_tables(connection: &Connection) -> Result<(), ContextProjectionError> {
+    // Dependency sets can grow with the bounded delta, so keep their derived
+    // spill storage off the Rust heap regardless of SQLite's build default.
+    connection.pragma_update(None, "temp_store", "FILE")?;
+    connection.execute_batch(
+        r#"
+        CREATE TEMP TABLE IF NOT EXISTS context_delta_targets (
+            session_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            PRIMARY KEY (session_id, node_id)
+        ) WITHOUT ROWID;
+        CREATE TEMP TABLE IF NOT EXISTS context_delta_events (
+            event_seq INTEGER PRIMARY KEY,
+            event_id TEXT NOT NULL UNIQUE
+        );
+        CREATE TEMP TABLE IF NOT EXISTS context_delta_canonical_rows (
+            session_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            task_id TEXT,
+            event_seq INTEGER NOT NULL,
+            event_id TEXT NOT NULL,
+            node_json TEXT NOT NULL,
+            PRIMARY KEY (session_id, node_id)
+        ) WITHOUT ROWID;
+        CREATE TEMP TABLE IF NOT EXISTS context_delta_canonical_edges (
+            session_id TEXT NOT NULL,
+            task_key TEXT NOT NULL,
+            superseding_node_id TEXT NOT NULL,
+            superseded_node_id TEXT NOT NULL,
+            event_seq INTEGER NOT NULL
+        );
+        CREATE TEMP TABLE IF NOT EXISTS context_delta_working_rows (
+            session_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            task_id TEXT,
+            event_seq INTEGER NOT NULL,
+            event_id TEXT NOT NULL,
+            node_json TEXT NOT NULL,
+            PRIMARY KEY (session_id, node_id)
+        ) WITHOUT ROWID;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn clear_delta_preflight_tables(connection: &Connection) -> Result<(), ContextProjectionError> {
+    connection.execute_batch(
+        r#"
+        DELETE FROM context_delta_targets;
+        DELETE FROM context_delta_events;
+        DELETE FROM context_delta_canonical_rows;
+        DELETE FROM context_delta_canonical_edges;
+        DELETE FROM context_delta_working_rows;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn visit_event_range(
+    event_store: &EventStore,
+    after_seq: i64,
+    through_seq: i64,
+    mut visit: impl FnMut(&EventRecord) -> Result<(), ContextProjectionError>,
+) -> Result<(), ContextProjectionError> {
+    visit_filtered_event_range(event_store, after_seq, through_seq, None, &mut visit)
+}
+
+fn visit_filtered_event_range(
+    event_store: &EventStore,
+    after_seq: i64,
+    through_seq: i64,
+    session_id: Option<&str>,
+    visit: &mut impl FnMut(&EventRecord) -> Result<(), ContextProjectionError>,
+) -> Result<(), ContextProjectionError> {
+    let mut cursor = after_seq;
+    while cursor < through_seq {
+        let page = event_store.list_through(
+            &EventQuery {
+                after_seq: Some(cursor),
+                limit: Some(SYNC_PAGE_SIZE),
+                session_id: session_id.map(str::to_owned),
+                ..EventQuery::default()
+            },
+            through_seq,
+        )?;
+        let Some(last) = page.last() else {
+            if session_id.is_some() {
+                break;
+            }
+            return Err(ContextProjectionError::HighWaterUnreachable {
+                cursor,
+                high_water: through_seq,
+            });
+        };
+        let mut previous = cursor;
+        for event in &page {
+            if event.seq <= previous || event.seq > through_seq {
+                return Err(ContextProjectionError::NonMonotonicPage {
+                    after: previous,
+                    found: event.seq,
+                });
+            }
+            visit(event)?;
+            previous = event.seq;
+        }
+        cursor = last.seq;
+    }
+    Ok(())
+}
+
+fn collect_delta_dependencies(
+    transaction: &Transaction<'_>,
+    event_store: &EventStore,
+    after_seq: i64,
+    through_seq: i64,
+) -> Result<(), ContextProjectionError> {
+    visit_event_range(event_store, after_seq, through_seq, |event| {
+        if event.kind != event_kind::CONTEXT_NODE_RECORDED {
+            return Ok(());
+        }
+        let validated = decode_recorded_node(event_store, event)?;
+        transaction.execute(
+            "INSERT INTO context_delta_events (event_seq, event_id) VALUES (?1, ?2)",
+            params![event.seq, &event.event_id],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO context_delta_targets (session_id, node_id) VALUES (?1, ?2)",
+            params![&validated.session_id, &validated.node.id],
+        )?;
+        for superseded_id in &validated.node.supersedes {
+            transaction.execute(
+                "INSERT OR IGNORE INTO context_delta_targets (session_id, node_id) VALUES (?1, ?2)",
+                params![&validated.session_id, superseded_id],
+            )?;
+        }
+        Ok(())
+    })
+}
+
+fn delta_target_contains(
+    connection: &Connection,
+    session_id: &str,
+    node_id: &str,
+) -> Result<bool, ContextProjectionError> {
+    connection
+        .query_row(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM context_delta_targets
+                WHERE session_id = ?1 AND node_id = ?2
+            )
+            "#,
+            params![session_id, node_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn seed_canonical_delta_dependencies(
+    transaction: &Transaction<'_>,
+    event_store: &EventStore,
+    through_seq: i64,
+) -> Result<(), ContextProjectionError> {
+    let mut after_session: Option<String> = None;
+    loop {
+        let sessions = {
+            let mut statement = transaction.prepare(
+                r#"
+                SELECT DISTINCT session_id
+                FROM context_delta_targets
+                WHERE (?1 IS NULL OR session_id > ?1)
+                ORDER BY session_id ASC
+                LIMIT 128
+                "#,
+            )?;
+            statement
+                .query_map(params![after_session.as_deref()], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if sessions.is_empty() {
+            break;
+        }
+        for session_id in &sessions {
+            visit_filtered_event_range(
+                event_store,
+                0,
+                through_seq,
+                Some(session_id),
+                &mut |event| seed_canonical_delta_event(transaction, event_store, event),
+            )?;
+        }
+        after_session = sessions.last().cloned();
+    }
+    Ok(())
+}
+
+fn seed_canonical_delta_event(
+    transaction: &Transaction<'_>,
+    event_store: &EventStore,
+    event: &EventRecord,
+) -> Result<(), ContextProjectionError> {
+    if event.kind != event_kind::CONTEXT_NODE_RECORDED {
+        return Ok(());
+    }
+    let validated = decode_recorded_node(event_store, event)?;
+    let row_is_target =
+        delta_target_contains(transaction, &validated.session_id, &validated.node.id)?;
+    if row_is_target {
+        if let Some((event_id, event_seq)) = transaction
+                .query_row(
+                    "SELECT event_id, event_seq FROM context_delta_canonical_rows WHERE session_id = ?1 AND node_id = ?2",
+                    params![&validated.session_id, &validated.node.id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?
+            {
+                return Err(ContextProjectionError::DuplicateNodeIdentity {
+                    session_id: validated.session_id,
+                    node_id: validated.node.id,
+                    event_id,
+                    seq: event_seq,
+                });
+            }
+        transaction.execute(
+            r#"
+                INSERT INTO context_delta_canonical_rows (
+                    session_id, node_id, task_id, event_seq, event_id, node_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "#,
+            params![
+                &validated.session_id,
+                &validated.node.id,
+                &validated.task_id,
+                event.seq,
+                &event.event_id,
+                serde_json::to_string(&validated.node).map_err(|error| {
+                    ContextProjectionError::InvalidNode {
+                        node_id: validated.node.id.clone(),
+                        reason: error.to_string(),
+                    }
+                })?,
+            ],
+        )?;
+    }
+
+    for superseded_id in &validated.node.supersedes {
+        if row_is_target
+            || delta_target_contains(transaction, &validated.session_id, superseded_id)?
+        {
+            transaction.execute(
+                r#"
+                    INSERT INTO context_delta_canonical_edges (
+                        session_id, task_key, superseding_node_id,
+                        superseded_node_id, event_seq
+                    ) VALUES (?1, ?2, ?3, ?4, ?5)
+                    "#,
+                params![
+                    &validated.session_id,
+                    task_key(validated.task_id.as_deref()),
+                    &validated.node.id,
+                    superseded_id,
+                    event.seq,
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn delta_dependency_cache_matches(
+    transaction: &Transaction<'_>,
+) -> Result<bool, ContextProjectionError> {
+    let row_mismatch: bool = transaction.query_row(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM context_delta_targets AS target
+            LEFT JOIN context_delta_canonical_rows AS canonical
+              ON canonical.session_id = target.session_id
+             AND canonical.node_id = target.node_id
+            LEFT JOIN projected_nodes AS cached
+              ON cached.session_id = target.session_id
+             AND cached.node_id = target.node_id
+            WHERE (canonical.node_id IS NULL) <> (cached.node_id IS NULL)
+               OR (
+                    canonical.node_id IS NOT NULL
+                AND (
+                       canonical.task_id IS NOT cached.task_id
+                    OR canonical.event_seq != cached.event_seq
+                    OR canonical.event_id != cached.event_id
+                    OR canonical.node_json != cached.node_json
+                )
+               )
+        )
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    let occupied_delta_event: bool = transaction.query_row(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM projected_nodes AS cached
+            JOIN context_delta_events AS delta
+              ON cached.event_seq = delta.event_seq
+              OR cached.event_id = delta.event_id
+        )
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    let missing_edge: bool = transaction.query_row(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM context_delta_canonical_edges AS canonical
+            LEFT JOIN supersession_edges AS cached
+              ON cached.session_id = canonical.session_id
+             AND cached.task_key = canonical.task_key
+             AND cached.superseding_node_id = canonical.superseding_node_id
+             AND cached.superseded_node_id = canonical.superseded_node_id
+             AND cached.event_seq = canonical.event_seq
+            WHERE cached.session_id IS NULL
+        )
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    let extra_edge: bool = transaction.query_row(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM supersession_edges AS cached
+            JOIN context_delta_targets AS target
+              ON target.session_id = cached.session_id
+             AND (
+                    target.node_id = cached.superseding_node_id
+                 OR target.node_id = cached.superseded_node_id
+             )
+            LEFT JOIN context_delta_canonical_edges AS canonical
+              ON canonical.session_id = cached.session_id
+             AND canonical.task_key = cached.task_key
+             AND canonical.superseding_node_id = cached.superseding_node_id
+             AND canonical.superseded_node_id = cached.superseded_node_id
+             AND canonical.event_seq = cached.event_seq
+            WHERE canonical.session_id IS NULL
+        )
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(!(row_mismatch || occupied_delta_event || missing_edge || extra_edge))
+}
+
+fn validate_delta_against_canonical_dependencies(
+    transaction: &Transaction<'_>,
+    event_store: &EventStore,
+    after_seq: i64,
+    through_seq: i64,
+) -> Result<(), ContextProjectionError> {
+    transaction.execute(
+        r#"
+        INSERT INTO context_delta_working_rows (
+            session_id, node_id, task_id, event_seq, event_id, node_json
+        )
+        SELECT session_id, node_id, task_id, event_seq, event_id, node_json
+        FROM context_delta_canonical_rows
+        "#,
+        [],
+    )?;
+    visit_event_range(event_store, after_seq, through_seq, |event| {
+        if event.kind != event_kind::CONTEXT_NODE_RECORDED {
+            return Ok(());
+        }
+        let validated = decode_recorded_node(event_store, event)?;
+        if let Some((event_id, event_seq)) = transaction
+            .query_row(
+                "SELECT event_id, event_seq FROM context_delta_working_rows WHERE session_id = ?1 AND node_id = ?2",
+                params![&validated.session_id, &validated.node.id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        {
+            return Err(ContextProjectionError::DuplicateNodeIdentity {
+                session_id: validated.session_id,
+                node_id: validated.node.id,
+                event_id,
+                seq: event_seq,
+            });
+        }
+        for superseded_id in &validated.node.supersedes {
+            match transaction
+                .query_row(
+                    "SELECT task_id FROM context_delta_working_rows WHERE session_id = ?1 AND node_id = ?2",
+                    params![&validated.session_id, superseded_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+            {
+                None => {
+                    return Err(ContextProjectionError::MissingSupersededNode {
+                        node_id: validated.node.id,
+                        superseded_id: superseded_id.clone(),
+                    });
+                }
+                Some(task_id) if task_id != validated.task_id => {
+                    return Err(ContextProjectionError::SupersessionScopeMismatch {
+                        node_id: validated.node.id,
+                        superseded_id: superseded_id.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        transaction.execute(
+            r#"
+            INSERT INTO context_delta_working_rows (
+                session_id, node_id, task_id, event_seq, event_id, node_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                &validated.session_id,
+                &validated.node.id,
+                &validated.task_id,
+                event.seq,
+                &event.event_id,
+                serde_json::to_string(&validated.node).map_err(|error| {
+                    ContextProjectionError::InvalidNode {
+                        node_id: validated.node.id.clone(),
+                        reason: error.to_string(),
+                    }
+                })?,
+            ],
+        )?;
+        Ok(())
+    })
+}
+
 fn canonical_session_admission_view(
     event_store: &EventStore,
     through_seq: i64,
@@ -1172,27 +1901,7 @@ fn canonical_session_admission_view(
             if !targets.contains(&validated.node.id) {
                 continue;
             }
-            let node_json = serde_json::to_vec(&validated.node).map_err(|error| {
-                ContextProjectionError::InvalidNode {
-                    node_id: validated.node.id.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
-            let outgoing_edge_count = validated.node.supersedes.len();
-            let outgoing_edge_digest = canonical_edge_digest(
-                &validated.node.id,
-                task_key(validated.task_id.as_deref()),
-                event.seq,
-                &validated.node.supersedes,
-            );
-            let row = CanonicalAdmissionRow {
-                task_id: validated.task_id,
-                event_seq: event.seq,
-                event_id: event.event_id.clone(),
-                node_digest: digest_bytes(&node_json),
-                outgoing_edge_digest,
-                outgoing_edge_count,
-            };
+            let row = canonical_cache_row(&validated, event)?;
             if let Some(existing) = view.rows.insert(validated.node.id.clone(), row) {
                 return Err(ContextProjectionError::DuplicateNodeIdentity {
                     session_id: session_id.to_owned(),
@@ -1204,6 +1913,330 @@ fn canonical_session_admission_view(
         }
     }
     Ok(view)
+}
+
+fn canonical_scope_snapshot_view(
+    event_store: &EventStore,
+    through_seq: i64,
+    session_id: &str,
+    task_id: Option<&str>,
+) -> Result<CanonicalAdmissionView, ContextProjectionError> {
+    let mut view = CanonicalAdmissionView::default();
+    let mut cursor = 0_i64;
+    let mut selected_count = 0_usize;
+    loop {
+        let page = event_store.list_through(
+            &EventQuery {
+                after_seq: Some(cursor),
+                limit: Some(1_000),
+                session_id: Some(session_id.to_owned()),
+                task_id: None,
+            },
+            through_seq,
+        )?;
+        if page.is_empty() {
+            break;
+        }
+        for event in &page {
+            if event.seq <= cursor || event.seq > through_seq {
+                return Err(ContextProjectionError::NonMonotonicPage {
+                    after: cursor,
+                    found: event.seq,
+                });
+            }
+            cursor = event.seq;
+            if event.kind != event_kind::CONTEXT_NODE_RECORDED {
+                continue;
+            }
+            let envelope_selected = event.task_id.is_none()
+                || task_id.is_some_and(|requested| event.task_id.as_deref() == Some(requested));
+            if !envelope_selected {
+                continue;
+            }
+            let validated = decode_recorded_node(event_store, event)?;
+
+            selected_count += 1;
+            CandidateCount::new(selected_count)?;
+            for superseded_id in &validated.node.supersedes {
+                view.incoming_edges
+                    .entry(superseded_id.clone())
+                    .or_default()
+                    .update(
+                        &validated.node.id,
+                        task_key(validated.task_id.as_deref()),
+                        event.seq,
+                        superseded_id,
+                    );
+            }
+            let row = canonical_cache_row(&validated, event)?;
+            if let Some(existing) = view.rows.insert(validated.node.id.clone(), row) {
+                return Err(ContextProjectionError::DuplicateNodeIdentity {
+                    session_id: session_id.to_owned(),
+                    node_id: validated.node.id,
+                    event_id: existing.event_id,
+                    seq: existing.event_seq,
+                });
+            }
+        }
+    }
+    Ok(view)
+}
+
+fn canonical_cache_row(
+    validated: &ValidatedRecordedNode,
+    event: &EventRecord,
+) -> Result<CanonicalAdmissionRow, ContextProjectionError> {
+    let node_json = serde_json::to_vec(&validated.node).map_err(|error| {
+        ContextProjectionError::InvalidNode {
+            node_id: validated.node.id.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+    Ok(CanonicalAdmissionRow {
+        task_id: validated.task_id.clone(),
+        event_seq: event.seq,
+        event_id: event.event_id.clone(),
+        node_digest: digest_bytes(&node_json),
+        outgoing_edge_digest: canonical_edge_digest(
+            &validated.node.id,
+            task_key(validated.task_id.as_deref()),
+            event.seq,
+            &validated.node.supersedes,
+        ),
+        outgoing_edge_count: validated.node.supersedes.len(),
+    })
+}
+
+fn verified_snapshot_from_cache(
+    transaction: &Transaction<'_>,
+    canonical: &CanonicalAdmissionView,
+    expected_checkpoint: &ProjectionCheckpoint,
+    session_id: &str,
+    task_id: Option<&str>,
+) -> Result<Option<ContextProjectionSnapshot>, ContextProjectionError> {
+    let Some(checkpoint) = read_checkpoint(transaction)? else {
+        return Ok(None);
+    };
+    if checkpoint != *expected_checkpoint {
+        return Ok(None);
+    }
+    let Some(scoped_cache_count) =
+        cached_scope_row_count_with_sentinel(transaction, session_id, task_id)?
+    else {
+        return Ok(None);
+    };
+    if scoped_cache_count != canonical.rows.len() {
+        return Ok(None);
+    }
+    let Some(cached_edges) = cached_scope_edge_view(transaction, canonical, session_id, task_id)?
+    else {
+        return Ok(None);
+    };
+
+    let mut candidates = Vec::new();
+    let mut cached_row_count = 0_usize;
+    {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT
+                n.session_id,
+                n.task_id,
+                n.node_id,
+                n.event_seq,
+                n.event_id,
+                n.node_json,
+                EXISTS (
+                    SELECT 1
+                    FROM supersession_edges AS edge
+                    WHERE edge.session_id = n.session_id
+                      AND edge.task_key = COALESCE(n.task_id, '')
+                      AND edge.superseded_node_id = n.node_id
+                )
+            FROM projected_nodes AS n
+            WHERE n.session_id = ?1
+              AND (
+                  n.task_id IS NULL
+                  OR (?2 IS NOT NULL AND n.task_id = ?2)
+              )
+            ORDER BY n.event_seq ASC, n.node_id ASC
+            LIMIT 10001
+            "#,
+        )?;
+        let mapped = statement.query_map(params![session_id, task_id], |row| {
+            Ok(RawProjectedRow {
+                session_id: row.get(0)?,
+                task_id: row.get(1)?,
+                node_id: row.get(2)?,
+                event_seq: row.get(3)?,
+                event_id: row.get(4)?,
+                node_json: row.get(5)?,
+                superseded: row.get(6)?,
+            })
+        })?;
+        for raw in mapped {
+            let raw = raw?;
+            cached_row_count += 1;
+            let Some(expected) = canonical.rows.get(&raw.node_id) else {
+                return Ok(None);
+            };
+            if raw.task_id != expected.task_id
+                || raw.event_seq != expected.event_seq
+                || raw.event_id != expected.event_id
+                || digest_bytes(raw.node_json.as_bytes()) != expected.node_digest
+            {
+                return Ok(None);
+            }
+
+            let outgoing = cached_edges
+                .outgoing
+                .get(&raw.node_id)
+                .map_or_else(empty_edge_shape, EdgeAccumulator::shape);
+            if outgoing != (expected.outgoing_edge_digest, expected.outgoing_edge_count) {
+                return Ok(None);
+            }
+            let incoming = cached_edges
+                .incoming
+                .get(&raw.node_id)
+                .map_or_else(empty_edge_shape, EdgeAccumulator::shape);
+            let expected_incoming = canonical
+                .incoming_edges
+                .get(&raw.node_id)
+                .map_or_else(empty_edge_shape, EdgeAccumulator::shape);
+            if incoming != expected_incoming {
+                return Ok(None);
+            }
+
+            let projected = projected_row(raw)?;
+            if !projected.superseded {
+                candidates.push(projected.node);
+            }
+        }
+    }
+    if cached_row_count != canonical.rows.len() {
+        return Ok(None);
+    }
+
+    Ok(Some(ContextProjectionSnapshot {
+        checkpoint,
+        scanned_rows: cached_row_count,
+        candidates,
+    }))
+}
+
+fn cached_scope_row_count_with_sentinel(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    task_id: Option<&str>,
+) -> Result<Option<usize>, ContextProjectionError> {
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT 1
+        FROM projected_nodes
+        WHERE session_id = ?1
+          AND (
+              task_id IS NULL
+              OR (?2 IS NOT NULL AND task_id = ?2)
+          )
+        ORDER BY event_seq ASC, node_id ASC
+        LIMIT 10001
+        "#,
+    )?;
+    let rows = statement.query_map(params![session_id, task_id], |_| Ok(()))?;
+    let mut count = 0_usize;
+    for row in rows {
+        row?;
+        count += 1;
+        if count > MAX_CANDIDATE_COUNT {
+            return Ok(None);
+        }
+    }
+    Ok(Some(count))
+}
+
+#[derive(Default)]
+struct CachedScopeEdgeView {
+    outgoing: HashMap<String, EdgeAccumulator>,
+    incoming: HashMap<String, EdgeAccumulator>,
+}
+
+fn cached_scope_edge_view(
+    transaction: &Transaction<'_>,
+    canonical: &CanonicalAdmissionView,
+    session_id: &str,
+    task_id: Option<&str>,
+) -> Result<Option<CachedScopeEdgeView>, ContextProjectionError> {
+    let expected_edge_count = canonical
+        .rows
+        .values()
+        .map(|row| row.outgoing_edge_count)
+        .sum::<usize>();
+    let mut statement = transaction.prepare(
+        r#"
+        SELECT superseding_node_id, task_key, event_seq, superseded_node_id
+        FROM supersession_edges
+        WHERE session_id = ?1
+        ORDER BY event_seq ASC, superseding_node_id ASC,
+                 task_key ASC, superseded_node_id ASC
+        "#,
+    )?;
+    let rows = statement.query_map(params![session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut result = CachedScopeEdgeView::default();
+    let mut endpoints = HashSet::new();
+    let mut relevant_edge_count = 0_usize;
+    for row in rows {
+        let (superseding_node_id, edge_task_key, event_seq, superseded_node_id) = row?;
+        let scope_selected =
+            edge_task_key.is_empty() || task_id.is_some_and(|requested| requested == edge_task_key);
+        let touches_selected_row = canonical.rows.contains_key(&superseding_node_id)
+            || canonical.rows.contains_key(&superseded_node_id);
+        if !scope_selected && !touches_selected_row {
+            continue;
+        }
+
+        relevant_edge_count += 1;
+        if relevant_edge_count > expected_edge_count {
+            return Ok(None);
+        }
+        endpoints.insert(superseding_node_id.clone());
+        endpoints.insert(superseded_node_id.clone());
+        if endpoints.len() > MAX_CANDIDATE_COUNT
+            || !canonical.rows.contains_key(&superseding_node_id)
+            || !canonical.rows.contains_key(&superseded_node_id)
+        {
+            return Ok(None);
+        }
+        result
+            .outgoing
+            .entry(superseding_node_id.clone())
+            .or_default()
+            .update(
+                &superseding_node_id,
+                &edge_task_key,
+                event_seq,
+                &superseded_node_id,
+            );
+        result
+            .incoming
+            .entry(superseded_node_id.clone())
+            .or_default()
+            .update(
+                &superseding_node_id,
+                &edge_task_key,
+                event_seq,
+                &superseded_node_id,
+            );
+    }
+    if relevant_edge_count != expected_edge_count {
+        return Ok(None);
+    }
+    Ok(Some(result))
 }
 
 fn relevant_cache_matches(
@@ -1418,13 +2451,17 @@ fn apply_context_event(
     transaction: &Transaction<'_>,
     event_store: &EventStore,
     event: &EventRecord,
-) -> Result<(), ContextProjectionError> {
+) -> Result<(), ApplyContextEventError> {
     let validated = decode_recorded_node(event_store, event)?;
     let scope = NodeScope {
         session_id: &validated.session_id,
         task_id: validated.task_id.as_deref(),
     };
-    validate_projection_identity_and_supersession(transaction, &validated.node, &scope)?;
+    let preflight_conflict = cache_preflight_conflicts_with_event(transaction, event, &validated)?;
+    let validation_conflict = projection_cache_conflicts(transaction, &validated.node, &scope)?;
+    if preflight_conflict || validation_conflict {
+        return Err(ApplyContextEventError::RepairableCacheDivergence);
+    }
 
     let node_json = serde_json::to_string(&validated.node).map_err(|error| {
         ContextProjectionError::InvalidNode {
@@ -1432,39 +2469,66 @@ fn apply_context_event(
             reason: error.to_string(),
         }
     })?;
-    transaction.execute(
-        r#"
+    transaction
+        .execute(
+            r#"
         INSERT INTO projected_nodes (
             session_id, task_id, node_id, event_seq, event_id, node_json
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
         "#,
-        params![
-            scope.session_id,
-            scope.task_id,
-            &validated.node.id,
-            event.seq,
-            &event.event_id,
-            node_json,
-        ],
-    )?;
+            params![
+                scope.session_id,
+                scope.task_id,
+                &validated.node.id,
+                event.seq,
+                &event.event_id,
+                node_json,
+            ],
+        )
+        .map_err(ContextProjectionError::from)?;
     for superseded_id in &validated.node.supersedes {
-        transaction.execute(
-            r#"
+        transaction
+            .execute(
+                r#"
             INSERT INTO supersession_edges (
                 session_id, task_key, superseding_node_id,
                 superseded_node_id, event_seq
             ) VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
-            params![
-                scope.session_id,
-                task_key(scope.task_id),
-                &validated.node.id,
-                superseded_id,
-                event.seq,
-            ],
-        )?;
+                params![
+                    scope.session_id,
+                    task_key(scope.task_id),
+                    &validated.node.id,
+                    superseded_id,
+                    event.seq,
+                ],
+            )
+            .map_err(ContextProjectionError::from)?;
     }
     Ok(())
+}
+
+fn cache_preflight_conflicts_with_event(
+    connection: &Connection,
+    event: &EventRecord,
+    validated: &ValidatedRecordedNode,
+) -> Result<bool, ContextProjectionError> {
+    let occupied_event_identity: bool = connection.query_row(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM projected_nodes
+            WHERE event_seq = ?1 OR event_id = ?2
+        )
+        "#,
+        params![event.seq, &event.event_id],
+        |row| row.get(0),
+    )?;
+    if occupied_event_identity {
+        return Ok(true);
+    }
+
+    cache_has_edges_for_node(connection, &validated.session_id, &validated.node.id)
 }
 
 fn decode_recorded_node(
@@ -1640,38 +2704,25 @@ fn validate_references(
     Ok(())
 }
 
-fn validate_projection_identity_and_supersession(
+fn projection_cache_conflicts(
     connection: &Connection,
     node: &ContextNode,
     scope: &NodeScope<'_>,
-) -> Result<(), ContextProjectionError> {
-    if let Some((event_id, seq)) = find_identity(connection, scope.session_id, &node.id)? {
-        return Err(ContextProjectionError::DuplicateNodeIdentity {
-            session_id: scope.session_id.to_owned(),
-            node_id: node.id.clone(),
-            event_id,
-            seq,
-        });
+) -> Result<bool, ContextProjectionError> {
+    if find_identity(connection, scope.session_id, &node.id)?.is_some() {
+        return Ok(true);
     }
 
     for superseded_id in &node.supersedes {
         match find_node_scope(connection, scope.session_id, superseded_id)? {
-            None => {
-                return Err(ContextProjectionError::MissingSupersededNode {
-                    node_id: node.id.clone(),
-                    superseded_id: superseded_id.clone(),
-                });
-            }
+            None => return Ok(true),
             Some(existing_task) if existing_task.as_deref() != scope.task_id => {
-                return Err(ContextProjectionError::SupersessionScopeMismatch {
-                    node_id: node.id.clone(),
-                    superseded_id: superseded_id.clone(),
-                });
+                return Ok(true);
             }
             Some(_) => {}
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn resolve_sources(
@@ -1889,5 +2940,206 @@ fn bounded_list(
         })
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ditto_context::{ContextLens, ContextNodeKind, EpistemicStatus};
+    use ditto_protocol::NewEvent;
+    use serde_json::json;
+
+    #[test]
+    fn persistent_post_rebuild_corruption_returns_typed_snapshot_integrity_failure() {
+        let directory = tempfile::tempdir().expect("snapshot integrity fixture");
+        let store = EventStore::open(directory.path().join("state.db")).expect("event store");
+        let projection = ContextProjection::open_in(directory.path()).expect("projection");
+        let source = store
+            .append(NewEvent {
+                session_id: Some("session-integrity".into()),
+                task_id: None,
+                actor: EventActor::User,
+                kind: "fixture.source".into(),
+                payload: json!({"source": true}),
+                causation_id: None,
+                correlation_id: Some("session-integrity".into()),
+                span_id: None,
+            })
+            .expect("source event");
+        let node = ContextNode {
+            id: "persistent-node".into(),
+            kind: ContextNodeKind::Claim,
+            summary: "canonical summary".into(),
+            origin: ContextOrigin::User,
+            epistemic: EpistemicStatus::Verified,
+            scope: ContextScope::Session,
+            lens: ContextLens::Task,
+            confidence: 1.0,
+            source_event_ids: vec![source.event_id.clone()],
+            supersedes: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+        };
+        let recorded = store
+            .append(NewEvent {
+                session_id: Some("session-integrity".into()),
+                task_id: None,
+                actor: EventActor::System,
+                kind: event_kind::CONTEXT_NODE_RECORDED.into(),
+                payload: serde_json::to_value(ContextNodeRecordedPayloadV1::new(node))
+                    .expect("context payload"),
+                causation_id: Some(source.event_id),
+                correlation_id: Some("session-integrity".into()),
+                span_id: None,
+            })
+            .expect("context event");
+        projection.synchronize(&store).expect("initial sync");
+        let connection = Connection::open(projection.database_path()).expect("corrupt cache");
+        connection
+            .execute(
+                "UPDATE projected_nodes SET node_json = '{}' WHERE node_id = 'persistent-node'",
+                [],
+            )
+            .expect("initial logical corruption");
+        drop(connection);
+
+        *projection
+            .post_rebuild_snapshot_hook
+            .lock()
+            .expect("snapshot hook") = Some(Arc::new(|path| {
+            let connection = Connection::open(path).expect("post-rebuild trigger connection");
+            connection
+                .execute_batch(
+                    r#"
+                    CREATE TRIGGER corrupt_verified_snapshot_after_rebuild
+                    AFTER UPDATE OF through_seq ON projection_checkpoint
+                    BEGIN
+                        UPDATE projected_nodes
+                        SET node_json = '{}'
+                        WHERE node_id = 'persistent-node';
+                    END;
+                    UPDATE projection_checkpoint
+                    SET through_seq = through_seq
+                    WHERE singleton = 1;
+                    "#,
+                )
+                .expect("post-rebuild corruption trigger");
+        }));
+
+        let error = projection
+            .synchronize_and_verified_snapshot_through(
+                &store,
+                recorded.seq,
+                "session-integrity",
+                None,
+            )
+            .expect_err("persistent mismatch must not return a partial snapshot");
+        assert!(matches!(
+            error,
+            ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water }
+                if high_water == recorded.seq
+        ));
+        assert_eq!(store.count().expect("source count"), 2);
+    }
+
+    #[test]
+    fn catch_up_repair_consumes_the_verified_snapshot_rebuild_budget() {
+        let directory = tempfile::tempdir().expect("catch-up repair fixture");
+        let store = EventStore::open(directory.path().join("state.db")).expect("event store");
+        let projection = ContextProjection::open_in(directory.path()).expect("projection");
+        let source = store
+            .append(NewEvent {
+                session_id: Some("session-catch-up-budget".into()),
+                task_id: None,
+                actor: EventActor::User,
+                kind: "fixture.source".into(),
+                payload: json!({"source": true}),
+                causation_id: None,
+                correlation_id: Some("session-catch-up-budget".into()),
+                span_id: None,
+            })
+            .expect("source event");
+        projection
+            .synchronize_through(&store, source.seq)
+            .expect("prefix checkpoint");
+        let node = ContextNode {
+            id: "catch-up-budget-node".into(),
+            kind: ContextNodeKind::Claim,
+            summary: "canonical summary".into(),
+            origin: ContextOrigin::User,
+            epistemic: EpistemicStatus::Verified,
+            scope: ContextScope::Session,
+            lens: ContextLens::Task,
+            confidence: 1.0,
+            source_event_ids: vec![source.event_id.clone()],
+            supersedes: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+        };
+        let recorded = store
+            .append(NewEvent {
+                session_id: Some("session-catch-up-budget".into()),
+                task_id: None,
+                actor: EventActor::System,
+                kind: event_kind::CONTEXT_NODE_RECORDED.into(),
+                payload: serde_json::to_value(ContextNodeRecordedPayloadV1::new(node.clone()))
+                    .expect("context payload"),
+                causation_id: Some(source.event_id),
+                correlation_id: Some("session-catch-up-budget".into()),
+                span_id: None,
+            })
+            .expect("context event");
+        let connection = Connection::open(projection.database_path()).expect("collision cache");
+        connection
+            .execute(
+                "INSERT INTO projected_nodes (session_id, task_id, node_id, event_seq, event_id, node_json) VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+                params![
+                    "session-catch-up-budget",
+                    "catch-up-budget-node",
+                    recorded.seq + 10_000,
+                    "cache-only-collision",
+                    serde_json::to_string(&node).expect("cache node JSON"),
+                ],
+            )
+            .expect("insert cache-only identity collision");
+        drop(connection);
+
+        *projection
+            .post_rebuild_snapshot_hook
+            .lock()
+            .expect("snapshot hook") = Some(Arc::new(|path| {
+            let connection = Connection::open(path).expect("post-catch-up repair connection");
+            connection
+                .execute(
+                    "UPDATE projected_nodes SET node_json = '{}' WHERE node_id = 'catch-up-budget-node'",
+                    [],
+                )
+                .expect("corrupt cache after catch-up repair");
+        }));
+
+        let error = projection
+            .synchronize_and_verified_snapshot_through(
+                &store,
+                recorded.seq,
+                "session-catch-up-budget",
+                None,
+            )
+            .expect_err("catch-up repair already consumed the one rebuild budget");
+        assert!(matches!(
+            error,
+            ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water }
+                if high_water == recorded.seq
+        ));
+        let connection = Connection::open(projection.database_path()).expect("inspect cache");
+        let cached_json: String = connection
+            .query_row(
+                "SELECT node_json FROM projected_nodes WHERE node_id = 'catch-up-budget-node'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("persistently corrupted row");
+        assert_eq!(cached_json, "{}", "a second rebuild must not have occurred");
+        assert_eq!(store.count().expect("source count"), 2);
     }
 }

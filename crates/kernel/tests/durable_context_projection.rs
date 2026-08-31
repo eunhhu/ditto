@@ -1266,3 +1266,5 @@ fn committed_projection_failure_publishes_once_returns_record_and_recovers_witho
     assert_same_event(reopened_short, &short_committed);
     assert_same_event(reopened_overflow, &committed);
 }
+
+include!("durable_context_projection/working_set.rs");
