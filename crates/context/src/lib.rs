@@ -1,7 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use chrono::{DateTime, Utc};
-use ditto_retrieval::CandidateCount;
+use ditto_retrieval::{
+    CandidateCount, ContextResultLimit, EmbeddingProvider, RetrievalMode, cosine_similarity,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -172,6 +177,17 @@ pub fn context_retrieval_document(node: &ContextNode) -> Result<RetrievalDocumen
         node.summary
     ))
 }
+
+// Defense-in-depth mirrors of ADR 0010's node-local durable V1 bounds.
+// `ditto-context-projection` remains the authoritative event-admission owner;
+// ranking rechecks plain projected nodes so cache corruption fails closed.
+const MAX_CONTEXT_NODE_ID_BYTES: usize = 256;
+const MAX_CONTEXT_NODE_SUMMARY_BYTES: usize = 65_000;
+const MAX_CONTEXT_REFERENCE_ID_BYTES: usize = 256;
+const MAX_CONTEXT_SOURCE_EVENT_IDS: usize = 64;
+const MAX_CONTEXT_SUPERSEDES: usize = 64;
+const MAX_SERIALIZED_CONTEXT_NODE_BYTES: usize = 131_072;
+const MAX_CONTEXT_RANKING_ERROR_DETAIL_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -397,7 +413,7 @@ impl ContextCandidate {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextReceiptEntry {
     pub node_id: String,
     pub source_event_ids: Vec<String>,
@@ -407,7 +423,7 @@ pub struct ContextReceiptEntry {
     pub token_cost: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextExclusionReason {
     Invalid,
@@ -416,7 +432,7 @@ pub enum ContextExclusionReason {
     TokenBudget,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextExclusion {
     pub node_id: String,
     pub reason: ContextExclusionReason,
@@ -424,7 +440,7 @@ pub struct ContextExclusion {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContextReceipt {
     pub included: Vec<ContextReceiptEntry>,
     pub excluded: Vec<ContextExclusion>,
@@ -434,7 +450,7 @@ pub struct ContextReceipt {
     pub over_soft_budget: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompiledContext {
     pub nodes: Vec<ContextNode>,
     pub receipt: ContextReceipt,
@@ -628,6 +644,340 @@ pub enum ContextCompileError {
     RequiredContextBudgetExceeded { used: u32, absolute_budget: u32 },
     #[error("shared retrieval query or document is invalid: {0}")]
     Retrieval(#[from] RetrievalError),
+}
+
+/// Failures while deriving an authenticated V2 context ranking.
+///
+/// Provider/query pairing is checked before the candidate iterator is touched.
+/// Once candidate processing starts, every structural or provider failure
+/// aborts the whole operation without returning a partial ranking.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ContextQueryRankingError {
+    #[error("shared retrieval query or context document is invalid: {0}")]
+    Retrieval(#[from] RetrievalError),
+    #[error(
+        "task query mode {mode} does not match the embedding provider presence ({provider_present})"
+    )]
+    ProviderModeMismatch {
+        mode: RetrievalMode,
+        provider_present: bool,
+    },
+    #[error("context ranking candidate {node_id} appears more than once")]
+    DuplicateCandidate { node_id: String },
+    #[error("context ranking candidate {node_id} is invalid: {reason}")]
+    InvalidCandidate { node_id: String, reason: String },
+    #[error("context ranking candidate id is {actual} bytes, exceeding the {maximum}-byte limit")]
+    CandidateIdTooLong { actual: usize, maximum: usize },
+    #[error(
+        "context ranking candidate {node_id} summary is {actual} bytes, exceeding the {maximum}-byte limit"
+    )]
+    CandidateSummaryTooLong {
+        node_id: String,
+        actual: usize,
+        maximum: usize,
+    },
+}
+
+/// An authenticated, bounded V2 ranking derived only by `ditto-context`.
+///
+/// The plan deliberately has no public rank-component, directive, or ordering
+/// fields and implements neither [`Serialize`] nor [`Deserialize`].  Callers
+/// can clone a valid plan, but cannot deserialize or construct a substitute
+/// ordering for [`ContextCompiler::compile_ranked_query`].
+///
+/// ```compile_fail
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<ditto_context::ContextQueryRanking>();
+/// ```
+///
+/// ```compile_fail
+/// let _ = ditto_context::ContextQueryRanking {};
+/// ```
+#[derive(Clone)]
+pub struct ContextQueryRanking {
+    query: TaskQuery,
+    evaluated_at: DateTime<Utc>,
+    result_limit: ContextResultLimit,
+    ranked: Vec<RankedQueryCandidate>,
+    excluded: Vec<ContextExclusion>,
+}
+
+impl fmt::Debug for ContextQueryRanking {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContextQueryRanking")
+            .field("query_mode", &self.query.mode())
+            .field("evaluated_at", &self.evaluated_at)
+            .field("result_limit", &self.result_limit.get())
+            .field("ranked_count", &self.ranked.len())
+            .field("excluded_count", &self.excluded.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+struct RankedQueryCandidate {
+    node: ContextNode,
+    exact: bool,
+    embedding_similarity: Option<f32>,
+    relevance_score: f32,
+}
+
+impl ContextQueryRanking {
+    /// Derive a bounded context ranking from one already-validated shared
+    /// query and plain projected nodes.
+    ///
+    /// Structurally invalid nodes fail closed. Disputed, expired, and
+    /// not-yet-valid nodes are hard-filtered before document or provider work;
+    /// active lexical misses are likewise excluded before provider work. Every
+    /// remaining document is embedded in node-ID order, including exact
+    /// matches, before the fixed ranking tuple and result limit are applied.
+    pub fn new(
+        query: &TaskQuery,
+        candidates: impl IntoIterator<Item = ContextNode>,
+        evaluated_at: DateTime<Utc>,
+        result_limit: ContextResultLimit,
+        provider: Option<&dyn EmbeddingProvider>,
+    ) -> Result<Self, ContextQueryRankingError> {
+        validate_context_query_provider(query, provider)?;
+
+        let mut bounded_candidates = Vec::new();
+        let mut candidate_ids = HashSet::new();
+        let mut first_candidate_error = None;
+        let mut candidate_count = 0_usize;
+        for candidate in candidates {
+            candidate_count = candidate_count.saturating_add(1);
+            CandidateCount::new(candidate_count)?;
+
+            // Preserve the V2 count gate's precedence by remembering the
+            // first bounded candidate error until the iterator is exhausted.
+            // After an error, later nodes are counted and immediately dropped;
+            // no attacker-sized field is retained merely to discover 10,001.
+            if first_candidate_error.is_some() {
+                continue;
+            }
+            if let Err(error) = validate_ranked_context_node(&candidate) {
+                first_candidate_error = Some(error);
+                continue;
+            }
+            if !candidate_ids.insert(candidate.id.clone()) {
+                first_candidate_error = Some(ContextQueryRankingError::DuplicateCandidate {
+                    node_id: candidate.id.clone(),
+                });
+                continue;
+            }
+            bounded_candidates.push(candidate);
+        }
+        if let Some(error) = first_candidate_error {
+            return Err(error);
+        }
+
+        let mut ranked = Vec::new();
+        let mut excluded = Vec::new();
+        for node in bounded_candidates {
+            if !node.is_valid_at(evaluated_at) {
+                excluded.push(ContextExclusion {
+                    node_id: node.id,
+                    reason: ContextExclusionReason::DisputedOrExpired,
+                    detail: None,
+                });
+                continue;
+            }
+
+            let document = context_retrieval_document(&node)?;
+            let (relevance_score, exact) = v2_relevance_from_document(&node, query, &document)?;
+            if !exact && relevance_score == 0.0 {
+                excluded.push(ContextExclusion {
+                    node_id: node.id,
+                    reason: ContextExclusionReason::Irrelevant,
+                    detail: None,
+                });
+                continue;
+            }
+
+            ranked.push(RankedQueryCandidate {
+                node,
+                exact,
+                embedding_similarity: None,
+                relevance_score,
+            });
+        }
+
+        // Deterministic validation and hard filtering above complete before
+        // any provider call. Rebuilding each bounded document here avoids
+        // retaining a second maximum-sized copy for all 10,000 candidates.
+        ranked.sort_unstable_by(|left, right| left.node.id.cmp(&right.node.id));
+        if let Some(provider) = provider {
+            let query_vector = query
+                .query_embedding()
+                .ok_or(RetrievalError::EmbeddingNotConfigured)?;
+            for candidate in &mut ranked {
+                let document = context_retrieval_document(&candidate.node)?;
+                let vector = query.embed_document(provider, &document)?;
+                candidate.embedding_similarity = Some(cosine_similarity(query_vector, &vector)?);
+            }
+        }
+
+        ranked.sort_unstable_by(ranked_query_candidate_order);
+        ranked.truncate(result_limit.get());
+        excluded.sort_unstable_by(|left, right| left.node_id.cmp(&right.node_id));
+
+        Ok(Self {
+            query: query.clone(),
+            evaluated_at,
+            result_limit,
+            ranked,
+            excluded,
+        })
+    }
+
+    /// Number of eligible results retained after the authenticated result
+    /// limit. This reveals no rank components or mutable ordering surface.
+    pub fn len(&self) -> usize {
+        self.ranked.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranked.is_empty()
+    }
+}
+
+fn validate_ranked_context_node(node: &ContextNode) -> Result<(), ContextQueryRankingError> {
+    if node.id.len() > MAX_CONTEXT_NODE_ID_BYTES {
+        return Err(ContextQueryRankingError::CandidateIdTooLong {
+            actual: node.id.len(),
+            maximum: MAX_CONTEXT_NODE_ID_BYTES,
+        });
+    }
+    if node.summary.len() > MAX_CONTEXT_NODE_SUMMARY_BYTES {
+        return Err(ContextQueryRankingError::CandidateSummaryTooLong {
+            node_id: node.id.clone(),
+            actual: node.summary.len(),
+            maximum: MAX_CONTEXT_NODE_SUMMARY_BYTES,
+        });
+    }
+    node.validate()
+        .map_err(|error| invalid_ranked_candidate(&node.id, error.to_string()))?;
+    validate_ranked_reference_list(
+        node,
+        "source_event_ids",
+        &node.source_event_ids,
+        1,
+        MAX_CONTEXT_SOURCE_EVENT_IDS,
+        false,
+    )?;
+    validate_ranked_reference_list(
+        node,
+        "supersedes",
+        &node.supersedes,
+        0,
+        MAX_CONTEXT_SUPERSEDES,
+        true,
+    )?;
+
+    let serialized = serde_json::to_vec(node)
+        .map_err(|_| invalid_ranked_candidate(&node.id, "context node is not serializable"))?;
+    if serialized.len() > MAX_SERIALIZED_CONTEXT_NODE_BYTES {
+        return Err(invalid_ranked_candidate(
+            &node.id,
+            format!(
+                "serialized context node is {} bytes, exceeding the {}-byte limit",
+                serialized.len(),
+                MAX_SERIALIZED_CONTEXT_NODE_BYTES
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ranked_reference_list(
+    node: &ContextNode,
+    field: &'static str,
+    values: &[String],
+    minimum: usize,
+    maximum: usize,
+    reject_self: bool,
+) -> Result<(), ContextQueryRankingError> {
+    if !(minimum..=maximum).contains(&values.len()) {
+        return Err(invalid_ranked_candidate(
+            &node.id,
+            format!(
+                "{field} contains {} entries, outside the inclusive range {minimum}..={maximum}",
+                values.len()
+            ),
+        ));
+    }
+
+    let mut seen = HashSet::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        if value.trim().is_empty() {
+            return Err(invalid_ranked_candidate(
+                &node.id,
+                format!("{field} reference at index {index} is empty"),
+            ));
+        }
+        if value.len() > MAX_CONTEXT_REFERENCE_ID_BYTES {
+            return Err(invalid_ranked_candidate(
+                &node.id,
+                format!(
+                    "{field} reference at index {index} is {} bytes, exceeding the {}-byte limit",
+                    value.len(),
+                    MAX_CONTEXT_REFERENCE_ID_BYTES
+                ),
+            ));
+        }
+        if !seen.insert(value.as_str()) {
+            return Err(invalid_ranked_candidate(
+                &node.id,
+                format!("{field} contains duplicate reference {value}"),
+            ));
+        }
+        if reject_self && value == &node.id {
+            return Err(invalid_ranked_candidate(
+                &node.id,
+                "supersedes contains the node's own id",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn invalid_ranked_candidate(node_id: &str, reason: impl AsRef<str>) -> ContextQueryRankingError {
+    debug_assert!(node_id.len() <= MAX_CONTEXT_NODE_ID_BYTES);
+    ContextQueryRankingError::InvalidCandidate {
+        node_id: node_id.to_owned(),
+        reason: bounded_context_ranking_error_detail(reason.as_ref()),
+    }
+}
+
+fn bounded_context_ranking_error_detail(detail: &str) -> String {
+    if detail.len() <= MAX_CONTEXT_RANKING_ERROR_DETAIL_BYTES {
+        return detail.to_owned();
+    }
+    let mut end = MAX_CONTEXT_RANKING_ERROR_DETAIL_BYTES;
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    detail[..end].to_owned()
+}
+
+fn validate_context_query_provider(
+    query: &TaskQuery,
+    provider: Option<&dyn EmbeddingProvider>,
+) -> Result<(), ContextQueryRankingError> {
+    let provider_present = provider.is_some();
+    let pairing_valid = match query.mode() {
+        RetrievalMode::LexicalOnly => !provider_present,
+        RetrievalMode::Embedded => provider_present,
+    };
+    if pairing_valid {
+        Ok(())
+    } else {
+        Err(ContextQueryRankingError::ProviderModeMismatch {
+            mode: query.mode(),
+            provider_present,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1303,6 +1653,219 @@ impl ContextCompiler {
 
         Ok(())
     }
+
+    /// Compile an opaque V2 ranking under the requested token budget.
+    ///
+    /// Ranked entries are considered greedily in their authenticated order.
+    /// An entry that does not fit is recorded as token-budget excluded and the
+    /// compiler continues to lower-ranked entries, allowing a smaller result
+    /// to backfill without changing the ranking itself. Plain ranked-query
+    /// inputs cannot acquire pinned or policy-required authority.
+    pub fn compile_ranked_query(
+        &self,
+        ranking: &ContextQueryRanking,
+        token_budget: Option<u32>,
+    ) -> Result<CompiledContext, ContextCompileError> {
+        Ok(self.compile_ranked_query_inner(ranking, token_budget))
+    }
+
+    /// Validate a compiled result against the exact opaque ranking that
+    /// authorized it.
+    ///
+    /// The captured evaluation time, lexical receipt scores, embedded order,
+    /// result limit, exclusion sequence, and exact capsule token costs all
+    /// remain bound to the plan; validation never accepts a caller-supplied
+    /// query, score, directive, or replacement order.
+    pub fn validate_compiled_ranked_query(
+        &self,
+        ranking: &ContextQueryRanking,
+        compiled: &CompiledContext,
+        capsule: &ContextCapsule,
+        token_budget: Option<u32>,
+    ) -> Result<(), CompiledContextValidationError> {
+        capsule
+            .validate_at_with_budget(ranking.evaluated_at, self.absolute_budget)
+            .map_err(CompiledContextValidationError::InvalidCapsule)?;
+
+        if ContextCapsule::from(compiled) != *capsule {
+            return Err(CompiledContextValidationError::CapsuleMismatch);
+        }
+        if compiled.nodes.len() != compiled.receipt.included.len()
+            || compiled.nodes.len() != capsule.nodes.len()
+        {
+            return Err(CompiledContextValidationError::NodeReceiptLengthMismatch {
+                nodes: compiled.nodes.len(),
+                included: compiled.receipt.included.len(),
+                capsule: capsule.nodes.len(),
+            });
+        }
+
+        let expected_token_budget = token_budget.unwrap_or(self.default_budget);
+        if compiled.receipt.token_budget != expected_token_budget
+            || compiled.receipt.absolute_budget != self.absolute_budget
+        {
+            return Err(CompiledContextValidationError::BudgetMismatch {
+                expected_token_budget,
+                actual_token_budget: compiled.receipt.token_budget,
+                expected_absolute_budget: self.absolute_budget,
+                actual_absolute_budget: compiled.receipt.absolute_budget,
+            });
+        }
+
+        let expected = self.compile_ranked_query_inner(ranking, token_budget);
+        if compiled.nodes.len() != expected.nodes.len() {
+            return Err(
+                CompiledContextValidationError::RankedSelectionLengthMismatch {
+                    expected: expected.nodes.len(),
+                    actual: compiled.nodes.len(),
+                },
+            );
+        }
+
+        let mut seen_ids = HashSet::with_capacity(
+            compiled
+                .receipt
+                .included
+                .len()
+                .saturating_add(compiled.receipt.excluded.len()),
+        );
+        for entry in &compiled.receipt.excluded {
+            if !seen_ids.insert(entry.node_id.clone()) {
+                return Err(CompiledContextValidationError::DuplicateReceiptId {
+                    node_id: entry.node_id.clone(),
+                });
+            }
+        }
+
+        for ((node, receipt), (expected_node, expected_receipt)) in compiled
+            .nodes
+            .iter()
+            .zip(&compiled.receipt.included)
+            .zip(expected.nodes.iter().zip(&expected.receipt.included))
+        {
+            if !seen_ids.insert(receipt.node_id.clone()) {
+                return Err(CompiledContextValidationError::DuplicateReceiptId {
+                    node_id: receipt.node_id.clone(),
+                });
+            }
+            if node.id != expected_node.id {
+                return Err(CompiledContextValidationError::NonCanonicalOrder {
+                    node_id: node.id.clone(),
+                });
+            }
+            if node != expected_node
+                || receipt.node_id != node.id
+                || receipt.node_id != expected_receipt.node_id
+                || receipt.source_event_ids != node.source_event_ids
+                || receipt.source_event_ids != expected_receipt.source_event_ids
+                || receipt.epistemic != node.epistemic
+                || receipt.epistemic != expected_receipt.epistemic
+            {
+                return Err(CompiledContextValidationError::ReceiptNodeMismatch {
+                    node_id: node.id.clone(),
+                });
+            }
+            if receipt.reason != expected_receipt.reason {
+                return Err(CompiledContextValidationError::InvalidReceiptReason {
+                    node_id: node.id.clone(),
+                    reason: receipt.reason.clone(),
+                });
+            }
+            if receipt.score.to_bits() != expected_receipt.score.to_bits() {
+                return Err(CompiledContextValidationError::ScoreMismatch {
+                    node_id: node.id.clone(),
+                });
+            }
+            if receipt.token_cost != expected_receipt.token_cost {
+                return Err(CompiledContextValidationError::TokenCostMismatch {
+                    node_id: node.id.clone(),
+                    expected: expected_receipt.token_cost,
+                    actual: receipt.token_cost,
+                });
+            }
+        }
+
+        if compiled.receipt.excluded.len() != expected.receipt.excluded.len() {
+            return Err(CompiledContextValidationError::ExclusionReceiptMismatch {
+                index: compiled
+                    .receipt
+                    .excluded
+                    .len()
+                    .min(expected.receipt.excluded.len()),
+            });
+        }
+        for (index, (actual, expected)) in compiled
+            .receipt
+            .excluded
+            .iter()
+            .zip(&expected.receipt.excluded)
+            .enumerate()
+        {
+            if actual != expected {
+                return Err(CompiledContextValidationError::ExclusionReceiptMismatch { index });
+            }
+        }
+
+        if compiled.receipt.total_token_cost != expected.receipt.total_token_cost
+            || compiled.receipt.over_soft_budget != expected.receipt.over_soft_budget
+            || capsule.token_cost() != expected.receipt.total_token_cost
+        {
+            return Err(CompiledContextValidationError::TokenAccountingMismatch {
+                expected: expected.receipt.total_token_cost,
+                actual: compiled.receipt.total_token_cost,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn compile_ranked_query_inner(
+        &self,
+        ranking: &ContextQueryRanking,
+        token_budget: Option<u32>,
+    ) -> CompiledContext {
+        let token_budget = token_budget.unwrap_or(self.default_budget);
+        let selection_budget = token_budget.min(self.absolute_budget);
+        let mut selected = Vec::new();
+        let mut included = Vec::new();
+        let mut excluded = ranking.excluded.clone();
+        let mut used = 0_u32;
+
+        for candidate in &ranking.ranked {
+            let token_cost = ContextCapsuleItem::from(&candidate.node).token_cost();
+            if used.saturating_add(token_cost) > selection_budget {
+                excluded.push(ContextExclusion {
+                    node_id: candidate.node.id.clone(),
+                    reason: ContextExclusionReason::TokenBudget,
+                    detail: None,
+                });
+                continue;
+            }
+
+            used = used.saturating_add(token_cost);
+            included.push(ContextReceiptEntry {
+                node_id: candidate.node.id.clone(),
+                source_event_ids: candidate.node.source_event_ids.clone(),
+                epistemic: candidate.node.epistemic,
+                reason: "task-relevance".into(),
+                score: candidate.relevance_score,
+                token_cost,
+            });
+            selected.push(candidate.node.clone());
+        }
+
+        CompiledContext {
+            nodes: selected,
+            receipt: ContextReceipt {
+                included,
+                excluded,
+                total_token_cost: used,
+                token_budget,
+                absolute_budget: self.absolute_budget,
+                over_soft_budget: used > token_budget,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -1343,6 +1906,12 @@ pub enum CompiledContextValidationError {
     InvalidReceiptReason { node_id: String, reason: String },
     #[error("compiled context receipt is not in canonical order at node {node_id}")]
     NonCanonicalOrder { node_id: String },
+    #[error(
+        "compiled ranked context selected {actual} nodes, but the authenticated plan selects {expected}"
+    )]
+    RankedSelectionLengthMismatch { expected: usize, actual: usize },
+    #[error("compiled ranked context exclusion at index {index} is not canonical")]
+    ExclusionReceiptMismatch { index: usize },
     #[error(
         "required compiled context costs {used} tokens, exceeding the absolute ceiling {absolute_budget}"
     )]
@@ -1409,6 +1978,31 @@ fn v2_candidate_order(
         .then_with(|| left.node.id.cmp(&right.node.id))
 }
 
+fn ranked_query_candidate_order(
+    left: &RankedQueryCandidate,
+    right: &RankedQueryCandidate,
+) -> std::cmp::Ordering {
+    right
+        .exact
+        .cmp(&left.exact)
+        .then_with(
+            || match (left.embedding_similarity, right.embedding_similarity) {
+                (Some(left_similarity), Some(right_similarity)) => {
+                    right_similarity.total_cmp(&left_similarity)
+                }
+                (None, None) => std::cmp::Ordering::Equal,
+                // A ranking has one query mode, so mixed variants cannot be
+                // constructed through the public API. Keep the comparator total
+                // and fail-closed toward the embedded entry if that invariant is
+                // ever changed internally.
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+            },
+        )
+        .then_with(|| right.relevance_score.total_cmp(&left.relevance_score))
+        .then_with(|| left.node.id.cmp(&right.node.id))
+}
+
 fn receipt_entry(
     node: &ContextNode,
     directive: &ContextDirective,
@@ -1464,7 +2058,15 @@ fn relevance_score(node: &ContextNode, query_tokens: &HashSet<String>) -> f32 {
 
 fn v2_relevance(node: &ContextNode, query: &TaskQuery) -> Result<(f32, bool), RetrievalError> {
     let document = context_retrieval_document(node)?;
-    let lexical_overlap = query.lexical_overlap(&document);
+    v2_relevance_from_document(node, query, &document)
+}
+
+fn v2_relevance_from_document(
+    node: &ContextNode,
+    query: &TaskQuery,
+    document: &RetrievalDocument,
+) -> Result<(f32, bool), RetrievalError> {
+    let lexical_overlap = query.lexical_overlap(document);
     let exact = query.matches_exact_term(&node.id)?;
 
     if !exact && lexical_overlap == 0.0 {
@@ -1523,16 +2125,28 @@ fn tokenize(input: &str) -> HashSet<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+
     use chrono::{Duration, Utc};
+    use ditto_retrieval::{
+        ContextResultLimit, Embedding, EmbeddingProvider, EmbeddingProviderError, EmbeddingPurpose,
+        MAX_CANDIDATE_COUNT, MAX_CONTEXT_RESULT_LIMIT, RetrievalMode,
+    };
 
     use super::{
         CAPSULE_ITEM_FIXED_OVERHEAD_TOKENS, CompiledContextValidationError, ContextCandidate,
         ContextCapsule, ContextCapsuleItem, ContextCapsuleValidationError, ContextCompileError,
         ContextCompiler, ContextEdge, ContextEdgeKind, ContextExclusion, ContextExclusionReason,
-        ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope,
-        ContextValidationError, DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus,
-        MAX_REQUEST_BYTES, MAX_RETRIEVAL_DOCUMENT_BYTES, RetrievalError, TaskQuery, TaskSignature,
-        TaskSignatureV2, context_retrieval_document,
+        ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin,
+        ContextQueryRanking, ContextQueryRankingError, ContextScope, ContextValidationError,
+        DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus, MAX_CONTEXT_NODE_ID_BYTES,
+        MAX_CONTEXT_NODE_SUMMARY_BYTES, MAX_CONTEXT_REFERENCE_ID_BYTES,
+        MAX_CONTEXT_SOURCE_EVENT_IDS, MAX_CONTEXT_SUPERSEDES, MAX_REQUEST_BYTES,
+        MAX_RETRIEVAL_DOCUMENT_BYTES, MAX_SERIALIZED_CONTEXT_NODE_BYTES, RetrievalError, TaskQuery,
+        TaskSignature, TaskSignatureV2, context_retrieval_document,
     };
 
     fn node(id: &str, summary: &str) -> ContextNode {
@@ -1549,6 +2163,137 @@ mod tests {
             supersedes: Vec::new(),
             valid_from: None,
             valid_until: None,
+        }
+    }
+
+    fn reference_at_bound(index: usize) -> String {
+        let prefix = format!("event-{index:02}-");
+        format!(
+            "{prefix}{}",
+            "r".repeat(MAX_CONTEXT_REFERENCE_ID_BYTES - prefix.len())
+        )
+    }
+
+    fn node_with_serialized_len(target: usize) -> ContextNode {
+        let mut candidate = node(
+            "serialized-bound",
+            &"s".repeat(MAX_CONTEXT_NODE_SUMMARY_BYTES),
+        );
+        candidate.source_event_ids = (0..5).map(reference_at_bound).collect();
+        let baseline = serde_json::to_vec(&candidate)
+            .expect("serialize baseline bounded node")
+            .len();
+        let extra_escapes = target
+            .checked_sub(baseline)
+            .expect("serialized target exceeds baseline");
+        assert!(extra_escapes <= MAX_CONTEXT_NODE_SUMMARY_BYTES);
+        candidate.summary = format!(
+            "{}{}",
+            "\\".repeat(extra_escapes),
+            "s".repeat(MAX_CONTEXT_NODE_SUMMARY_BYTES - extra_escapes)
+        );
+        assert_eq!(
+            serde_json::to_vec(&candidate)
+                .expect("serialize exact bounded node")
+                .len(),
+            target
+        );
+        candidate
+    }
+
+    #[derive(Clone)]
+    struct RankingProvider {
+        calls: Arc<Mutex<Vec<(EmbeddingPurpose, String)>>>,
+        descriptor: String,
+        query_vector: Vec<f32>,
+        document_vectors: HashMap<String, Vec<f32>>,
+        document_descriptor: Option<String>,
+        document_vector_override: Option<Vec<f32>>,
+        fail_documents: bool,
+    }
+
+    impl RankingProvider {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                descriptor: "context-ranking-v1".into(),
+                query_vector: vec![1.0, 0.0],
+                document_vectors: HashMap::new(),
+                document_descriptor: None,
+                document_vector_override: None,
+                fail_documents: false,
+            }
+        }
+
+        fn with_document_vector(mut self, node_id: &str, vector: Vec<f32>) -> Self {
+            self.document_vectors.insert(node_id.into(), vector);
+            self
+        }
+
+        fn calls(&self) -> Vec<(EmbeddingPurpose, String)> {
+            self.calls.lock().expect("ranking provider calls").clone()
+        }
+
+        fn document_ids(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter_map(|(purpose, document)| {
+                    (purpose == EmbeddingPurpose::Document).then(|| {
+                        document
+                            .lines()
+                            .next()
+                            .expect("context document has id line")
+                            .strip_prefix("id=")
+                            .expect("context document id prefix")
+                            .to_owned()
+                    })
+                })
+                .collect()
+        }
+    }
+
+    impl EmbeddingProvider for RankingProvider {
+        fn embed(
+            &self,
+            purpose: EmbeddingPurpose,
+            text: &str,
+        ) -> Result<Embedding, EmbeddingProviderError> {
+            self.calls
+                .lock()
+                .expect("ranking provider calls")
+                .push((purpose, text.to_owned()));
+            if purpose == EmbeddingPurpose::Document && self.fail_documents {
+                return Err(EmbeddingProviderError::failure(
+                    "context document unavailable",
+                ));
+            }
+
+            let descriptor = if purpose == EmbeddingPurpose::Document {
+                self.document_descriptor
+                    .as_deref()
+                    .unwrap_or(&self.descriptor)
+            } else {
+                &self.descriptor
+            };
+            let vector = match purpose {
+                EmbeddingPurpose::Query => self.query_vector.clone(),
+                EmbeddingPurpose::Document => {
+                    if let Some(vector) = &self.document_vector_override {
+                        vector.clone()
+                    } else {
+                        let node_id = text
+                            .lines()
+                            .next()
+                            .and_then(|line| line.strip_prefix("id="))
+                            .expect("context document id");
+                        self.document_vectors
+                            .get(node_id)
+                            .cloned()
+                            .unwrap_or_else(|| vec![0.0, 1.0])
+                    }
+                }
+            };
+            Ok(Embedding::new(descriptor, vector))
         }
     }
 
@@ -2775,6 +3520,791 @@ mod tests {
             ),
             Err(CompiledContextValidationError::NonCanonicalOrder { ref node_id })
                 if node_id == "a-node"
+        ));
+    }
+
+    #[test]
+    fn embedded_rank_survives_token_budget_reversal_and_retains_lexical_scores() {
+        let provider = RankingProvider::new()
+            .with_document_vector("node-a", vec![0.0, 1.0])
+            .with_document_vector("node-b", vec![1.0, 0.0]);
+        let query = TaskQuery::with_provider(TaskSignatureV2::new("alpha beta"), Some(&provider))
+            .expect("embedded query");
+        let evaluated_at = Utc::now();
+        let node_a = node("node-a", "alpha beta");
+        let node_b = node("node-b", "alpha");
+        let node_b_cost = ContextCapsuleItem::from(&node_b).token_cost();
+        let ranking = ContextQueryRanking::new(
+            &query,
+            [node_a, node_b],
+            evaluated_at,
+            ContextResultLimit::new(2).expect("result limit"),
+            Some(&provider),
+        )
+        .expect("context ranking");
+
+        assert_eq!(provider.document_ids(), ["node-a", "node-b"]);
+        let compiler = ContextCompiler::default();
+        let full = compiler
+            .compile_ranked_query(&ranking, None)
+            .expect("full ranked context");
+        assert_eq!(
+            full.nodes
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            ["node-b", "node-a"]
+        );
+        assert!(full.receipt.included[0].score < full.receipt.included[1].score);
+
+        let constrained = compiler
+            .compile_ranked_query(&ranking, Some(node_b_cost))
+            .expect("budgeted ranked context");
+        assert_eq!(
+            constrained
+                .nodes
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            ["node-b"]
+        );
+        assert!(constrained.receipt.excluded.iter().any(|entry| {
+            entry.node_id == "node-a" && entry.reason == ContextExclusionReason::TokenBudget
+        }));
+        let capsule = ContextCapsule::from(&constrained);
+        compiler
+            .validate_compiled_ranked_query(&ranking, &constrained, &capsule, Some(node_b_cost))
+            .expect("authenticated embedded order validates");
+    }
+
+    #[test]
+    fn ranked_query_backfills_lower_candidate_when_top_rank_does_not_fit() {
+        let provider = RankingProvider::new()
+            .with_document_vector("large-top", vec![1.0, 0.0])
+            .with_document_vector("small-lower", vec![1.0, 1.0]);
+        let query = TaskQuery::with_provider(TaskSignatureV2::new("alpha"), Some(&provider))
+            .expect("embedded query");
+        let large = node("large-top", &format!("alpha {}", "large ".repeat(800)));
+        let small = node("small-lower", "alpha");
+        let small_cost = ContextCapsuleItem::from(&small).token_cost();
+        assert!(ContextCapsuleItem::from(&large).token_cost() > small_cost);
+        let ranking = ContextQueryRanking::new(
+            &query,
+            [large, small],
+            Utc::now(),
+            ContextResultLimit::new(2).expect("result limit"),
+            Some(&provider),
+        )
+        .expect("context ranking");
+
+        let compiled = ContextCompiler::default()
+            .compile_ranked_query(&ranking, Some(small_cost))
+            .expect("backfilled context");
+        assert_eq!(compiled.nodes.len(), 1);
+        assert_eq!(compiled.nodes[0].id, "small-lower");
+        assert_eq!(
+            compiled
+                .receipt
+                .excluded
+                .last()
+                .map(|entry| entry.node_id.as_str()),
+            Some("large-top")
+        );
+        assert_eq!(
+            compiled.receipt.excluded.last().map(|entry| &entry.reason),
+            Some(&ContextExclusionReason::TokenBudget)
+        );
+    }
+
+    #[test]
+    fn exact_context_id_beats_maximum_cosine_and_all_eligible_documents_embed_in_id_order() {
+        let provider = RankingProvider::new()
+            .with_document_vector("exact-node", vec![0.0, 1.0])
+            .with_document_vector("lexical-id", vec![1.0, 0.0]);
+        let query = TaskQuery::with_provider(
+            TaskSignatureV2 {
+                request: "target".into(),
+                entities: vec!["exact-node".into()],
+                ..TaskSignatureV2::default()
+            },
+            Some(&provider),
+        )
+        .expect("embedded query");
+        let ranking = ContextQueryRanking::new(
+            &query,
+            [
+                node("lexical-id", "target"),
+                node("exact-node", "unrelated"),
+                node("irrelevant-id", "nothing useful"),
+            ],
+            Utc::now(),
+            ContextResultLimit::new(1).expect("result limit"),
+            Some(&provider),
+        )
+        .expect("context ranking");
+        assert_eq!(provider.document_ids(), ["exact-node", "lexical-id"]);
+        assert_eq!(ranking.len(), 1);
+
+        let compiled = ContextCompiler::default()
+            .compile_ranked_query(&ranking, None)
+            .expect("compile exact context");
+        assert_eq!(compiled.nodes[0].id, "exact-node");
+        assert!(compiled.receipt.excluded.iter().any(|entry| {
+            entry.node_id == "irrelevant-id" && entry.reason == ContextExclusionReason::Irrelevant
+        }));
+    }
+
+    #[test]
+    fn lexical_ranking_filters_inactive_and_irrelevant_nodes_deterministically() {
+        let evaluated_at = Utc::now();
+        let query = TaskQuery::new(TaskSignatureV2::new("alpha beta")).expect("lexical query");
+        let mut disputed = node("d-disputed", "alpha beta");
+        disputed.epistemic = EpistemicStatus::Disputed;
+        let mut expired = node("e-expired", "alpha beta");
+        expired.valid_until = Some(evaluated_at);
+        let mut future = node("f-future", "alpha beta");
+        future.valid_from = Some(evaluated_at + Duration::seconds(1));
+        let ranking = ContextQueryRanking::new(
+            &query,
+            [
+                node("b-low", "alpha"),
+                future,
+                node("z-irrelevant", "gamma"),
+                disputed,
+                node("z-high", "alpha beta"),
+                node("a-low", "alpha"),
+                expired,
+            ],
+            evaluated_at,
+            ContextResultLimit::new(3).expect("result limit"),
+            None,
+        )
+        .expect("lexical ranking");
+        assert_eq!(ranking.len(), 3);
+
+        let compiled = ContextCompiler::default()
+            .compile_ranked_query(&ranking, None)
+            .expect("compile lexical ranking");
+        assert_eq!(
+            compiled
+                .nodes
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z-high", "a-low", "b-low"]
+        );
+        assert_eq!(
+            compiled
+                .receipt
+                .excluded
+                .iter()
+                .map(|entry| (entry.node_id.as_str(), &entry.reason))
+                .collect::<Vec<_>>(),
+            [
+                ("d-disputed", &ContextExclusionReason::DisputedOrExpired),
+                ("e-expired", &ContextExclusionReason::DisputedOrExpired),
+                ("f-future", &ContextExclusionReason::DisputedOrExpired),
+                ("z-irrelevant", &ContextExclusionReason::Irrelevant),
+            ]
+        );
+    }
+
+    #[test]
+    fn ranked_query_rejects_provider_mode_mismatch_before_consuming_candidates() {
+        let provider = RankingProvider::new();
+        let lexical = TaskQuery::new(TaskSignatureV2::new("alpha")).expect("lexical query");
+        let consumed = std::cell::Cell::new(0_usize);
+        let lexical_error = ContextQueryRanking::new(
+            &lexical,
+            std::iter::from_fn(|| {
+                consumed.set(consumed.get() + 1);
+                Some(node("never", "alpha"))
+            }),
+            Utc::now(),
+            ContextResultLimit::new(1).expect("result limit"),
+            Some(&provider),
+        )
+        .expect_err("lexical query rejects provider");
+        assert_eq!(consumed.get(), 0);
+        assert_eq!(
+            lexical_error,
+            ContextQueryRankingError::ProviderModeMismatch {
+                mode: RetrievalMode::LexicalOnly,
+                provider_present: true,
+            }
+        );
+
+        let embedded = TaskQuery::with_provider(TaskSignatureV2::new("alpha"), Some(&provider))
+            .expect("embedded query");
+        let consumed = std::cell::Cell::new(0_usize);
+        let embedded_error = ContextQueryRanking::new(
+            &embedded,
+            std::iter::from_fn(|| {
+                consumed.set(consumed.get() + 1);
+                Some(node("never", "alpha"))
+            }),
+            Utc::now(),
+            ContextResultLimit::new(1).expect("result limit"),
+            None,
+        )
+        .expect_err("embedded query requires provider");
+        assert_eq!(consumed.get(), 0);
+        assert_eq!(
+            embedded_error,
+            ContextQueryRankingError::ProviderModeMismatch {
+                mode: RetrievalMode::Embedded,
+                provider_present: false,
+            }
+        );
+    }
+
+    #[test]
+    fn ranked_query_rejects_provider_failures_and_invalid_document_vectors_without_partial_result()
+    {
+        let cases = [
+            (
+                "provider-failure",
+                RankingProvider {
+                    fail_documents: true,
+                    ..RankingProvider::new()
+                },
+            ),
+            (
+                "descriptor",
+                RankingProvider {
+                    document_descriptor: Some("other-context-ranking".into()),
+                    ..RankingProvider::new()
+                },
+            ),
+            (
+                "dimension",
+                RankingProvider {
+                    document_vector_override: Some(vec![1.0, 0.0, 0.0]),
+                    ..RankingProvider::new()
+                },
+            ),
+            (
+                "nonfinite",
+                RankingProvider {
+                    document_vector_override: Some(vec![f32::NAN, 0.0]),
+                    ..RankingProvider::new()
+                },
+            ),
+            (
+                "zero",
+                RankingProvider {
+                    document_vector_override: Some(vec![0.0, 0.0]),
+                    ..RankingProvider::new()
+                },
+            ),
+        ];
+
+        for (case, provider) in cases {
+            let query = TaskQuery::with_provider(TaskSignatureV2::new("alpha"), Some(&provider))
+                .expect("query embedding remains valid");
+            let error = ContextQueryRanking::new(
+                &query,
+                [node("a-node", "alpha"), node("b-node", "alpha")],
+                Utc::now(),
+                ContextResultLimit::new(2).expect("result limit"),
+                Some(&provider),
+            )
+            .expect_err("invalid document provider output fails the whole ranking");
+            assert!(
+                matches!(
+                    (&case, &error),
+                    (
+                        &"provider-failure",
+                        ContextQueryRankingError::Retrieval(RetrievalError::ProviderFailure { .. })
+                    ) | (
+                        &"descriptor",
+                        ContextQueryRankingError::Retrieval(
+                            RetrievalError::EmbeddingDescriptorMismatch { .. }
+                        )
+                    ) | (
+                        &"dimension",
+                        ContextQueryRankingError::Retrieval(
+                            RetrievalError::EmbeddingDimensionMismatch { .. }
+                        )
+                    ) | (
+                        &"nonfinite",
+                        ContextQueryRankingError::Retrieval(
+                            RetrievalError::NonFiniteEmbeddingValue { .. }
+                        )
+                    ) | (
+                        &"zero",
+                        ContextQueryRankingError::Retrieval(RetrievalError::ZeroEmbeddingVector)
+                    )
+                ),
+                "unexpected {case} error: {error:?}"
+            );
+            assert_eq!(provider.document_ids(), ["a-node"]);
+        }
+    }
+
+    #[test]
+    fn ranked_query_enforces_candidate_node_document_and_result_bounds() {
+        assert!(ContextResultLimit::new(0).is_err());
+        assert!(ContextResultLimit::new(MAX_CONTEXT_RESULT_LIMIT).is_ok());
+        assert!(ContextResultLimit::new(MAX_CONTEXT_RESULT_LIMIT + 1).is_err());
+
+        let query = TaskQuery::new(TaskSignatureV2::new("alpha")).expect("lexical query");
+        let duplicate = ContextQueryRanking::new(
+            &query,
+            [node("duplicate", "alpha"), node("duplicate", "alpha")],
+            Utc::now(),
+            ContextResultLimit::new(1).expect("result limit"),
+            None,
+        )
+        .expect_err("duplicate nodes fail");
+        assert!(matches!(
+            duplicate,
+            ContextQueryRankingError::DuplicateCandidate { ref node_id }
+                if node_id == "duplicate"
+        ));
+
+        let mut nonfinite = node("nonfinite", "alpha");
+        nonfinite.confidence = f32::NAN;
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [nonfinite],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::InvalidCandidate { ref node_id, .. })
+                if node_id == "nonfinite"
+        ));
+
+        let mut missing_provenance = node("missing-provenance", "alpha");
+        missing_provenance.source_event_ids.clear();
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [missing_provenance],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::InvalidCandidate { ref node_id, .. })
+                if node_id == "missing-provenance"
+        ));
+
+        let maximum_node = node(
+            &"i".repeat(MAX_CONTEXT_NODE_ID_BYTES),
+            &"s".repeat(MAX_CONTEXT_NODE_SUMMARY_BYTES),
+        );
+        assert!(
+            ContextQueryRanking::new(
+                &query,
+                [maximum_node],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            )
+            .is_ok()
+        );
+
+        let oversized_id = node(&"i".repeat(MAX_CONTEXT_NODE_ID_BYTES + 1), "alpha");
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [oversized_id],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::CandidateIdTooLong {
+                actual: 257,
+                maximum: 256,
+            })
+        ));
+
+        let attacker_id_bytes = 1024 * 1024;
+        let attacker_id_error = ContextQueryRanking::new(
+            &query,
+            [node(&"x".repeat(attacker_id_bytes), "alpha")],
+            Utc::now(),
+            ContextResultLimit::new(1).expect("result limit"),
+            None,
+        )
+        .expect_err("attacker-sized id fails before retention or cloning");
+        assert_eq!(
+            attacker_id_error,
+            ContextQueryRankingError::CandidateIdTooLong {
+                actual: attacker_id_bytes,
+                maximum: MAX_CONTEXT_NODE_ID_BYTES,
+            }
+        );
+        assert!(
+            attacker_id_error.to_string().len() < MAX_CONTEXT_NODE_ID_BYTES,
+            "bounded error must not copy the attacker-sized id"
+        );
+
+        let oversized_summary = node(
+            "oversized-summary",
+            &"s".repeat(MAX_CONTEXT_NODE_SUMMARY_BYTES + 1),
+        );
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [oversized_summary],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::CandidateSummaryTooLong {
+                actual: 65_001,
+                maximum: 65_000,
+                ..
+            })
+        ));
+
+        let mut reference_and_list_maximum = node("reference-bounds", "alpha");
+        reference_and_list_maximum.source_event_ids = (0..MAX_CONTEXT_SOURCE_EVENT_IDS)
+            .map(|index| format!("source-{index}"))
+            .collect();
+        reference_and_list_maximum.supersedes = (0..MAX_CONTEXT_SUPERSEDES)
+            .map(|index| format!("superseded-{index}"))
+            .collect();
+        assert!(
+            ContextQueryRanking::new(
+                &query,
+                [reference_and_list_maximum.clone()],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            )
+            .is_ok()
+        );
+
+        let mut source_count_over = reference_and_list_maximum.clone();
+        source_count_over
+            .source_event_ids
+            .push("source-over".into());
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [source_count_over],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::InvalidCandidate { ref reason, .. })
+                if reason.contains("source_event_ids contains 65 entries")
+        ));
+
+        let mut supersedes_count_over = reference_and_list_maximum;
+        supersedes_count_over
+            .supersedes
+            .push("superseded-over".into());
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [supersedes_count_over],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::InvalidCandidate { ref reason, .. })
+                if reason.contains("supersedes contains 65 entries")
+        ));
+
+        let mut reference_maximum = node("reference-maximum", "alpha");
+        reference_maximum.source_event_ids = vec![reference_at_bound(0)];
+        reference_maximum.supersedes = vec!["s".repeat(MAX_CONTEXT_REFERENCE_ID_BYTES)];
+        assert!(
+            ContextQueryRanking::new(
+                &query,
+                [reference_maximum.clone()],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            )
+            .is_ok()
+        );
+        let mut reference_over = reference_maximum;
+        reference_over.source_event_ids = vec!["r".repeat(MAX_CONTEXT_REFERENCE_ID_BYTES + 1)];
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [reference_over],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::InvalidCandidate { ref reason, .. })
+                if reason.contains("257 bytes")
+        ));
+
+        let mut supersession_reference_over = node("supersession-reference-over", "alpha");
+        supersession_reference_over.supersedes =
+            vec!["s".repeat(MAX_CONTEXT_REFERENCE_ID_BYTES + 1)];
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [supersession_reference_over],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::InvalidCandidate { ref reason, .. })
+                if reason.contains("supersedes reference at index 0 is 257 bytes")
+        ));
+
+        for (node_id, sources, supersedes, expected_reason) in [
+            (
+                "empty-source",
+                vec![" ".into()],
+                Vec::new(),
+                "no source event provenance",
+            ),
+            (
+                "duplicate-source",
+                vec!["event-a".into(), "event-a".into()],
+                Vec::new(),
+                "source_event_ids contains duplicate reference",
+            ),
+            (
+                "duplicate-supersedes",
+                vec!["event-a".into()],
+                vec!["old".into(), "old".into()],
+                "supersedes contains duplicate reference",
+            ),
+            (
+                "empty-supersedes",
+                vec!["event-a".into()],
+                vec![" ".into()],
+                "supersedes reference at index 0 is empty",
+            ),
+            (
+                "self-supersedes",
+                vec!["event-a".into()],
+                vec!["self-supersedes".into()],
+                "supersedes contains the node's own id",
+            ),
+        ] {
+            let mut invalid = node(node_id, "alpha");
+            invalid.source_event_ids = sources;
+            invalid.supersedes = supersedes;
+            assert!(matches!(
+                ContextQueryRanking::new(
+                    &query,
+                    [invalid],
+                    Utc::now(),
+                    ContextResultLimit::new(1).expect("result limit"),
+                    None,
+                ),
+                Err(ContextQueryRankingError::InvalidCandidate { ref reason, .. })
+                    if reason.contains(expected_reason)
+            ));
+        }
+
+        let serialized_maximum = node_with_serialized_len(MAX_SERIALIZED_CONTEXT_NODE_BYTES);
+        assert!(
+            ContextQueryRanking::new(
+                &query,
+                [serialized_maximum],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            )
+            .is_ok()
+        );
+        let serialized_over = node_with_serialized_len(MAX_SERIALIZED_CONTEXT_NODE_BYTES + 1);
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                [serialized_over],
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::InvalidCandidate { ref reason, .. })
+                if reason.contains("131073 bytes")
+        ));
+
+        let over =
+            (0..=MAX_CANDIDATE_COUNT).map(|index| node(&format!("candidate-{index}"), "alpha"));
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                over,
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::Retrieval(
+                RetrievalError::CandidateCountExceeded {
+                    actual: 10_001,
+                    maximum: 10_000,
+                }
+            ))
+        ));
+
+        let oversized_first =
+            std::iter::once(node(&"x".repeat(MAX_CONTEXT_NODE_ID_BYTES + 1), "alpha")).chain(
+                (0..MAX_CANDIDATE_COUNT)
+                    .map(|index| node(&format!("count-precedence-{index}"), "alpha")),
+            );
+        assert!(matches!(
+            ContextQueryRanking::new(
+                &query,
+                oversized_first,
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            ),
+            Err(ContextQueryRankingError::Retrieval(
+                RetrievalError::CandidateCountExceeded {
+                    actual: 10_001,
+                    maximum: 10_000,
+                }
+            ))
+        ));
+
+        let accepted =
+            (0..MAX_CANDIDATE_COUNT).map(|index| node(&format!("bounded-{index}"), "nothing"));
+        assert!(
+            ContextQueryRanking::new(
+                &query,
+                accepted,
+                Utc::now(),
+                ContextResultLimit::new(1).expect("result limit"),
+                None,
+            )
+            .is_ok()
+        );
+    }
+
+    fn ranked_validation_fixture() -> (
+        ContextCompiler,
+        ContextQueryRanking,
+        super::CompiledContext,
+        ContextCapsule,
+    ) {
+        let evaluated_at = Utc::now();
+        let query = TaskQuery::new(TaskSignatureV2::new("alpha beta")).expect("lexical query");
+        let mut disputed = node("y-disputed", "alpha beta");
+        disputed.epistemic = EpistemicStatus::Disputed;
+        let ranking = ContextQueryRanking::new(
+            &query,
+            [
+                node("b-node", "alpha"),
+                node("z-irrelevant", "gamma"),
+                node("a-node", "alpha beta"),
+                disputed,
+            ],
+            evaluated_at,
+            ContextResultLimit::new(2).expect("result limit"),
+            None,
+        )
+        .expect("context ranking");
+        let compiler = ContextCompiler::default();
+        let compiled = compiler
+            .compile_ranked_query(&ranking, None)
+            .expect("compiled ranked context");
+        let capsule = ContextCapsule::from(&compiled);
+        (compiler, ranking, compiled, capsule)
+    }
+
+    #[test]
+    fn ranked_compiled_validation_rejects_order_score_token_exclusion_reason_and_accounting_tamper()
+    {
+        let (compiler, ranking, compiled, _) = ranked_validation_fixture();
+        compiler
+            .validate_compiled_ranked_query(
+                &ranking,
+                &compiled,
+                &ContextCapsule::from(&compiled),
+                None,
+            )
+            .expect("canonical ranked result validates");
+
+        let mut order = compiled.clone();
+        order.nodes.swap(0, 1);
+        order.receipt.included.swap(0, 1);
+        assert!(matches!(
+            compiler.validate_compiled_ranked_query(
+                &ranking,
+                &order,
+                &ContextCapsule::from(&order),
+                None,
+            ),
+            Err(CompiledContextValidationError::NonCanonicalOrder { .. })
+        ));
+
+        let mut score = compiled.clone();
+        score.receipt.included[0].score += 1.0;
+        assert!(matches!(
+            compiler.validate_compiled_ranked_query(
+                &ranking,
+                &score,
+                &ContextCapsule::from(&score),
+                None,
+            ),
+            Err(CompiledContextValidationError::ScoreMismatch { .. })
+        ));
+
+        let mut token = compiled.clone();
+        token.receipt.included[0].token_cost += 1;
+        assert!(matches!(
+            compiler.validate_compiled_ranked_query(
+                &ranking,
+                &token,
+                &ContextCapsule::from(&token),
+                None,
+            ),
+            Err(CompiledContextValidationError::TokenCostMismatch { .. })
+        ));
+
+        let mut exclusion_order = compiled.clone();
+        exclusion_order.receipt.excluded.swap(0, 1);
+        assert!(matches!(
+            compiler.validate_compiled_ranked_query(
+                &ranking,
+                &exclusion_order,
+                &ContextCapsule::from(&exclusion_order),
+                None,
+            ),
+            Err(CompiledContextValidationError::ExclusionReceiptMismatch { .. })
+        ));
+
+        let mut exclusion_reason = compiled.clone();
+        exclusion_reason.receipt.excluded[0].reason = ContextExclusionReason::TokenBudget;
+        assert!(matches!(
+            compiler.validate_compiled_ranked_query(
+                &ranking,
+                &exclusion_reason,
+                &ContextCapsule::from(&exclusion_reason),
+                None,
+            ),
+            Err(CompiledContextValidationError::ExclusionReceiptMismatch { .. })
+        ));
+
+        let mut elevated_reason = compiled.clone();
+        elevated_reason.receipt.included[0].reason = "user-pinned".into();
+        assert!(matches!(
+            compiler.validate_compiled_ranked_query(
+                &ranking,
+                &elevated_reason,
+                &ContextCapsule::from(&elevated_reason),
+                None,
+            ),
+            Err(CompiledContextValidationError::InvalidReceiptReason { .. })
+        ));
+
+        let mut accounting = compiled;
+        accounting.receipt.total_token_cost += 1;
+        assert!(matches!(
+            compiler.validate_compiled_ranked_query(
+                &ranking,
+                &accounting,
+                &ContextCapsule::from(&accounting),
+                None,
+            ),
+            Err(CompiledContextValidationError::TokenAccountingMismatch { .. })
         ));
     }
 }

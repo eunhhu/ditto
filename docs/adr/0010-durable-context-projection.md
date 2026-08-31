@@ -149,12 +149,36 @@ through_event_id }` checkpoint commit in one transaction inside
 projection-database transaction. Appending the source event to `state.db` and a
 later projection catch-up are deliberately not a cross-database transaction.
 
+#### Canonical admission lookup boundary
+
+The projection is a rebuildable cache, never the authority for live identity or
+supersession. Under the admission gate, live admission captures one event-spine
+high-water and resolves the proposed node ID and its exact-scope supersession
+targets exclusively from bounded, ordered pages of canonical session history
+through that high-water. The scan retains only the proposed ID, at most 64
+supersession targets, and the current page (O(session-history) time and
+O(page + 65 identities) memory). It therefore rejects a duplicate ID across
+the session namespace before append and accepts supersession only for an
+already recorded node in the exact `(session_id, task_id-or-none)` scope. It
+does not retain a full session history or require global full-history shape
+validation on every synchronization. Source existence, scope compatibility,
+origin attestation, and greatest-sequence causation continue to resolve from
+canonical event records, not projection rows.
+
+If synchronization finds an anchor, cache-schema, or other cache-integrity
+mismatch relevant to the captured admission high-water, it performs exactly
+one rebuild and one recheck at that high-water. A repeated mismatch is a
+typed failure. The recheck verifies replay integrity only; it cannot authorize
+an identity or supersession decision, and cache-only rows never create
+authority.
+
 `KernelInner` owns one in-process context-admission mutex shared by every
 `DittoKernel` clone. Admission holds it continuously while it:
 
-1. catches the projection up to a captured event-spine high-water;
-2. validates namespace uniqueness, scope, sources, origin evidence, causation,
-   validity, and supersession;
+1. captures an event-spine high-water and resolves identity and exact-scope
+   supersession from bounded canonical session-history pages;
+2. catches the projection up to that high-water and validates scope, sources,
+   origin evidence, causation, validity, and durable node structure;
 3. appends the canonical `context.node.recorded` event, which is the durable
    acceptance linearization point;
 4. attempts projection synchronization and checkpointing through that exact
@@ -191,15 +215,17 @@ cross-process lock and does not turn the source append plus cache commit into a
 cross-database transaction. Crash recovery still replays the event spine, which
 is authoritative over every projection row and checkpoint.
 
-Context V2 search scope-selects every session-scoped projected row for the
-requested session plus every task-scoped row for the exact requested task, in
-durable sequence order. It
-fetches at most 10,001 rows and increments the scan counter for every selected
-row before disputed-status, validity, supersession, exact-match, or lexical
-filters. Thus inactive and otherwise denied rows count. Row 10,001 returns a
-typed scan-limit error without a partial result; at most 10,000 proceeds to
-filtering and ranking. A requested context-result limit must be in 1 through
-256. These are V2 rules, not retroactive legacy compiler limits.
+Context V2 projection search scope-selects every session-scoped projected row
+for the requested session plus every task-scoped row for the exact requested
+task, in durable sequence order. It fetches at most 10,001 rows and increments
+the scan counter for every selected row before disputed-status, validity,
+supersession, exact-match, or lexical filters. Thus inactive and otherwise
+denied rows count. Row 10,001 returns a typed scan-limit error without a
+partial result; at most 10,000 proceeds to active-candidate filtering. The
+projection returns an immutable candidate snapshot and checkpoint high-water;
+it does not rank candidates or assign retrieval relevance. `ditto-context`
+owns ranking after this gate. A requested context-result limit must be in 1
+through 256. These are V2 rules, not retroactive legacy compiler limits.
 
 ### One shared bounded retrieval contract
 
@@ -358,6 +384,21 @@ prerequisite, allowlist, effect, negative-example, complement, or other runtime
 filters. Embeddings may only narrow or rerank candidates that already have
 positive lexical or exact eligibility; version 1 never introduces a
 semantic-only candidate.
+
+Context ranking is owned by `ditto-context`. It derives an opaque,
+non-serializable `ContextQueryRanking` internally from the validated
+`TaskQuery`, plain projected nodes, `evaluated_at`, the requested limit, and the
+optional provider result. Its fixed order is exact-match descending, optional
+cosine descending, existing V2 relevance `(5 * lexical + authority +
+confidence)` descending, then node ID ascending. Projection performs only
+scope selection, supersession relation handling, and pre-filter scan
+accounting; `ditto-context` applies active/validity policy and delegates
+ranking from that candidate snapshot. `ContextCompiler::compile_ranked_query`
+and compiled-query validation consume that opaque plan in its authenticated
+rank order while applying the token budget; callers cannot supply or
+serialize a substitute order. Receipts retain the lexical relevance score,
+while the opaque plan authenticates embedded ordering. Legacy V1 and direct V2
+context APIs retain their existing signatures and behavior.
 
 ### Optional embeddings and production behavior
 
