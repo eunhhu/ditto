@@ -1,8 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
+use ditto_retrieval::CandidateCount;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use ditto_retrieval::{
+    MAX_REQUEST_BYTES, MAX_RETRIEVAL_DOCUMENT_BYTES, RetrievalDocument, RetrievalError, TaskQuery,
+    TaskSignatureV2,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +26,27 @@ pub enum ContextNodeKind {
     Evidence,
     Risk,
     Capability,
+}
+
+impl ContextNodeKind {
+    /// Return the closed version-1 wire token used by retrieval documents.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Goal => "goal",
+            Self::Constraint => "constraint",
+            Self::Entity => "entity",
+            Self::Resource => "resource",
+            Self::Claim => "claim",
+            Self::Preference => "preference",
+            Self::Decision => "decision",
+            Self::Assumption => "assumption",
+            Self::OpenQuestion => "open_question",
+            Self::Action => "action",
+            Self::Evidence => "evidence",
+            Self::Risk => "risk",
+            Self::Capability => "capability",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -125,6 +152,25 @@ impl ContextNode {
             && self.valid_until.as_ref().is_none_or(|end| end > &now)
             && self.epistemic != EpistemicStatus::Disputed
     }
+
+    /// Build the canonical bounded V2 retrieval document for this node.
+    pub fn retrieval_document(&self) -> Result<RetrievalDocument, RetrievalError> {
+        context_retrieval_document(self)
+    }
+}
+
+/// Build the canonical bounded V2 context document.
+///
+/// Fields are copied verbatim and are intentionally not escaped.  The fixed
+/// shape is part of the V2 retrieval contract and has no trailing newline:
+/// `id=<raw id>\nkind=<snake_case kind>\nsummary=<raw summary>`.
+pub fn context_retrieval_document(node: &ContextNode) -> Result<RetrievalDocument, RetrievalError> {
+    RetrievalDocument::new(format!(
+        "id={}\nkind={}\nsummary={}",
+        node.id,
+        node.kind.as_str(),
+        node.summary
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -247,6 +293,39 @@ impl TaskSignature {
             parts.push(expected_effect.clone());
         }
         parts.join(" ")
+    }
+
+    /// Explicitly migrate a legacy V1 signature into the bounded V2 shape.
+    ///
+    /// The legacy compiler never calls this method implicitly.  Constructing a
+    /// `TaskQuery` first makes the returned signature the normalized V2 value
+    /// and applies every V2 field, canonical-query, and lexical-token bound.
+    pub fn try_to_v2(&self) -> Result<TaskSignatureV2, RetrievalError> {
+        let signature = TaskSignatureV2 {
+            request: self.request.clone(),
+            active_goal: self.active_goal.clone(),
+            entities: self.entities.clone(),
+            resources: Vec::new(),
+            constraints: self.constraints.clone(),
+            expected_effect: self.expected_effect.clone(),
+        };
+        Ok(TaskQuery::new(signature)?.signature().clone())
+    }
+}
+
+impl TryFrom<&TaskSignature> for TaskSignatureV2 {
+    type Error = RetrievalError;
+
+    fn try_from(value: &TaskSignature) -> Result<Self, Self::Error> {
+        value.try_to_v2()
+    }
+}
+
+impl TryFrom<TaskSignature> for TaskSignatureV2 {
+    type Error = RetrievalError;
+
+    fn try_from(value: TaskSignature) -> Result<Self, Self::Error> {
+        value.try_to_v2()
     }
 }
 
@@ -547,6 +626,8 @@ pub enum ContextCompileError {
         "required context costs {used} tokens, exceeding the absolute ceiling {absolute_budget}"
     )]
     RequiredContextBudgetExceeded { used: u32, absolute_budget: u32 },
+    #[error("shared retrieval query or document is invalid: {0}")]
+    Retrieval(#[from] RetrievalError),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -885,6 +966,343 @@ impl ContextCompiler {
 
         Ok(())
     }
+
+    /// Compile a V2 query against context candidates.
+    ///
+    /// The query is built by the shared retrieval crate before it reaches this
+    /// method.  Candidate counting therefore happens before any candidate is
+    /// validated, documented, scored, or selected, and a V2 scan-limit error
+    /// can never be accompanied by a partial compiled result.
+    pub fn compile_query(
+        &self,
+        query: &TaskQuery,
+        candidates: impl IntoIterator<Item = ContextCandidate>,
+        token_budget: Option<u32>,
+        now: DateTime<Utc>,
+    ) -> Result<CompiledContext, ContextCompileError> {
+        let mut bounded_candidates = Vec::new();
+        for candidate in candidates {
+            bounded_candidates.push(candidate);
+            if let Err(error) = CandidateCount::new(bounded_candidates.len()) {
+                return Err(error.into());
+            }
+        }
+        let candidates = bounded_candidates;
+
+        let token_budget = token_budget.unwrap_or(self.default_budget);
+        let selection_budget = token_budget.min(self.absolute_budget);
+        let mut candidate_ids = HashSet::with_capacity(candidates.len());
+        for candidate in &candidates {
+            if !candidate_ids.insert(candidate.node.id.clone()) {
+                return Err(ContextCompileError::DuplicateCandidate {
+                    node_id: candidate.node.id.clone(),
+                });
+            }
+            if candidate.directive.validate().is_err() {
+                return Err(ContextCompileError::InvalidPolicyReason {
+                    node_id: candidate.node.id.clone(),
+                });
+            }
+        }
+
+        let mut required = Vec::new();
+        let mut ranked = Vec::new();
+        let mut excluded = Vec::new();
+
+        for candidate in candidates {
+            let node_id = candidate.node.id.clone();
+            if let Err(error) = candidate.node.validate() {
+                if candidate.directive.is_required() {
+                    return Err(ContextCompileError::InvalidRequiredContext {
+                        node_id,
+                        reason: error.to_string(),
+                    });
+                }
+                excluded.push(ContextExclusion {
+                    node_id,
+                    reason: ContextExclusionReason::Invalid,
+                    detail: Some(error.to_string()),
+                });
+                continue;
+            }
+            if !candidate.node.is_valid_at(now) {
+                if candidate.directive.is_required() {
+                    return Err(ContextCompileError::InvalidRequiredContext {
+                        node_id,
+                        reason: invalid_at_reason(&candidate.node, now).into(),
+                    });
+                }
+                excluded.push(ContextExclusion {
+                    node_id,
+                    reason: ContextExclusionReason::DisputedOrExpired,
+                    detail: None,
+                });
+                continue;
+            }
+
+            let node = candidate.node;
+            let capsule_item = ContextCapsuleItem::from(&node);
+            let token_cost = capsule_item.token_cost();
+            let (score, exact) = v2_relevance(&node, query)?;
+            if candidate.directive.is_required() {
+                required.push(V2PreparedCandidate {
+                    directive: candidate.directive,
+                    exact,
+                    score,
+                    token_cost,
+                    node,
+                });
+            } else if exact || score > 0.0 {
+                ranked.push(V2PreparedCandidate {
+                    directive: candidate.directive,
+                    exact,
+                    score,
+                    token_cost,
+                    node,
+                });
+            } else {
+                excluded.push(ContextExclusion {
+                    node_id,
+                    reason: ContextExclusionReason::Irrelevant,
+                    detail: None,
+                });
+            }
+        }
+
+        required.sort_by(v2_candidate_order);
+        ranked.sort_by(v2_candidate_order);
+
+        let required_cost = required.iter().fold(0_u32, |total, candidate| {
+            total.saturating_add(candidate.token_cost)
+        });
+        if required_cost > self.absolute_budget {
+            return Err(ContextCompileError::RequiredContextBudgetExceeded {
+                used: required_cost,
+                absolute_budget: self.absolute_budget,
+            });
+        }
+
+        let mut selected = Vec::new();
+        let mut included = Vec::new();
+        let mut used = 0_u32;
+
+        for candidate in required {
+            used = used.saturating_add(candidate.token_cost);
+            included.push(receipt_entry(
+                &candidate.node,
+                &candidate.directive,
+                candidate.score,
+                candidate.token_cost,
+            ));
+            selected.push(candidate.node);
+        }
+
+        for candidate in ranked {
+            if used.saturating_add(candidate.token_cost) > selection_budget {
+                excluded.push(ContextExclusion {
+                    node_id: candidate.node.id,
+                    reason: ContextExclusionReason::TokenBudget,
+                    detail: None,
+                });
+                continue;
+            }
+            used += candidate.token_cost;
+            included.push(receipt_entry(
+                &candidate.node,
+                &candidate.directive,
+                candidate.score,
+                candidate.token_cost,
+            ));
+            selected.push(candidate.node);
+        }
+
+        Ok(CompiledContext {
+            nodes: selected,
+            receipt: ContextReceipt {
+                included,
+                excluded,
+                total_token_cost: used,
+                token_budget,
+                absolute_budget: self.absolute_budget,
+                over_soft_budget: used > token_budget,
+            },
+        })
+    }
+
+    /// Validate a compiled context made from one prebuilt V2 query.
+    ///
+    /// This is the V2 counterpart to [`Self::validate_compiled`].  It keeps the
+    /// legacy validation path separate while re-deriving the fixed retrieval
+    /// document, normalized exactness, lexical score, receipt order, and token
+    /// accounting from the shared query.
+    pub fn validate_compiled_query(
+        &self,
+        query: &TaskQuery,
+        compiled: &CompiledContext,
+        capsule: &ContextCapsule,
+        token_budget: Option<u32>,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<(), CompiledContextValidationError> {
+        capsule
+            .validate_at_with_budget(accepted_at, self.absolute_budget)
+            .map_err(CompiledContextValidationError::InvalidCapsule)?;
+
+        if ContextCapsule::from(compiled) != *capsule {
+            return Err(CompiledContextValidationError::CapsuleMismatch);
+        }
+        if compiled.nodes.len() != compiled.receipt.included.len()
+            || compiled.nodes.len() != capsule.nodes.len()
+        {
+            return Err(CompiledContextValidationError::NodeReceiptLengthMismatch {
+                nodes: compiled.nodes.len(),
+                included: compiled.receipt.included.len(),
+                capsule: capsule.nodes.len(),
+            });
+        }
+
+        let expected_token_budget = token_budget.unwrap_or(self.default_budget);
+        if compiled.receipt.token_budget != expected_token_budget
+            || compiled.receipt.absolute_budget != self.absolute_budget
+        {
+            return Err(CompiledContextValidationError::BudgetMismatch {
+                expected_token_budget,
+                actual_token_budget: compiled.receipt.token_budget,
+                expected_absolute_budget: self.absolute_budget,
+                actual_absolute_budget: compiled.receipt.absolute_budget,
+            });
+        }
+
+        let selection_budget = expected_token_budget.min(self.absolute_budget);
+        let mut total_token_cost = 0_u32;
+        let mut required_token_cost = 0_u32;
+        let mut selection_token_cost = 0_u32;
+        let mut seen_ids = HashSet::with_capacity(
+            compiled
+                .receipt
+                .included
+                .len()
+                .saturating_add(compiled.receipt.excluded.len()),
+        );
+
+        for entry in &compiled.receipt.excluded {
+            if !seen_ids.insert(entry.node_id.clone()) {
+                return Err(CompiledContextValidationError::DuplicateReceiptId {
+                    node_id: entry.node_id.clone(),
+                });
+            }
+        }
+
+        let mut previous_key: Option<(u8, bool, f32, String)> = None;
+        for ((node, receipt), capsule_item) in compiled
+            .nodes
+            .iter()
+            .zip(&compiled.receipt.included)
+            .zip(&capsule.nodes)
+        {
+            if !seen_ids.insert(receipt.node_id.clone()) {
+                return Err(CompiledContextValidationError::DuplicateReceiptId {
+                    node_id: receipt.node_id.clone(),
+                });
+            }
+
+            node.validate()
+                .map_err(|error| CompiledContextValidationError::InvalidNode {
+                    node_id: node.id.clone(),
+                    reason: error.to_string(),
+                })?;
+            if !node.is_valid_at(accepted_at) {
+                return Err(CompiledContextValidationError::NodeNotValidAt {
+                    node_id: node.id.clone(),
+                });
+            }
+
+            let (expected_score, exact) = v2_relevance(node, query)?;
+            let expected_token_cost = capsule_item.token_cost();
+            let priority = receipt_reason_priority(&receipt.reason).ok_or_else(|| {
+                CompiledContextValidationError::InvalidReceiptReason {
+                    node_id: node.id.clone(),
+                    reason: receipt.reason.clone(),
+                }
+            })?;
+
+            if receipt.node_id != node.id
+                || receipt.source_event_ids != node.source_event_ids
+                || receipt.epistemic != node.epistemic
+            {
+                return Err(CompiledContextValidationError::ReceiptNodeMismatch {
+                    node_id: node.id.clone(),
+                });
+            }
+            if receipt.token_cost != expected_token_cost {
+                return Err(CompiledContextValidationError::TokenCostMismatch {
+                    node_id: node.id.clone(),
+                    expected: expected_token_cost,
+                    actual: receipt.token_cost,
+                });
+            }
+            if receipt.score.to_bits() != expected_score.to_bits() {
+                return Err(CompiledContextValidationError::ScoreMismatch {
+                    node_id: node.id.clone(),
+                });
+            }
+            if receipt.reason == "task-relevance" && receipt.score <= 0.0 {
+                return Err(CompiledContextValidationError::NonPositiveTaskRelevance {
+                    node_id: node.id.clone(),
+                });
+            }
+
+            if let Some((previous_priority, previous_exact, previous_score, previous_id)) =
+                &previous_key
+                && (priority > *previous_priority
+                    || (priority == *previous_priority
+                        && (exact && !*previous_exact
+                            || (exact == *previous_exact
+                                && (receipt.score.total_cmp(previous_score).is_gt()
+                                    || (receipt.score.to_bits() == previous_score.to_bits()
+                                        && receipt.node_id.as_str() < previous_id))))))
+            {
+                return Err(CompiledContextValidationError::NonCanonicalOrder {
+                    node_id: node.id.clone(),
+                });
+            }
+
+            if priority > 0 {
+                required_token_cost = required_token_cost.saturating_add(receipt.token_cost);
+                if required_token_cost > self.absolute_budget {
+                    return Err(
+                        CompiledContextValidationError::RequiredSelectionBudgetExceeded {
+                            used: required_token_cost,
+                            absolute_budget: self.absolute_budget,
+                        },
+                    );
+                }
+            } else if required_token_cost > selection_budget
+                || selection_token_cost.saturating_add(receipt.token_cost) > selection_budget
+            {
+                return Err(CompiledContextValidationError::SelectionBudgetExceeded {
+                    node_id: node.id.clone(),
+                    used: selection_token_cost.saturating_add(receipt.token_cost),
+                    token_budget: selection_budget,
+                });
+            }
+            selection_token_cost = selection_token_cost.saturating_add(receipt.token_cost);
+            previous_key = Some((priority, exact, receipt.score, receipt.node_id.clone()));
+            total_token_cost = total_token_cost.saturating_add(receipt.token_cost);
+        }
+
+        if compiled.receipt.total_token_cost != total_token_cost
+            || capsule.token_cost() != total_token_cost
+            || total_token_cost > self.absolute_budget
+            || compiled.receipt.over_soft_budget != (total_token_cost > expected_token_budget)
+        {
+            return Err(CompiledContextValidationError::TokenAccountingMismatch {
+                expected: total_token_cost,
+                actual: compiled.receipt.total_token_cost,
+            });
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -950,10 +1368,20 @@ pub enum CompiledContextValidationError {
         "compiled context token accounting is inconsistent (actual={actual}, expected={expected})"
     )]
     TokenAccountingMismatch { expected: u32, actual: u32 },
+    #[error("shared retrieval query or document is invalid: {0}")]
+    Retrieval(#[from] RetrievalError),
 }
 
 struct PreparedCandidate {
     directive: ContextDirective,
+    score: f32,
+    token_cost: u32,
+    node: ContextNode,
+}
+
+struct V2PreparedCandidate {
+    directive: ContextDirective,
+    exact: bool,
     score: f32,
     token_cost: u32,
     node: ContextNode,
@@ -964,6 +1392,19 @@ fn candidate_order(left: &PreparedCandidate, right: &PreparedCandidate) -> std::
         .directive
         .priority()
         .cmp(&left.directive.priority())
+        .then_with(|| right.score.total_cmp(&left.score))
+        .then_with(|| left.node.id.cmp(&right.node.id))
+}
+
+fn v2_candidate_order(
+    left: &V2PreparedCandidate,
+    right: &V2PreparedCandidate,
+) -> std::cmp::Ordering {
+    right
+        .directive
+        .priority()
+        .cmp(&left.directive.priority())
+        .then_with(|| right.exact.cmp(&left.exact))
         .then_with(|| right.score.total_cmp(&left.score))
         .then_with(|| left.node.id.cmp(&right.node.id))
 }
@@ -1021,6 +1462,26 @@ fn relevance_score(node: &ContextNode, query_tokens: &HashSet<String>) -> f32 {
     overlap * 5.0 + authority + node.confidence
 }
 
+fn v2_relevance(node: &ContextNode, query: &TaskQuery) -> Result<(f32, bool), RetrievalError> {
+    let document = context_retrieval_document(node)?;
+    let lexical_overlap = query.lexical_overlap(&document);
+    let exact = query.matches_exact_term(&node.id)?;
+
+    if !exact && lexical_overlap == 0.0 {
+        return Ok((0.0, false));
+    }
+
+    let authority = match (node.origin, node.epistemic) {
+        (ContextOrigin::User, EpistemicStatus::Verified | EpistemicStatus::Asserted) => 1.0,
+        (_, EpistemicStatus::Verified) => 0.8,
+        (_, EpistemicStatus::Asserted) => 0.5,
+        (_, EpistemicStatus::Inferred) => 0.2,
+        (_, EpistemicStatus::Disputed) => -10.0,
+    };
+
+    Ok((lexical_overlap * 5.0 + authority + node.confidence, exact))
+}
+
 fn invalid_at_reason(node: &ContextNode, now: DateTime<Utc>) -> &'static str {
     if node.epistemic == EpistemicStatus::Disputed {
         "epistemic status is disputed"
@@ -1069,7 +1530,9 @@ mod tests {
         ContextCapsule, ContextCapsuleItem, ContextCapsuleValidationError, ContextCompileError,
         ContextCompiler, ContextEdge, ContextEdgeKind, ContextExclusion, ContextExclusionReason,
         ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope,
-        ContextValidationError, DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus, TaskSignature,
+        ContextValidationError, DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus,
+        MAX_REQUEST_BYTES, MAX_RETRIEVAL_DOCUMENT_BYTES, RetrievalError, TaskQuery, TaskSignature,
+        TaskSignatureV2, context_retrieval_document,
     };
 
     fn node(id: &str, summary: &str) -> ContextNode {
@@ -1881,6 +2344,437 @@ mod tests {
             Err(CompiledContextValidationError::InvalidCapsule(
                 ContextCapsuleValidationError::NotValidAt { ref item_id }
             )) if item_id == "pinned"
+        ));
+    }
+
+    #[test]
+    fn legacy_task_signature_full_literal_stays_source_compatible_and_opt_in_v2_conversion_is_fallible()
+     {
+        let legacy = TaskSignature {
+            request: "inspect the workspace".into(),
+            active_goal: Some("prepare a local report".into()),
+            entities: vec!["workspace".into()],
+            constraints: vec!["no network".into()],
+            expected_effect: Some("read-only".into()),
+        };
+        let migrated = legacy
+            .try_to_v2()
+            .expect("an in-bound legacy signature migrates explicitly");
+        assert_eq!(migrated.resources, Vec::<String>::new());
+        assert_eq!(migrated.request, "inspect the workspace");
+        assert_eq!(migrated.entities, vec!["workspace"]);
+
+        let over_v2_request = TaskSignature {
+            request: "request ".repeat(MAX_REQUEST_BYTES / 8 + 1),
+            ..TaskSignature::default()
+        };
+        assert!(matches!(
+            over_v2_request.try_to_v2(),
+            Err(RetrievalError::ComponentTooLong {
+                field: "request",
+                actual,
+                maximum: MAX_REQUEST_BYTES,
+            }) if actual > MAX_REQUEST_BYTES
+        ));
+    }
+
+    #[test]
+    fn legacy_context_compiler_retains_historical_normalization_bounds_and_does_not_delegate_to_v2()
+    {
+        let compiler = ContextCompiler::default();
+        let now = Utc::now();
+        let one_character = TaskSignature {
+            request: "x".into(),
+            ..TaskSignature::default()
+        };
+        let legacy_one_character = compiler
+            .compile(
+                &one_character,
+                [ContextCandidate::ranked(node("one-character", "x"))],
+                None,
+                now,
+            )
+            .expect("legacy one-character compilation remains valid");
+        assert!(legacy_one_character.nodes.is_empty());
+
+        let v2_one_character = TaskQuery::new(TaskSignatureV2::new("x"))
+            .expect("V2 retains one-character lexical tokens");
+        let v2_compiled = compiler
+            .compile_query(
+                &v2_one_character,
+                [ContextCandidate::ranked(node("one-character", "x"))],
+                None,
+                now,
+            )
+            .expect("V2 one-character compilation succeeds");
+        assert_eq!(v2_compiled.nodes.len(), 1);
+
+        let over_v2_request = "request ".repeat(MAX_REQUEST_BYTES / 8 + 1);
+        let legacy_over_bound = TaskSignature {
+            request: over_v2_request,
+            ..TaskSignature::default()
+        };
+        let legacy_over_bound_compiled = compiler
+            .compile(
+                &legacy_over_bound,
+                [ContextCandidate::ranked(node(
+                    "legacy-over-bound",
+                    "request",
+                ))],
+                None,
+                now,
+            )
+            .expect("legacy compiler keeps its historical request bound");
+        assert_eq!(legacy_over_bound_compiled.nodes.len(), 1);
+        assert!(legacy_over_bound.try_to_v2().is_err());
+
+        let legacy_many = compiler
+            .compile(
+                &TaskSignature {
+                    request: "legacy candidate".into(),
+                    ..TaskSignature::default()
+                },
+                (0..=10_000).map(|index| {
+                    ContextCandidate::ranked(node(
+                        &format!("legacy-candidate-{index}"),
+                        "legacy candidate",
+                    ))
+                }),
+                None,
+                now,
+            )
+            .expect("legacy compiler retains its unbounded historical scan");
+        assert!(!legacy_many.nodes.is_empty());
+    }
+
+    #[test]
+    fn v2_context_document_is_exact_bounded_and_only_node_id_is_exact() {
+        let mut raw = node("Id=Raw", "summary\nraw");
+        raw.kind = ContextNodeKind::OpenQuestion;
+        let document = context_retrieval_document(&raw).expect("raw fields form a document");
+        assert_eq!(
+            document.as_str(),
+            "id=Id=Raw\nkind=open_question\nsummary=summary\nraw"
+        );
+        assert!(!document.as_str().ends_with('\n'));
+
+        let max_id = "i".repeat(256);
+        let max_summary = "s".repeat(65_000);
+        let mut max_node = node(&max_id, &max_summary);
+        max_node.kind = ContextNodeKind::OpenQuestion;
+        let max_document = context_retrieval_document(&max_node).expect("maximum document fits");
+        assert_eq!(max_document.len(), 65_287);
+        assert!(max_document.len() <= MAX_RETRIEVAL_DOCUMENT_BYTES);
+
+        let query = TaskQuery::new(TaskSignatureV2 {
+            request: "zz".into(),
+            entities: vec![" WORKSPACE ".into()],
+            ..TaskSignatureV2::default()
+        })
+        .expect("query is valid");
+        let exact = node(" Workspace ", "unrelated text");
+        let summary_only = node("other", "workspace");
+        let compiled = ContextCompiler::default()
+            .compile_query(
+                &query,
+                [
+                    ContextCandidate::ranked(summary_only),
+                    ContextCandidate::ranked(exact),
+                ],
+                None,
+                Utc::now(),
+            )
+            .expect("exact and lexical candidates compile");
+        assert_eq!(compiled.nodes[0].id, " Workspace ");
+        assert_eq!(compiled.nodes[1].id, "other");
+
+        let kind_query = TaskQuery::new(TaskSignatureV2::new("constraint"))
+            .expect("kind lexical query is valid");
+        let kind_compiled = ContextCompiler::default()
+            .compile_query(
+                &kind_query,
+                [ContextCandidate::ranked(node("kind-only", "unrelated"))],
+                None,
+                Utc::now(),
+            )
+            .expect("kind participates in positive lexical scoring");
+        assert_eq!(kind_compiled.nodes[0].id, "kind-only");
+
+        let summary_query =
+            TaskQuery::new(TaskSignatureV2::new("needle")).expect("summary lexical query is valid");
+        let summary_compiled = ContextCompiler::default()
+            .compile_query(
+                &summary_query,
+                [ContextCandidate::ranked(node("summary-only", "needle"))],
+                None,
+                Utc::now(),
+            )
+            .expect("summary participates in positive lexical scoring");
+        assert_eq!(summary_compiled.nodes[0].id, "summary-only");
+    }
+
+    #[test]
+    fn v2_context_document_accepts_65536_and_rejects_65537_bytes() {
+        let mut node_at_bound = node("i", "placeholder");
+        node_at_bound.kind = ContextNodeKind::OpenQuestion;
+        let prefix = format!(
+            "id={}\nkind={}\nsummary=",
+            node_at_bound.id,
+            node_at_bound.kind.as_str()
+        );
+        let summary_at_bound = MAX_RETRIEVAL_DOCUMENT_BYTES - prefix.len();
+        node_at_bound.summary = "s".repeat(summary_at_bound);
+        let document = context_retrieval_document(&node_at_bound).expect("document at bound");
+        assert_eq!(document.len(), MAX_RETRIEVAL_DOCUMENT_BYTES);
+
+        let mut node_over_bound = node_at_bound;
+        node_over_bound.summary.push('s');
+        assert_eq!(
+            context_retrieval_document(&node_over_bound),
+            Err(RetrievalError::RetrievalDocumentTooLong {
+                actual: MAX_RETRIEVAL_DOCUMENT_BYTES + 1,
+                maximum: MAX_RETRIEVAL_DOCUMENT_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn v2_raw_document_fields_are_unescaped_but_exact_candidate_controls_are_rejected() {
+        let mut whitespace = node(" Bad\nID ", "line\nsummary");
+        whitespace.kind = ContextNodeKind::Resource;
+        let document = context_retrieval_document(&whitespace).expect("raw whitespace fields");
+        assert_eq!(
+            document.as_str(),
+            "id= Bad\nID \nkind=resource\nsummary=line\nsummary"
+        );
+        let query = TaskQuery::new(TaskSignatureV2 {
+            request: "inspect".into(),
+            resources: vec!["bad id".into()],
+            ..TaskSignatureV2::default()
+        })
+        .expect("valid exact query");
+        assert!(
+            query
+                .matches_exact_term(&whitespace.id)
+                .expect("whitespace controls normalize")
+        );
+
+        let non_whitespace = node("bad\0id", "summary");
+        let document = context_retrieval_document(&non_whitespace).expect("raw control field");
+        assert_eq!(
+            document.as_str(),
+            "id=bad\0id\nkind=constraint\nsummary=summary"
+        );
+        assert_eq!(
+            query
+                .matches_exact_term(&non_whitespace.id)
+                .expect_err("non-whitespace control must fail closed"),
+            RetrievalError::ControlCharacter {
+                field: "exact_term"
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_resources_match_normalized_context_node_ids() {
+        let query = TaskQuery::new(TaskSignatureV2 {
+            request: "inspect".into(),
+            resources: vec![" Device:Kitchen ".into()],
+            ..TaskSignatureV2::default()
+        })
+        .expect("resource query is valid");
+        assert_eq!(query.signature().resources, vec!["device:kitchen"]);
+
+        let exact = node("Device:Kitchen", "unrelated");
+        let summary_only = node("other", "device:kitchen");
+        let compiled = ContextCompiler::default()
+            .compile_query(
+                &query,
+                [
+                    ContextCandidate::ranked(summary_only),
+                    ContextCandidate::ranked(exact),
+                ],
+                None,
+                Utc::now(),
+            )
+            .expect("resource exact and lexical candidates compile");
+        assert_eq!(compiled.nodes[0].id, "Device:Kitchen");
+        assert_eq!(compiled.nodes[1].id, "other");
+    }
+
+    #[test]
+    fn v2_context_candidates_accept_10000_and_reject_10001_before_scoring() {
+        let query =
+            TaskQuery::new(TaskSignatureV2::new("candidate")).expect("candidate query is valid");
+        let compiler = ContextCompiler::default();
+        let accepted = compiler.compile_query(
+            &query,
+            (0..10_000).map(|index| {
+                ContextCandidate::ranked(node(&format!("candidate-{index}"), "candidate"))
+            }),
+            None,
+            Utc::now(),
+        );
+        assert!(accepted.is_ok());
+
+        let mut over = (0..10_000)
+            .map(|index| ContextCandidate::ranked(node(&format!("candidate-{index}"), "candidate")))
+            .collect::<Vec<_>>();
+        over.push(ContextCandidate::ranked(node(
+            "candidate-over-limit",
+            &"x".repeat(MAX_RETRIEVAL_DOCUMENT_BYTES + 1),
+        )));
+        assert!(matches!(
+            compiler.compile_query(&query, over, None, Utc::now()),
+            Err(ContextCompileError::Retrieval(
+                RetrievalError::CandidateCountExceeded {
+                    actual: 10_001,
+                    maximum: 10_000,
+                }
+            ))
+        ));
+
+        let consumed = std::cell::Cell::new(0_usize);
+        assert!(matches!(
+            compiler.compile_query(
+                &query,
+                std::iter::from_fn(|| {
+                    let index = consumed.get();
+                    consumed.set(index + 1);
+                    Some(ContextCandidate::ranked(node(
+                        &format!("streamed-candidate-{index}"),
+                        "candidate",
+                    )))
+                }),
+                None,
+                Utc::now(),
+            ),
+            Err(ContextCompileError::Retrieval(
+                RetrievalError::CandidateCountExceeded {
+                    actual: 10_001,
+                    maximum: 10_000,
+                }
+            ))
+        ));
+        assert_eq!(consumed.get(), 10_001);
+    }
+
+    #[test]
+    fn v2_equal_score_ranked_nodes_use_ascending_id_tie_order() {
+        let query = TaskQuery::new(TaskSignatureV2::new("target")).expect("target query is valid");
+        let compiler = ContextCompiler::default();
+        let compiled = compiler
+            .compile_query(
+                &query,
+                [
+                    ContextCandidate::ranked(node("z-node", "target")),
+                    ContextCandidate::ranked(node("a-node", "target")),
+                ],
+                None,
+                Utc::now(),
+            )
+            .expect("equal-score candidates compile");
+        assert_eq!(
+            compiled
+                .nodes
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-node", "z-node"]
+        );
+    }
+
+    #[test]
+    fn invalid_shared_query_fails_before_candidate_selection() {
+        assert_eq!(
+            TaskQuery::new(TaskSignatureV2::default()),
+            Err(RetrievalError::EmptyRequest)
+        );
+        let mut oversized = TaskSignatureV2::new("valid");
+        oversized.request = "x".repeat(MAX_REQUEST_BYTES + 1);
+        assert!(matches!(
+            TaskQuery::new(oversized),
+            Err(RetrievalError::ComponentTooLong {
+                field: "request",
+                actual,
+                maximum: MAX_REQUEST_BYTES,
+            }) if actual == MAX_REQUEST_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn v2_compiled_context_validation_rederives_document_score_and_exact_order() {
+        let compiler = ContextCompiler::default();
+        let query = TaskQuery::new(TaskSignatureV2 {
+            request: "inspect".into(),
+            entities: vec!["target".into()],
+            ..TaskSignatureV2::default()
+        })
+        .expect("query is valid");
+        let accepted_at = Utc::now();
+        let compiled = compiler
+            .compile_query(
+                &query,
+                [
+                    ContextCandidate::ranked(node("lexical", "target")),
+                    ContextCandidate::ranked(node("target", "unrelated")),
+                ],
+                None,
+                accepted_at,
+            )
+            .expect("V2 context compiles");
+        let capsule = ContextCapsule::from(&compiled);
+        compiler
+            .validate_compiled_query(&query, &compiled, &capsule, None, accepted_at)
+            .expect("V2 compiler output validates");
+    }
+
+    #[test]
+    fn v2_compiled_context_validation_rejects_tampered_score_and_order() {
+        let compiler = ContextCompiler::default();
+        let query = TaskQuery::new(TaskSignatureV2::new("target")).expect("target query is valid");
+        let accepted_at = Utc::now();
+        let compiled = compiler
+            .compile_query(
+                &query,
+                [
+                    ContextCandidate::ranked(node("a-node", "target")),
+                    ContextCandidate::ranked(node("b-node", "target")),
+                ],
+                None,
+                accepted_at,
+            )
+            .expect("V2 context compiles");
+
+        let mut tampered_score = compiled.clone();
+        tampered_score.receipt.included[0].score += 1.0;
+        let score_capsule = ContextCapsule::from(&tampered_score);
+        assert!(matches!(
+            compiler.validate_compiled_query(
+                &query,
+                &tampered_score,
+                &score_capsule,
+                None,
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::ScoreMismatch { ref node_id })
+                if node_id == "a-node"
+        ));
+
+        let mut tampered_order = compiled;
+        tampered_order.nodes.swap(0, 1);
+        tampered_order.receipt.included.swap(0, 1);
+        let order_capsule = ContextCapsule::from(&tampered_order);
+        assert!(matches!(
+            compiler.validate_compiled_query(
+                &query,
+                &tampered_order,
+                &order_capsule,
+                None,
+                accepted_at,
+            ),
+            Err(CompiledContextValidationError::NonCanonicalOrder { ref node_id })
+                if node_id == "a-node"
         ));
     }
 }
