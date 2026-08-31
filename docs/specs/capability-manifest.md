@@ -79,6 +79,22 @@ Descriptions, intents, aliases, negative examples, prerequisites, complements,
 health, and observed latency may influence ranking. Embedding similarity only
 narrows candidates; it never bypasses hard filters or policy.
 
+The shared-query V2 path is separately bounded and typed; the historical
+raw-string search remains unchanged. V2 counts installed manifests before
+filters, rejects catalogue candidate 10,001, accepts 1 through 256 ranked roots,
+and accepts 1 through 512 expanded cards. It consumes only retrieval-owned
+normalization and tokenization. Entity/resource exact terms may select a whole
+capability ID or alias; all other query fields are lexical-only. Negative
+examples are whole normalized phrase denials for both roots and complements.
+
+V2 ranks eligible roots by exactness, optional embedding similarity, lexical
+overlap, preferred placement, and finally capability ID. It then emits each
+root followed by its direct, runtime-eligible, non-denied complements in
+manifest order, deduplicating IDs and respecting the expanded capacity.
+Provider-backed retrieval embeds roots only; complements are never embedded.
+The exact manifest-document grammar and provider/error ordering are frozen in
+ADR 0010.
+
 ## Runtime contract
 
 Runtime types are `builtin`, `process`, `wasi`, `mcp`, and `remote`. Non-builtin
