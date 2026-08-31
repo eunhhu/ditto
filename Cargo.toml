@@ -13,6 +13,7 @@ members = [
   "crates/model-openai",
   "crates/policy",
   "crates/protocol",
+  "crates/retrieval",
 ]
 default-members = ["apps/cli", "apps/daemon"]
 
