@@ -1,0 +1,22 @@
+[package]
+name = "ditto-context-projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ditto-context = { path = "../context" }
+ditto-event-store = { path = "../event-store" }
+ditto-protocol = { path = "../protocol" }
+ditto-retrieval = { path = "../retrieval" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+tempfile.workspace = true
