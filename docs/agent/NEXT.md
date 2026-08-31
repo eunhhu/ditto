@@ -3,13 +3,15 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
-## Next — 004 Durable context projection and shared retrieval query
+## Active — 004 Durable context projection and shared retrieval query
 
-Define and accept the Task 004 contract and ADR before changing source. The next
-slice is limited to task/session-scoped system-owned context events, a deletable
-and rebuildable projection, and one bounded lexical query contract shared by
-context and capability retrieval. An optional injected embedding seam may be
-tested, but production remains honestly lexical-only and gains no public context
+Contract: [tasks/004-durable-context-projection.md](tasks/004-durable-context-projection.md)
+
+Implement the accepted Task 004 contract in dependency order. The active slice
+is limited to task/session-scoped system-authored context events, a deletable and
+rebuildable projection, and one bounded lexical query contract shared by context
+and capability retrieval. An optional injected embedding seam may be tested,
+but production remains honestly lexical-only and gains no public context
 mutation route or housekeeping model call.
 
 ## Completed
