@@ -2,10 +2,9 @@
 
 ## Status
 
-Reopened for the final pre-merge review closure under
-[ADR 0012](../../adr/0012-canonical-capability-invocation.md). The prior tracked
-[verification evidence](005-1-evidence.md) remains historical until the new
-exit criteria below are reverified.
+Complete under the final pre-merge review closure to
+[ADR 0012](../../adr/0012-canonical-capability-invocation.md). See the updated
+[verification evidence](005-1-evidence.md).
 
 ## Objective
 
@@ -32,10 +31,10 @@ to one live epoch, and define a one-shot execution claim for future workers.
 5. Use representation-sensitive recursive JSON equality for `const`, `enum`,
    and `uniqueItems`; use exact `i128` arithmetic for admitted integer bounds
    and `multipleOf`; reject syntactic floats such as `1.0` for `integer`.
-6. Make `InvocationAuthorizer` borrow one live epoch, reject other or expired
-   epochs, cap outcomes at epoch expiry, and remove it from daemon-lifetime
-   kernel state. Preserve the atomic one-call lease transaction and retry
-   behavior inside the epoch window.
+6. Scope `InvocationAuthorizer` to one ticket-owned live-epoch authority
+   window, reject other or expired epochs, cap outcomes at epoch expiry, and
+   remove it from daemon-lifetime kernel state. Preserve the atomic one-call
+   lease transaction and retry behavior inside the epoch window.
 7. Add a sealed, non-cloneable, non-deserializable `ExecutionClaim`. Claiming a
    permit is atomic and succeeds at most once; define future effectful workers
    as claim-by-value consumers, but add no worker or dispatch path.
@@ -99,5 +98,5 @@ to one live epoch, and define a one-shot execution claim for future workers.
   negative/excessive/fractional arguments retain their Task 003 codes, events,
   continuation, and no-read behavior.
 - Focused tests, strict Clippy, `./scripts/agent-check.sh`, Rust 1.88 workspace
-  check, and diff hygiene pass; tracked evidence is committed and the branch is
-  pushed before opening a PR for independent `rust` and `msrv` checks.
+  check, and diff hygiene pass; the branch is pushed and PR #6 independently
+  passes both `rust` and `msrv` before tracked evidence closes the task.

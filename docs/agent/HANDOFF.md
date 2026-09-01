@@ -36,15 +36,18 @@
   at the model boundary. V2 embedded ordering is carried only by an opaque,
   non-serializable context-owned ranking and is revalidated after compilation.
 - Policy state: sealed canonical invocations carry only harness-derived effect,
-  typed resource, and local-builtin placement authority. Each live turn owns an
-  epoch-borrowing, expiring authorization ledger; the daemon owns none. One
-  mutex atomically binds invocation IDs to digests, evaluates a trusted static
-  policy or harness-selected lease, consumes a successful lease at most once,
-  and issues a sealed epoch- and invocation-bound permit or approval-required
-  outcome. Any future effectful worker must consume a sealed non-cloneable
-  one-shot `ExecutionClaim`; no such worker is connected. The existing bounded
-  `artifact.read` executor still requires a matching no-approval static-policy
-  permit.
+  typed resource, and local-builtin placement authority. A live epoch moves
+  monotonically from paging to authorization-sealed and issues exactly one
+  non-wire, non-cloneable authorization ticket. Policy consumes that ticket
+  into one expiring ledger whose cloned handles share one mutex; dropping any
+  ticket or handle never rearms paging or creates another ledger. The daemon
+  owns no authorizer. The mutex atomically binds invocation IDs to digests,
+  evaluates a trusted static policy or harness-selected lease, consumes a
+  successful lease at most once, and issues a sealed epoch- and invocation-
+  bound permit or approval-required outcome. Any future effectful worker must
+  consume a sealed non-cloneable one-shot `ExecutionClaim`; no such worker is
+  connected. The existing bounded `artifact.read` executor still requires a
+  matching no-approval static-policy permit.
 - Model state: `ditto-model` owns version 1 of the provider-neutral request,
   driver, and backpressured stream-event contract. It preserves ordered stable
   prefix/volatile turn data, structured tool-call lifecycles, final structured
@@ -65,14 +68,18 @@
 
 ## Latest verified slice
 
-- Task 005.1 is complete under the pre-merge correction in
+- Task 005.1 has a verified final review-closure implementation under
   [ADR 0012](../adr/0012-canonical-capability-invocation.md). The tracked
   [verification evidence](tasks/005-1-evidence.md) maps every amended exit
   criterion to implementation and adversarial, concurrency, integration, and
-  compile-fail tests. The contract, implementation, and adversarial closure are
-  commits `ad18b33`, `85fde0ad862220435f28a1effdc52bb7f2136183`,
-  and `cb4c71ecfb64bc69445fc91ed49263d896131676`; the final tested code tree is
-  `f05af74d707498040004fb6d77b3aba6b467f439`.
+  compile-fail tests. The original contract, implementation, and adversarial
+  closure are commits `ad18b33`,
+  `85fde0ad862220435f28a1effdc52bb7f2136183`,
+  and `cb4c71ecfb64bc69445fc91ed49263d896131676`. The final review contract and
+  implementation are `ddf9a6cccaefd016b1f0775b6292fc9d4cb0ea28` and
+  `98e8f676fc325bf4400aae324c2447e56098bcdb`; normalized-output work
+  preflight is pinned by `7b5e4b9528c17d08953d2de1d1bb8ca6bf824f90`. The tested code tree is
+  `d3ba3e14e136921106a5d5431f1abc3530ecf64a`.
 - Replayable `ExecutionEpochEvidence` is now distinct from sealed,
   non-wire `LiveExecutionEpoch`. Only the latter issues a sealed
   `InvocableCapabilityBinding`; it owns one epoch's exact model card, manifest,
@@ -84,9 +91,12 @@
   integer `multipleOf`; equality keywords distinguish `1` from `1.0`, and
   `artifact.read` `length = 1.0` preserves the Task 003 `invalid_arguments`
   result and continuation behavior.
-- Authorization state now borrows and expires with one live epoch and is
-  constructed inside the turn rather than `KernelInner`. Permit and approval
-  expiry is capped at that boundary. The mutex transaction still preserves
+- A live epoch now seals paging exactly once and moves its sole affine
+  `EpochAuthorizationTicket` into policy. Every cloned authorizer handle shares
+  that ticket's one `Arc`-owned ledger, while second ticket issuance, post-seal
+  paging, and reissue after ticket or authorizer drop fail closed. The ledger is
+  constructed inside the turn rather than `KernelInner`; permit and approval
+  expiry remains capped at the epoch boundary. Its mutex transaction preserves
   failed-without-consumption, consume-once, idempotent retry, digest-conflict,
   and one-call concurrency guarantees.
 - `ExecutionClaim` is a sealed, non-cloneable, non-deserializable one-shot token
@@ -95,14 +105,23 @@
   effectful worker but no worker or dispatch path was added. The existing
   bounded `artifact.read` path still requires its sealed static-policy permit,
   and Task 003 durable execution and no-I/O replay semantics are unchanged.
-- The focused capability/policy/kernel run passed 121 unit, integration, and
-  compile-fail tests. The canonical `rtk ./scripts/agent-check.sh` gate passed
-  its tracked canary, formatting, strict workspace/all-target/all-feature
-  Clippy, workspace tests, and doctests. `rtk cargo +1.88.0 check --locked
-  --workspace --all-targets` and `rtk git diff --check` passed. No compact
-  session-index work, capability worker, subprocess, network, model,
-  credential, provider, SSH, approval fulfillment, file mutation, or billable
-  operation ran.
+- Recursive profile equality now charges each compared JSON node, including
+  nested `uniqueItems`, and direct number comparison allocates no representation
+  strings. Raw and normalized values pass iterative byte/depth/work preflight
+  before recursive canonical projection. The compiler is the only raw
+  `artifact.read` normalizer; the kernel decodes its sealed normalized value,
+  while Task 003 invalid-reference/invalid-arguments codes and no-read
+  continuation behavior remain unchanged.
+- Focused capability, policy, and kernel runs passed 57, 14, and 60 tests
+  respectively, including compile-fail doctests. The canonical
+  `rtk ./scripts/agent-check.sh` gate passed its tracked canary, formatting,
+  strict workspace/all-target/all-feature Clippy, workspace tests, and
+  doctests. `rtk cargo +1.88.0 check --locked
+  --workspace --all-targets` and `rtk git diff --check` passed. PR #6 Actions
+  run `33522132273` independently passed `msrv` and `rust` on final code commit
+  `7b5e4b9528c17d08953d2de1d1bb8ca6bf824f90`. No compact session-index
+  work, capability worker, subprocess, network, model, credential, provider,
+  SSH, approval fulfillment, file mutation, or billable operation ran.
 - The original Task 005 evidence remains at
   [tasks/005-evidence.md](tasks/005-evidence.md); its initial dual-purpose epoch,
   evaluator, and daemon-ledger descriptions are superseded by Task 005.1 above.

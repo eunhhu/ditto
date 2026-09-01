@@ -5,13 +5,16 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-- [`005.1 pre-merge review closure`](tasks/005-1-live-epoch-schema-authority.md):
-  enforce one authorization ledger per live epoch, meter recursive equality,
-  preflight arguments before canonical serialization, and remove duplicate
-  `artifact.read` normalization without Task 003 drift.
+- None. Task 005.1 review closure is complete, and this run stops before the
+  compact session-index task.
 
 ## Completed
 
+- [`005.1 Live epoch, closed schema profile, and bounded authority lifetime`](tasks/005-1-live-epoch-schema-authority.md):
+  replayable evidence is separate from sealed live invocation bindings; one
+  affine epoch ticket owns one shared expiring authorization ledger; recursive
+  equality and canonical projection are preflight-bounded; and
+  `artifact.read` has one compiler-owned normalization without Task 003 drift.
 - [`005 Canonical capability invocation and effect/resource authority`](tasks/005-canonical-capability-invocation.md):
   authority-free model calls, exact epoch/revision binding, bounded raw and
   normalized schema validation, typed effect/resource derivation, sealed
