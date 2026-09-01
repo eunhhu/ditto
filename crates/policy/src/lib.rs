@@ -107,14 +107,24 @@ pub struct StaticPolicy {
 impl StaticPolicy {
     /// Exact no-approval policy for a same-scope `artifact.read` resource.
     pub fn artifact_read(resource: CanonicalResource) -> Result<Self, PolicyError> {
-        if resource.as_artifact().is_none() {
+        Self::artifact_read_scope(Some(resource))
+    }
+
+    /// Build the complete static rule from the kernel's source-verified
+    /// resource scope. `None` is an explicit fail-closed scope, not ambient
+    /// artifact authority.
+    pub fn artifact_read_scope(resource: Option<CanonicalResource>) -> Result<Self, PolicyError> {
+        if resource
+            .as_ref()
+            .is_some_and(|resource| resource.as_artifact().is_none())
+        {
             return Err(PolicyError::InvalidConfiguration);
         }
         Ok(Self {
             id: STATIC_ARTIFACT_POLICY_ID.into(),
             capability_id: "artifact.read".into(),
             effect_ceiling: EffectProfile::read_content(),
-            resources: BTreeSet::from([resource]),
+            resources: resource.into_iter().collect(),
             permit_ttl: Duration::seconds(STATIC_ARTIFACT_PERMIT_SECONDS),
         })
     }

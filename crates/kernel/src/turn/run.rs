@@ -2,10 +2,14 @@ use std::{cell::Cell, collections::BTreeSet};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ditto_artifact_read::{
-    ARTIFACT_READ_ID, ARTIFACT_READ_VERSION, ArtifactReadAuthority, ArtifactReadNormalizer,
-    ArtifactReadResource, ArtifactReadResult, capability_schema, validate_artifact_read_manifest,
+    ARTIFACT_READ_ID, ARTIFACT_READ_VERSION, ArtifactReadAuthority, ArtifactReadDeriver,
+    ArtifactReadNormalizer, ArtifactReadResource, ArtifactReadResult, capability_schema,
+    validate_artifact_read_manifest,
 };
-use ditto_capability::{CapabilityCard, CapabilitySchema, ExecutionEpoch};
+use ditto_capability::{
+    CapabilityDeriver, CapabilitySchema, ExecutionEpoch, InvocationCompiler, InvocationError,
+    UntrustedToolCall,
+};
 use ditto_context::{
     CompiledContext, ContextCandidate, ContextCapsule, ContextCompiler, TaskSignature,
 };
@@ -15,6 +19,7 @@ use ditto_model::{
     ModelFeature, ModelRequest, ModelRequestId, ModelTurn, OutputConstraint, ParallelToolCalls,
     ProviderCallId, RequestControl, ToolCallBuffer, ToolChoice, ToolUsePolicy,
 };
+use ditto_policy::{AuthorizationOutcome, PolicyError, StaticPolicy};
 use ditto_protocol::{
     EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
 };
@@ -227,8 +232,22 @@ impl DittoKernel {
             ));
         }
 
+        let manifest = manifest.clone();
+        let deriver = ArtifactReadDeriver::default();
         let mut epoch = ExecutionEpoch::new(1);
-        if epoch.page_in([CapabilityCard::from(manifest)]) != 1
+        if epoch
+            .page_in_invocable(&manifest, &schema, deriver.revision().clone())
+            .map_err(|error| {
+                self.persist_turn_failure(
+                    &scope,
+                    &cause,
+                    TurnFailureCode::CapabilityContract,
+                    error.to_string(),
+                    None,
+                    None,
+                )
+            })?
+            != 1
             || epoch.capabilities().len() != 1
             || epoch.capabilities()[0].id != ARTIFACT_READ_ID
         {
@@ -254,7 +273,7 @@ impl DittoKernel {
                 ));
             }
         };
-        let schemas = vec![schema];
+        let schemas = vec![schema.clone()];
         let selected_event = self.append_turn_payload(
             &scope,
             EventActor::System,
@@ -834,6 +853,62 @@ impl DittoKernel {
                     ));
                 }
                 let normalized = ArtifactReadNormalizer.normalize(&call.arguments);
+                let untrusted_call = match UntrustedToolCall::new(
+                    call.call_id.to_string(),
+                    call.capability_id.clone(),
+                    call.arguments.clone(),
+                ) {
+                    Ok(call) => call,
+                    Err(error) => {
+                        return Err(self.persist_turn_failure(
+                            &scope,
+                            &cause,
+                            TurnFailureCode::CapabilityContract,
+                            error.to_string(),
+                            Some(request_index as u8),
+                            Some(call.call_id),
+                        ));
+                    }
+                };
+                let canonical = match InvocationCompiler::compile(
+                    &epoch,
+                    &manifest,
+                    &schema,
+                    untrusted_call,
+                    &deriver,
+                ) {
+                    Ok(invocation) => Some(invocation),
+                    Err(InvocationError::ArgumentsSchema {
+                        stage: ditto_capability::ArgumentStage::Raw,
+                        ..
+                    }) => None,
+                    Err(error) => {
+                        return Err(self.persist_turn_failure(
+                            &scope,
+                            &cause,
+                            TurnFailureCode::CapabilityContract,
+                            error.to_string(),
+                            Some(request_index as u8),
+                            Some(call.call_id),
+                        ));
+                    }
+                };
+                match (&canonical, &normalized) {
+                    (Some(invocation), Ok(resource))
+                        if invocation.normalized_arguments()
+                            == &serde_json::to_value(resource)? => {}
+                    (None, Err(_)) => {}
+                    _ => {
+                        return Err(self.persist_turn_failure(
+                            &scope,
+                            &cause,
+                            TurnFailureCode::CapabilityContract,
+                            "artifact.read schema validation and normalization disagree",
+                            Some(request_index as u8),
+                            Some(call.call_id),
+                        ));
+                    }
+                }
                 let capability_event = self.append_turn_payload(
                     &scope,
                     EventActor::Model,
@@ -860,6 +935,34 @@ impl DittoKernel {
                         self.artifact_is_authorized(&scope, resource, authorization_through_seq)?
                     }
                     Err(_) => false,
+                };
+                let permit = if let Some(invocation) = canonical.as_ref() {
+                    let policy_resource = authorized
+                        .then(|| invocation.resources().iter().next().cloned())
+                        .flatten();
+                    let policy =
+                        StaticPolicy::artifact_read_scope(policy_resource).map_err(|_| {
+                            TurnRunError::Internal(
+                                "artifact.read static policy construction failed",
+                            )
+                        })?;
+                    match self.inner.invocation_authorizer.authorize_static(
+                        invocation,
+                        &policy,
+                        Utc::now(),
+                    ) {
+                        Ok(AuthorizationOutcome::Permitted(permit)) if authorized => Some(permit),
+                        Err(PolicyError::MissingResourceScope) if !authorized => None,
+                        Ok(AuthorizationOutcome::ApprovalRequired(_))
+                        | Ok(AuthorizationOutcome::Permitted(_))
+                        | Err(_) => {
+                            return Err(TurnRunError::Internal(
+                                "artifact.read static policy authorization contradicted scope",
+                            ));
+                        }
+                    }
+                } else {
+                    None
                 };
                 // Authorization is bounded by the captured high-water. Yield
                 // once more so cancellation/deadline can stop the turn before
@@ -936,7 +1039,20 @@ impl DittoKernel {
                             resource.reference().clone(),
                         ),
                     ),
-                    Ok(resource) => authority.execute(&resource),
+                    Ok(resource) => {
+                        let invocation = canonical.as_ref().ok_or(TurnRunError::Internal(
+                            "authorized artifact.read has no canonical invocation",
+                        ))?;
+                        let permit = permit.as_ref().ok_or(TurnRunError::Internal(
+                            "authorized artifact.read has no invocation permit",
+                        ))?;
+                        permit.validate(invocation, Utc::now()).map_err(|_| {
+                            TurnRunError::Internal(
+                                "artifact.read invocation permit is invalid at execution",
+                            )
+                        })?;
+                        authority.execute(&resource)
+                    }
                 };
                 if cancellation.is_cancelled() {
                     return Err(self.persist_turn_failure(

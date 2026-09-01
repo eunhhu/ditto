@@ -487,6 +487,7 @@ dependencies = [
  "ditto-context-projection",
  "ditto-event-store",
  "ditto-model",
+ "ditto-policy",
  "ditto-protocol",
  "ditto-retrieval",
  "futures-util",
