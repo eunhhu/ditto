@@ -1447,6 +1447,16 @@ mod tests {
     #[test]
     fn live_epoch_rejects_every_revision_mismatch() {
         let (manifest, schema, deriver) = fixture();
+
+        let mut mismatched_card = crate::CapabilityCard::from(&manifest);
+        mismatched_card.summary = "Different model disclosure".into();
+        let mut discovery_epoch = LiveExecutionEpoch::new(1);
+        assert_eq!(discovery_epoch.page_in([mismatched_card]), 1);
+        assert!(matches!(
+            discovery_epoch.page_in_invocable(&manifest, &schema, deriver.revision.clone()),
+            Err(super::CapabilityRevisionError::EpochRevisionConflict { .. })
+        ));
+
         let mut epoch = LiveExecutionEpoch::new(2);
         epoch
             .page_in_invocable(&manifest, &schema, deriver.revision.clone())
