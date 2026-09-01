@@ -5,10 +5,12 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-No implementation slice is active. The next priority is canonical capability
-invocation and capability-derived effect profiles. Define its task contract and
-amend the governing ADR before changing public invocation, effect, or lease
-semantics.
+- [`005 Canonical capability invocation and effect/resource authority`](tasks/005-canonical-capability-invocation.md):
+  exact epoch/revision resolution, raw and normalized JSON Schema instance
+  validation, bounded capability derivation, sealed canonical invocation,
+  atomic authorization, sealed invocation-bound permit, and the existing
+  `artifact.read` reference migration. The stopping point is permit issuance;
+  no worker or external effect is in scope.
 
 ## Completed
 
@@ -49,7 +51,6 @@ semantics.
 
 ## Later
 
-- canonical capability invocation and effect derivation;
 - compact source-verified session indexes that remove session-history rescans
   from context delta verification and admission;
 - a bounded capability package-header index with symlink-safe discovery and
