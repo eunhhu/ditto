@@ -6,12 +6,13 @@
 //! projection.  The semantic kernel remains responsible for scope checks
 //! against the event spine and for durable tool-call ordering.
 
-use std::{borrow::Borrow, fmt};
+use std::{borrow::Borrow, collections::BTreeSet, fmt};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ditto_artifact_store::{ArtifactRef, ArtifactStore, ArtifactStoreError};
 use ditto_capability::{
-    CapabilityKind, CapabilityManifest, CapabilitySchema, DataAccess, EffectProfile, Externality,
+    CanonicalResource, CapabilityDeriver, CapabilityKind, CapabilityManifest, CapabilitySchema,
+    DataAccess, DerivationBudget, DeriverError, DeriverRevision, EffectProfile, Externality,
     JSON_SCHEMA_DRAFT_2020_12_URI, Mutation, Privilege, RuntimeType,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -21,6 +22,9 @@ use serde_json::{Value, json};
 pub const ARTIFACT_READ_ID: &str = "artifact.read";
 /// Version of the builtin capability contract.
 pub const ARTIFACT_READ_VERSION: &str = "0.1.0";
+/// Stable revision of the deterministic Task 005 argument/effect/resource
+/// deriver. Changing its semantics requires a new value.
+pub const ARTIFACT_READ_DERIVER_REVISION: &str = "artifact-read-v1";
 /// Maximum number of bytes requested by one invocation.
 pub const MAX_READ_BYTES: usize = 16 * 1024;
 
@@ -949,6 +953,69 @@ impl ArtifactReadNormalizer {
         let value: Value =
             serde_json::from_slice(input).map_err(|_| ArtifactReadError::invalid_arguments())?;
         self.normalize(value)
+    }
+}
+
+/// Deterministic, I/O-free Task 005 derivation for the builtin contract.
+#[derive(Debug, Clone)]
+pub struct ArtifactReadDeriver {
+    revision: DeriverRevision,
+}
+
+impl Default for ArtifactReadDeriver {
+    fn default() -> Self {
+        Self {
+            revision: DeriverRevision::new(ARTIFACT_READ_DERIVER_REVISION)
+                .expect("the builtin deriver revision is a valid constant"),
+        }
+    }
+}
+
+impl CapabilityDeriver for ArtifactReadDeriver {
+    fn capability_id(&self) -> &str {
+        ARTIFACT_READ_ID
+    }
+
+    fn revision(&self) -> &DeriverRevision {
+        &self.revision
+    }
+
+    fn normalize(
+        &self,
+        arguments: &Value,
+        budget: &mut DerivationBudget,
+    ) -> Result<Value, DeriverError> {
+        budget.charge(1)?;
+        let normalized = ArtifactReadNormalizer
+            .normalize(arguments)
+            .map_err(|error| DeriverError::new(error.code()))?;
+        serde_json::to_value(normalized)
+            .map_err(|_| DeriverError::new("artifact.read normalization serialization failed"))
+    }
+
+    fn derive_effect(
+        &self,
+        normalized_arguments: &Value,
+        budget: &mut DerivationBudget,
+    ) -> Result<EffectProfile, DeriverError> {
+        budget.charge(1)?;
+        serde_json::from_value::<ArtifactReadResource>(normalized_arguments.clone())
+            .map_err(|_| DeriverError::new("artifact.read normalized arguments are invalid"))?;
+        Ok(EffectProfile::read_content())
+    }
+
+    fn derive_resources(
+        &self,
+        normalized_arguments: &Value,
+        budget: &mut DerivationBudget,
+    ) -> Result<BTreeSet<CanonicalResource>, DeriverError> {
+        budget.charge(1)?;
+        let normalized =
+            serde_json::from_value::<ArtifactReadResource>(normalized_arguments.clone())
+                .map_err(|_| DeriverError::new("artifact.read normalized arguments are invalid"))?;
+        let resource = CanonicalResource::artifact(normalized.reference().to_string())
+            .map_err(|error| DeriverError::new(error.to_string()))?;
+        Ok(BTreeSet::from([resource]))
     }
 }
 
