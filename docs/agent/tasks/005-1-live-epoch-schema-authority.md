@@ -2,9 +2,10 @@
 
 ## Status
 
-Complete under the Task 005.1 pre-merge amendment to
-[ADR 0012](../../adr/0012-canonical-capability-invocation.md). See the tracked
-[verification evidence](005-1-evidence.md).
+Reopened for the final pre-merge review closure under
+[ADR 0012](../../adr/0012-canonical-capability-invocation.md). The prior tracked
+[verification evidence](005-1-evidence.md) remains historical until the new
+exit criteria below are reverified.
 
 ## Objective
 
@@ -41,6 +42,20 @@ to one live epoch, and define a one-shot execution claim for future workers.
 8. Keep `artifact.read` arguments/results, invalid-argument projection, event
    version/order, same-scope authorization, continuation, terminal, and replay
    semantics unchanged.
+9. Give `LiveExecutionEpoch` a monotonic paging/sealed state and issue exactly
+   one private-field, non-cloneable, non-serializable, non-deserializable
+   `EpochAuthorizationTicket`. Policy consumes that ticket; cloned authorizer
+   handles share its sole ledger. Ticket/authorizer drop never rearms the epoch,
+   and post-seal paging fails.
+10. Charge every recursively visited value during `const`, `enum`, and
+    `uniqueItems` equality. Preserve representation-sensitive number equality
+    without allocating comparison strings. Nested equality that exceeds the
+    fixed evaluation work limit must fail with `EvaluationWorkExceeded`.
+11. Run iterative argument byte/depth/work preflight before recursive canonical
+    serialization for both raw calls and normalized deriver output.
+12. Make the compiler the only raw `artifact.read` normalizer. Map typed raw
+    ingress/schema rejection to the existing Task 003 error projections and
+    decode the compiler-sealed normalized value for execution.
 
 ## Non-goals
 
@@ -72,6 +87,17 @@ to one live epoch, and define a one-shot execution claim for future workers.
   idempotent retry, one winner under a concurrent one-call lease, and no
   daemon-owned authorizer state.
 - A permit produces at most one sealed execution claim; a second claim fails.
+- A second authorization ticket fails before and after the first ticket or
+  authorizer is dropped; post-seal page-in fails; compile-fail cases prove a
+  ticket cannot be cloned, serialized, deserialized, publicly constructed, or
+  moved into two independent authorizers.
+- A nested `uniqueItems` case passes the complete-value and simple pair-count
+  envelopes but exhausts recursively metered equality work.
+- Raw and normalized deep/over-work values fail iterative preflight before
+  canonical serialization.
+- `artifact.read` runs exactly one raw normalization while malformed reference,
+  negative/excessive/fractional arguments retain their Task 003 codes, events,
+  continuation, and no-read behavior.
 - Focused tests, strict Clippy, `./scripts/agent-check.sh`, Rust 1.88 workspace
   check, and diff hygiene pass; tracked evidence is committed and the branch is
   pushed before opening a PR for independent `rust` and `msrv` checks.

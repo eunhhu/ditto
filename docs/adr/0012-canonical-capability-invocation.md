@@ -66,6 +66,13 @@ Schema evaluation; authorization state is owned by one live epoch rather than
 the daemon; and any future effectful worker must consume a one-shot execution
 claim rather than accepting a reusable permit.
 
+The final pre-merge review closure further requires a live epoch to issue
+exactly one authorization ledger, not merely to scope each independently
+created ledger to the same epoch ID. It also makes every recursive equality
+comparison part of the fixed invocation-evaluation work budget, moves complete
+argument-envelope preflight ahead of canonical serialization, and removes the
+reference capability's preliminary duplicate normalization.
+
 ### Exact live epoch and revision binding
 
 `ExecutionEpochEvidence` is the bounded serializable and deserializable record
@@ -74,6 +81,17 @@ live invocation. `LiveExecutionEpoch` is a separate sealed,
 non-deserializable, non-serializable harness object. Only a live epoch may issue
 an `InvocableCapabilityBinding`, whose fields are private and which has no
 wire constructor.
+
+A live epoch has a monotonic `Paging -> AuthorizationSealed` state transition.
+Only `Paging` accepts discovery or invocable page-in. A successful
+`seal_for_authorization(&mut self)` transition issues the epoch's sole sealed
+`EpochAuthorizationTicket`; every later ticket request and every later page-in
+fails closed. Dropping the ticket or its authorizer never returns the epoch to
+`Paging`. The ticket has private fields, is non-cloneable and implements neither
+serialization nor deserialization. Policy must consume this ticket to create
+an authorizer, so two independent ledgers cannot be constructed for one live
+epoch. Cloned authorizer handles share the one ledger rather than cloning its
+authority state.
 
 An invocable live binding binds all of these values:
 
@@ -127,6 +145,18 @@ schema value. Raw and normalized instances receive the same bounded preflight
 and profile evaluation. Regular expressions use the fixed Rust-regex subset
 and size/work envelope. No profile failure reaches policy.
 
+The evaluation budget charges every recursively visited equality node used by
+`const`, each `enum` candidate, and each `uniqueItems` comparison. Pair counts
+alone are not treated as the comparison cost. Number equality compares the
+bounded `serde_json::Number` representation directly and performs no per-
+comparison string allocation. Exhaustion returns the typed
+`EvaluationWorkExceeded` result.
+
+Raw tool-call construction and normalized deriver output both pass iterative
+byte/depth/work preflight before any recursive canonical JSON projection.
+Canonical serialization is permitted only after that envelope is established;
+it is then used for bounded digest projections, not as the ingress limit check.
+
 Only registered harness code implements a capability deriver. A deriver is
 versioned, deterministic for the exact normalized input, has a fixed work and
 output envelope, and performs no filesystem, network, process, credential,
@@ -176,7 +206,7 @@ authorization source, grant instant, and expiry. A permit can be checked only
 against the matching canonical invocation and its validity window. It cannot be
 rebound, deserialized, or used as a public struct literal.
 
-One live-epoch-scoped authorization ledger serializes invocation-ID binding,
+One ticket-owned live-epoch authorization ledger serializes invocation-ID binding,
 idempotency lookup, all lease checks, lease consumption, and permit insertion
 under one mutex. The first attempt binds an invocation ID to its digest for the
 remaining live-epoch authority window. A different digest for that ID fails
@@ -187,12 +217,13 @@ the same critical section. An identical retry returns the same permit without
 another decrement. Therefore concurrent authorization against a lease with one
 remaining call can issue at most one new permit.
 
-The authorizer borrows the sealed live epoch and has its own fixed expiry. It
-rejects invocations from any other epoch and caps permit or approval expiry at
-the epoch boundary. The kernel constructs it inside the turn and drops it with
-the live epoch. Denied ID bindings, expired permits, approval requests,
-completed decisions, and claim markers therefore cannot accumulate in daemon-
-lifetime state.
+The authorizer consumes the epoch's sole authorization ticket and has its own
+fixed expiry. It rejects invocations from any other epoch and caps permit or
+approval expiry at the epoch boundary. Every cloned handle shares this exact
+ledger. The kernel constructs it inside the turn and drops it with the sealed
+live epoch. Denied ID bindings, expired permits, approval requests, completed
+decisions, and claim markers therefore cannot accumulate in daemon-lifetime
+state, and dropping it cannot mint a replacement ledger for the same epoch.
 
 Approval fulfillment, durable policy storage, and cross-process authorization
 coordination are deferred. An approval-required outcome is not a permit and
@@ -223,6 +254,13 @@ effect    = content / none / local / user
 resource  = artifact:sha256:<lowercase digest>
 placement = local builtin
 ```
+
+The compiler is the only component that normalizes raw `artifact.read`
+arguments. The kernel decodes the compiler's sealed normalized value into the
+existing typed read resource for Task 003 journaling and execution. A raw
+schema or ingress-envelope rejection is mapped to the existing stable
+`invalid_reference` or `invalid_arguments` projection without running the
+normalizer before the compiler.
 
 The existing same-session/task `artifact.created` high-water check supplies
 the static policy's exact resource scope. Policy approval remains `never`, but
@@ -319,6 +357,14 @@ Tests must prove:
 - an approval-required outcome issues no permit and consumes no lease;
 - epoch mismatch and expiry rejection, daemon-state absence, and one-shot
   `ExecutionClaim` issuance with a closed second claim;
+- exactly one non-cloneable authorization ticket per live epoch, permanent
+  sealing after ticket or authorizer drop, rejected post-seal page-in, and a
+  compile-time inability to build two independent ledgers from one ticket;
+- nested equality input whose structural and pair-count envelopes fit but whose
+  recursively metered comparison work returns `EvaluationWorkExceeded`;
+- iterative raw and normalized argument preflight before canonical
+  serialization, plus one compiler-owned `artifact.read` normalization while
+  preserving Task 003 error projections;
 - `artifact.read` uses a matching static-policy permit while retaining exact
   Task 003 live and replay outcomes; and
 - no worker/process/network/credential/SSH/file-mutation or `task.completed`
