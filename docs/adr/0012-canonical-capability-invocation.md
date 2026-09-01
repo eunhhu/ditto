@@ -34,8 +34,8 @@ The only accepted live invocation pipeline is:
 
 ```text
 UntrustedToolCall
-→ exact execution-epoch and capability-revision resolution
-→ Draft 2020-12 JSON Schema instance validation
+→ sealed live-epoch capability binding resolution
+→ Ditto Invocation Schema Profile V1 instance validation
 → bounded capability-specific argument normalization
 → normalized-argument schema revalidation
 → bounded capability-specific effect and typed-resource derivation
@@ -57,9 +57,25 @@ unchecked public constructor or struct-literal path, and do not implement
 evidence projections, but serialization never becomes an invocation ingress.
 Compile-fail tests fix both properties.
 
-### Exact epoch and revision binding
+### Task 005.1 pre-merge authority correction
 
-An invocable epoch entry binds all of these values:
+Task 005.1 corrects four pre-merge gaps in the initial implementation. The
+replayable epoch record is evidence, not live authority; invocation validation
+uses an explicitly closed Ditto profile rather than claiming complete JSON
+Schema evaluation; authorization state is owned by one live epoch rather than
+the daemon; and any future effectful worker must consume a one-shot execution
+claim rather than accepting a reusable permit.
+
+### Exact live epoch and revision binding
+
+`ExecutionEpochEvidence` is the bounded serializable and deserializable record
+used by model disclosure, durable events, and replay. It cannot authorize a
+live invocation. `LiveExecutionEpoch` is a separate sealed,
+non-deserializable, non-serializable harness object. Only a live epoch may issue
+an `InvocableCapabilityBinding`, whose fields are private and which has no
+wire constructor.
+
+An invocable live binding binds all of these values:
 
 - execution epoch ID;
 - capability ID and semantic version;
@@ -67,27 +83,49 @@ An invocable epoch entry binds all of these values:
 - SHA-256 digest of the complete provider-neutral capability schema;
 - stable capability-specific deriver revision.
 
-Canonical manifest and schema digests are computed from their deterministic
+The binding owns the exact model-visible card, complete schema, manifest, and
+revision selected into that live epoch. `InvocationCompiler` consumes the
+sealed binding rather than an epoch ID or replay evidence and rederives their
+complete relationship before normalization. Canonical manifest and schema
+digests are computed from their deterministic
 canonical JSON projections, not filesystem paths or TOML formatting. An epoch
 may retain legacy discovery-only cards, but a card without a complete revision
-binding is not invocable. Resolution compares the epoch binding with the
-currently installed manifest, exact level-2 schema, and deriver before any
+binding is not invocable. Resolution compares the binding's model-visible card,
+manifest, exact level-2 schema, revision, live epoch ID, and deriver before any
 argument normalization. It checks the deriver revision again after derivation.
 A changed ID, version, manifest digest, schema digest, deriver revision, absent
 epoch entry, retired capability, or partially bound epoch fails closed.
 
-The revision binding is serialized as additive execution-epoch evidence so a
-recorded selection can be inspected. Legacy Task 003 epochs without that
-additive evidence remain replayable but cannot authorize a new live invocation.
+The revision binding is projected into additive `ExecutionEpochEvidence` so a
+recorded selection can be inspected. Deserializing that evidence never
+reconstructs `LiveExecutionEpoch` or `InvocableCapabilityBinding`. Legacy Task
+003 epochs without the additive evidence remain replayable but cannot authorize
+a new live invocation.
 
-### Instance validation and deterministic derivation
+### Ditto Invocation Schema Profile V1 and deterministic derivation
 
-The capability boundary structurally validates the declared Draft 2020-12
-schema and then evaluates raw arguments as an instance before the deriver runs.
-Evaluation has fixed schema-size, instance-size, depth, branch, and node-work
-bounds. Unsupported reference or regular-expression behavior fails closed;
-unknown annotation/extension keywords remain non-authoritative. No schema
-failure reaches policy.
+Provider-neutral level-2 schemas remain Draft 2020-12 disclosure documents, but
+Ditto does not claim to implement the full Draft 2020-12 evaluator. A schema
+must additionally fit the closed Ditto Invocation Schema Profile V1 before it
+can enter a live binding. The profile supports boolean schemas and only the
+enumerated annotation, type, equality, integer-bound, string, array, and object
+keywords needed by the reference capability and its conformance suite.
+Unknown keywords, references, combiners, floating-point `number`, and other
+unimplemented semantics fail closed rather than being silently ignored.
+
+Profile V1 treats a JSON integer as a syntactically integral `i64` or `u64`.
+Thus `1` is an integer and `1.0` is not. Integer bounds and `multipleOf` use
+exact signed 128-bit arithmetic over admitted `i64`/`u64` values, including
+integers beyond 2^53. `const`, `enum`, and `uniqueItems` use recursive,
+representation-sensitive JSON equality, so `1` and `1.0` are distinct. These
+rules are intentional Ditto profile semantics and not a claim about full JSON
+Schema numeric equivalence.
+
+Before any recursive structural validation, an iterative preflight enforces
+the fixed serialized-byte, JSON-depth, and node-work bounds for the complete
+schema value. Raw and normalized instances receive the same bounded preflight
+and profile evaluation. Regular expressions use the fixed Rust-regex subset
+and size/work envelope. No profile failure reaches policy.
 
 Only registered harness code implements a capability deriver. A deriver is
 versioned, deterministic for the exact normalized input, has a fixed work and
@@ -138,19 +176,41 @@ authorization source, grant instant, and expiry. A permit can be checked only
 against the matching canonical invocation and its validity window. It cannot be
 rebound, deserialized, or used as a public struct literal.
 
-One process-local authorization ledger serializes invocation-ID binding,
+One live-epoch-scoped authorization ledger serializes invocation-ID binding,
 idempotency lookup, all lease checks, lease consumption, and permit insertion
-under one mutex. The first attempt permanently binds an invocation ID to its
-digest. A different digest for that ID fails closed even if the earlier attempt
-was denied. A failed check or approval-required result consumes no call. A
+under one mutex. The first attempt binds an invocation ID to its digest for the
+remaining live-epoch authority window. A different digest for that ID fails
+closed even if the earlier attempt was denied. A failed check or approval-
+required result consumes no call. A
 successful lease authorization decrements at most once and stores the permit in
 the same critical section. An identical retry returns the same permit without
 another decrement. Therefore concurrent authorization against a lease with one
 remaining call can issue at most one new permit.
 
+The authorizer borrows the sealed live epoch and has its own fixed expiry. It
+rejects invocations from any other epoch and caps permit or approval expiry at
+the epoch boundary. The kernel constructs it inside the turn and drops it with
+the live epoch. Denied ID bindings, expired permits, approval requests,
+completed decisions, and claim markers therefore cannot accumulate in daemon-
+lifetime state.
+
 Approval fulfillment, durable policy storage, and cross-process authorization
 coordination are deferred. An approval-required outcome is not a permit and
 cannot execute anything.
+
+### One-shot execution claim for future effectful workers
+
+An `InvocationPermit` authorizes policy intent but is cloneable for idempotent
+retry and inspection, so a future effectful worker must never accept a permit
+directly. Before dispatch, the epoch authorizer must atomically consume the
+permit's one claim slot and issue a sealed, non-cloneable,
+non-deserializable `ExecutionClaim` bound to the same epoch, permit ID, and
+invocation digest. A second claim attempt fails closed. A future worker API must
+consume that claim by value exactly once.
+
+Task 005.1 defines and tests claim issuance but adds no worker and does not route
+the existing read-only `artifact.read` executor through the future effectful-
+worker interface.
 
 ### `artifact.read` migration boundary
 
@@ -179,8 +239,9 @@ slice does not persist a new event or reinterpret old replay data.
 
 ### Explicit stopping point
 
-This decision ends at canonical invocation plus permit issuance and the guarded
-use of the already existing bounded `artifact.read` executor. It adds no worker,
+This decision ends at canonical invocation, permit issuance, and the one-shot
+claim contract plus the guarded use of the already existing bounded
+`artifact.read` executor. It adds no worker,
 runtime loader, subprocess, network call, SSH, credential or secret resolution,
 file mutation, device/program selector, approval fulfillment, verifier, or
 `task.completed` event.
@@ -203,7 +264,9 @@ file mutation, device/program selector, approval fulfillment, verifier, or
   lease mutation critical section was rejected because failures and races can
   lose authority budget or issue duplicate permits.
 - Persisting permits or adding an approval/worker protocol was rejected because
-  neither is needed to close the current model-to-policy authority hole.
+  neither is needed to close the current model-to-policy authority hole. The
+  one-shot claim is only the mandatory future worker ingress token, not a worker
+  protocol or execution implementation.
 - Rewriting Task 003 events to record permits was rejected because replay does
   not re-authorize or re-execute and its existing durable semantics are already
   fixed by ADR 0009.
@@ -217,8 +280,10 @@ or durable event uses those types. Callers migrate to capability
 canonicalization followed by the policy authorizer and sealed permit.
 
 Execution-epoch revision evidence is additive. Existing serialized epochs and
-Task 003 version-1 events continue to deserialize and replay, but only newly
-bound live epochs are invocable. `artifact.read` keeps capability version
+Task 003 version-1 events continue to deserialize as
+`ExecutionEpochEvidence` and replay, but deserialization cannot create live
+authority. Only a fresh `LiveExecutionEpoch` can issue an invocable binding.
+`artifact.read` keeps capability version
 `0.1.0`, its argument/result schemas, range behavior, and durable turn payload
 version.
 
@@ -237,7 +302,14 @@ Tests must prove:
   `CanonicalInvocation` and `InvocationPermit` through compile-fail cases;
 - rejection of absent epoch entries and every ID/version/manifest/schema/
   deriver mismatch;
+- compile-time rejection of `LiveExecutionEpoch` and
+  `InvocableCapabilityBinding` deserialization and public construction;
+- proof that replay evidence cannot enter `InvocationCompiler`;
 - raw and normalized schema-instance rejection before policy;
+- profile conformance for representation-sensitive `const`, `enum`, and
+  `uniqueItems`; exact integers beyond 2^53; exact integer `multipleOf`; bounded
+  deeply nested schemas; and rejection of `artifact.read` `length = 1.0` with
+  the existing Task 003 invalid-argument projection;
 - minimum and maximum effect mismatch rejection;
 - typed artifact resource derivation plus traversal, sibling-prefix, and
   non-NFC path rejection;
@@ -245,8 +317,9 @@ Tests must prove:
   once, an identical retry returns the same permit, a conflicting digest is
   denied, and a one-call concurrent race issues at most one permit;
 - an approval-required outcome issues no permit and consumes no lease;
+- epoch mismatch and expiry rejection, daemon-state absence, and one-shot
+  `ExecutionClaim` issuance with a closed second claim;
 - `artifact.read` uses a matching static-policy permit while retaining exact
   Task 003 live and replay outcomes; and
 - no worker/process/network/credential/SSH/file-mutation or `task.completed`
   path is introduced.
-
