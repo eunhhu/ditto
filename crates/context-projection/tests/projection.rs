@@ -22,6 +22,7 @@ use ditto_protocol::{EventActor, EventRecord, NewEvent, event_kind};
 use ditto_retrieval::{
     CandidateCount, ContextResultLimit, Embedding, EmbeddingProvider, EmbeddingProviderError,
     EmbeddingPurpose, MAX_CANDIDATE_COUNT, MAX_CONTEXT_RESULT_LIMIT, RetrievalError, RetrievalMode,
+    RetrievalWorkBudget,
 };
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
@@ -204,6 +205,29 @@ fn verified_snapshot(
     fixture
         .projection
         .synchronize_and_verified_snapshot_through(&fixture.store, high_water, session_id, task_id)
+}
+
+fn verified_snapshot_at(
+    fixture: &Fixture,
+    session_id: &str,
+    task_id: Option<&str>,
+    evaluated_at: chrono::DateTime<Utc>,
+) -> Result<VerifiedContextSnapshot, ContextProjectionError> {
+    let high_water = fixture
+        .store
+        .latest_seq()
+        .expect("verified snapshot high-water");
+    let mut budget = RetrievalWorkBudget::new();
+    fixture
+        .projection
+        .synchronize_and_verified_snapshot_through_at(
+            &fixture.store,
+            high_water,
+            session_id,
+            task_id,
+            evaluated_at,
+            &mut budget,
+        )
 }
 
 fn lookup_committed_identity(
@@ -1734,8 +1758,8 @@ fn schema_reset_discards_only_derived_rows_and_replays_the_event_spine() {
 
     let connection = Connection::open(&path).expect("open schema cache");
     connection
-        .execute_batch("PRAGMA user_version = 999;")
-        .expect("mark unsupported projection schema");
+        .execute_batch("PRAGMA user_version = 2;")
+        .expect("mark previous projection schema");
     drop(connection);
     let reopened = ContextProjection::open(&path).expect("schema reset on reopen");
     assert_eq!(
@@ -1907,6 +1931,104 @@ fn snapshot_scope_excludes_only_superseded_rows_and_preserves_durable_order() {
     );
     assert!(replacement.seq < fixture.store.latest_seq().expect("latest"));
     assert!(superseded.seq < replacement.seq);
+}
+
+#[test]
+fn schema_three_replays_legacy_submillisecond_validity_and_exact_millisecond_boundaries() {
+    let fixture = fixture();
+    let source = append_source_event(
+        &fixture.store,
+        SESSION,
+        None,
+        EventActor::User,
+        "validity.precision.source",
+    );
+    let base = Utc
+        .timestamp_millis_opt(1_800_000_000_000)
+        .single()
+        .expect("millisecond base");
+    let mut legacy = node(
+        "legacy-submillisecond",
+        ContextScope::Session,
+        ContextOrigin::User,
+        EpistemicStatus::Verified,
+        vec![source.event_id.clone()],
+        Vec::new(),
+        "legacy fine precision",
+    );
+    legacy.valid_from = Some(base + Duration::microseconds(500));
+    legacy.valid_until = Some(base + Duration::microseconds(1_500));
+    record_node(&fixture.store, SESSION, None, legacy);
+
+    let mut exact = node(
+        "exact-millisecond",
+        ContextScope::Session,
+        ContextOrigin::User,
+        EpistemicStatus::Verified,
+        vec![source.event_id],
+        Vec::new(),
+        "exact millisecond precision",
+    );
+    exact.valid_from = Some(base + Duration::milliseconds(2));
+    exact.valid_until = Some(base + Duration::milliseconds(3));
+    record_node(&fixture.store, SESSION, None, exact);
+    fixture
+        .projection
+        .rebuild(&fixture.store)
+        .expect("schema-three source replay");
+
+    assert!(
+        snapshot_ids(
+            &verified_snapshot_at(&fixture, SESSION, None, base + Duration::microseconds(499),)
+                .expect("before legacy start")
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        snapshot_ids(
+            &verified_snapshot_at(&fixture, SESSION, None, base + Duration::microseconds(500),)
+                .expect("inclusive legacy start")
+        ),
+        vec!["legacy-submillisecond"]
+    );
+    assert_eq!(
+        snapshot_ids(
+            &verified_snapshot_at(
+                &fixture,
+                SESSION,
+                None,
+                base + Duration::microseconds(1_499),
+            )
+            .expect("before legacy expiry")
+        ),
+        vec!["legacy-submillisecond"]
+    );
+    assert!(
+        snapshot_ids(
+            &verified_snapshot_at(
+                &fixture,
+                SESSION,
+                None,
+                base + Duration::microseconds(1_500),
+            )
+            .expect("exclusive legacy expiry")
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        snapshot_ids(
+            &verified_snapshot_at(&fixture, SESSION, None, base + Duration::milliseconds(2),)
+                .expect("inclusive exact start")
+        ),
+        vec!["exact-millisecond"]
+    );
+    assert!(
+        snapshot_ids(
+            &verified_snapshot_at(&fixture, SESSION, None, base + Duration::milliseconds(3),)
+                .expect("exclusive exact expiry")
+        )
+        .is_empty()
+    );
 }
 
 #[test]

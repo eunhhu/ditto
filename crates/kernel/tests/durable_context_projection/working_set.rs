@@ -348,6 +348,11 @@ fn working_set_admit_task(
         .expect("admit working-set task node")
 }
 
+fn working_set_millisecond_now() -> chrono::DateTime<Utc> {
+    chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+        .expect("current UTC time is representable at millisecond precision")
+}
+
 fn working_set_request(request: &str) -> ditto_kernel::WorkingSetRequest {
     ditto_kernel::WorkingSetRequest {
         scope: ditto_retrieval::RetrievalScope::task(
@@ -516,7 +521,7 @@ fn lexical_working_set_rebuilds_context_and_pages_capabilities_without_model_io(
         &source.event_id,
         "durable context memory expired",
     );
-    expired.valid_until = Some(Utc::now() - Duration::hours(1));
+    expired.valid_until = Some(working_set_millisecond_now() - Duration::hours(1));
     fixture
         .kernel
         .admit_context_node(TrustedContextNodeDraft::task(SESSION_A, TASK_A, expired))
@@ -694,7 +699,7 @@ fn one_query_embedding_is_shared_without_bypassing_domain_filters() {
         .admit_context_node(TrustedContextNodeDraft::task(SESSION_A, TASK_A, disputed))
         .expect("admit disputed embedded candidate");
     let mut expired = task_user_node("context-expired", &source.event_id, "deploy service safely");
-    expired.valid_until = Some(Utc::now() - Duration::hours(2));
+    expired.valid_until = Some(working_set_millisecond_now() - Duration::hours(2));
     fixture
         .kernel
         .admit_context_node(TrustedContextNodeDraft::task(SESSION_A, TASK_A, expired))

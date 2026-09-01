@@ -28,7 +28,7 @@ use thiserror::Error;
 /// Version of the durable context-node event payload.
 pub const CONTEXT_NODE_EVENT_VERSION: u16 = 1;
 /// Version of the independently rebuildable projection schema.
-pub const CONTEXT_PROJECTION_SCHEMA_VERSION: i64 = 2;
+pub const CONTEXT_PROJECTION_SCHEMA_VERSION: i64 = 3;
 /// Fixed filename of the separate derived context cache.
 pub const CONTEXT_PROJECTION_DATABASE_FILENAME: &str = "context-projection.db";
 /// Maximum UTF-8 byte length of a durable node ID.
@@ -50,7 +50,7 @@ const SYNC_PAGE_SIZE: usize = 500;
 const ZERO_TASK_KEY: &str = "";
 const EVENT_STORE_DATABASE_FILENAME: &str = "state.db";
 
-const SCHEMA_V2: &str = r#"
+const SCHEMA_V3: &str = r#"
 CREATE TABLE projection_checkpoint (
     singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version  INTEGER NOT NULL,
@@ -64,7 +64,7 @@ CREATE TABLE projection_checkpoint (
 
 INSERT INTO projection_checkpoint (
     singleton, schema_version, through_seq, through_event_id
-) VALUES (1, 2, 0, NULL);
+) VALUES (1, 3, 0, NULL);
 
 CREATE TABLE projected_nodes (
     session_id   TEXT NOT NULL,
@@ -75,7 +75,25 @@ CREATE TABLE projected_nodes (
     node_json    TEXT NOT NULL,
     epistemic_status TEXT NOT NULL DEFAULT 'asserted',
     valid_from_millis INTEGER,
+    valid_from_submillis_nanos INTEGER,
     valid_until_millis INTEGER,
+    valid_until_submillis_nanos INTEGER,
+    CHECK (
+        (valid_from_millis IS NULL AND valid_from_submillis_nanos IS NULL)
+        OR (
+            valid_from_millis IS NOT NULL
+            AND valid_from_submillis_nanos IS NOT NULL
+            AND valid_from_submillis_nanos BETWEEN 0 AND 999999
+        )
+    ),
+    CHECK (
+        (valid_until_millis IS NULL AND valid_until_submillis_nanos IS NULL)
+        OR (
+            valid_until_millis IS NOT NULL
+            AND valid_until_submillis_nanos IS NOT NULL
+            AND valid_until_submillis_nanos BETWEEN 0 AND 999999
+        )
+    ),
     PRIMARY KEY (session_id, node_id)
 );
 
@@ -85,7 +103,8 @@ ON projected_nodes(session_id, task_id, event_seq);
 CREATE INDEX projected_nodes_active_scope
     ON projected_nodes(
         session_id, task_id, epistemic_status,
-        valid_from_millis, valid_until_millis, node_id
+        valid_from_millis, valid_from_submillis_nanos,
+        valid_until_millis, valid_until_submillis_nanos, node_id
     );
 
 CREATE TABLE supersession_edges (
@@ -372,6 +391,11 @@ pub enum ContextProjectionError {
     },
     #[error("context node {node_id} is invalid: {reason}")]
     InvalidNode { node_id: String, reason: String },
+    #[error("context node {node_id} {field} is not millisecond-canonical")]
+    NonCanonicalValidityPrecision {
+        node_id: String,
+        field: &'static str,
+    },
     #[error("{field} is {actual} bytes, exceeding the {maximum}-byte durable limit")]
     DurableBytesExceeded {
         field: &'static str,
@@ -457,6 +481,8 @@ pub struct ContextProjection {
     path: Arc<PathBuf>,
     #[cfg(test)]
     post_rebuild_snapshot_hook: Arc<Mutex<Option<PostRebuildSnapshotHook>>>,
+    #[cfg(test)]
+    post_active_snapshot_hook: Arc<Mutex<Option<PostActiveSnapshotHook>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,6 +499,8 @@ struct ProjectionVerificationState {
 
 #[cfg(test)]
 type PostRebuildSnapshotHook = Arc<dyn Fn(&Path) + Send + Sync>;
+#[cfg(test)]
+type PostActiveSnapshotHook = Box<dyn FnOnce(&Path) + Send>;
 
 impl ContextProjection {
     /// Open the fixed projection database inside a Ditto data directory.
@@ -521,6 +549,8 @@ impl ContextProjection {
             path: Arc::new(path.to_path_buf()),
             #[cfg(test)]
             post_rebuild_snapshot_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            post_active_snapshot_hook: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -892,6 +922,8 @@ impl ContextProjection {
             evaluated_at,
             &mut attempted_budget,
         )?;
+        #[cfg(test)]
+        self.run_post_active_snapshot_hook()?;
         if !self.source_verification_matches_cache()? {
             if rebuilt {
                 return Err(
@@ -906,13 +938,14 @@ impl ContextProjection {
                     ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water },
                 );
             }
-            attempted_budget = budget.clone();
             snapshot = self.capture_active_snapshot_locked(
                 session_id,
                 task_id,
                 evaluated_at,
                 &mut attempted_budget,
             )?;
+            #[cfg(test)]
+            self.run_post_active_snapshot_hook()?;
         }
         if snapshot.checkpoint.through_seq != high_water {
             return Err(ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water });
@@ -1040,6 +1073,7 @@ impl ContextProjection {
         }
         ContextNodeId::new(draft.node.id.clone())?;
         validate_node_identity_shape(&draft.node)?;
+        validate_new_validity_precision(&draft.node)?;
         let available = event_store.latest_seq()?;
         if high_water < 0 || high_water > available {
             return Err(ContextProjectionError::HighWaterAhead {
@@ -1490,6 +1524,8 @@ impl ContextProjection {
             }
         })?;
         let evaluated_at_millis = evaluated_at.timestamp_millis();
+        let evaluated_at_submillis_nanos =
+            i64::from(evaluated_at.timestamp_subsec_nanos() % 1_000_000);
         let mut statement = connection.prepare(
             r#"
             SELECT
@@ -1507,8 +1543,22 @@ impl ContextProjection {
                   OR (?2 IS NOT NULL AND n.task_id = ?2)
               )
               AND n.epistemic_status != 'disputed'
-              AND (n.valid_from_millis IS NULL OR n.valid_from_millis <= ?3)
-              AND (n.valid_until_millis IS NULL OR n.valid_until_millis > ?3)
+              AND (
+                  n.valid_from_millis IS NULL
+                  OR n.valid_from_millis < ?3
+                  OR (
+                      n.valid_from_millis = ?3
+                      AND n.valid_from_submillis_nanos <= ?4
+                  )
+              )
+              AND (
+                  n.valid_until_millis IS NULL
+                  OR n.valid_until_millis > ?3
+                  OR (
+                      n.valid_until_millis = ?3
+                      AND n.valid_until_submillis_nanos > ?4
+                  )
+              )
               AND NOT EXISTS (
                   SELECT 1
                   FROM supersession_edges AS edge
@@ -1520,8 +1570,14 @@ impl ContextProjection {
             LIMIT 10001
             "#,
         )?;
-        let mapped =
-            statement.query_map(params![session_id, task_id, evaluated_at_millis], |row| {
+        let mapped = statement.query_map(
+            params![
+                session_id,
+                task_id,
+                evaluated_at_millis,
+                evaluated_at_submillis_nanos
+            ],
+            |row| {
                 Ok(RawProjectedRow {
                     session_id: row.get(0)?,
                     task_id: row.get(1)?,
@@ -1531,7 +1587,8 @@ impl ContextProjection {
                     node_json: row.get(5)?,
                     superseded: row.get(6)?,
                 })
-            })?;
+            },
+        )?;
         let mut candidates = Vec::new();
         for raw in mapped {
             let raw = raw?;
@@ -1581,6 +1638,19 @@ impl ContextProjection {
             .lock()
             .map_err(|_| ContextProjectionError::Poisoned)?
             .clone();
+        if let Some(hook) = hook {
+            hook(self.database_path());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn run_post_active_snapshot_hook(&self) -> Result<(), ContextProjectionError> {
+        let hook = self
+            .post_active_snapshot_hook
+            .lock()
+            .map_err(|_| ContextProjectionError::Poisoned)?
+            .take();
         if let Some(hook) = hook {
             hook(self.database_path());
         }
@@ -1900,7 +1970,7 @@ fn schema_is_current(connection: &Connection) -> Result<bool, ContextProjectionE
     }
     let statements = [
         "SELECT schema_version, through_seq, through_event_id FROM projection_checkpoint LIMIT 0",
-        "SELECT session_id, task_id, node_id, event_seq, event_id, node_json, epistemic_status, valid_from_millis, valid_until_millis FROM projected_nodes LIMIT 0",
+        "SELECT session_id, task_id, node_id, event_seq, event_id, node_json, epistemic_status, valid_from_millis, valid_from_submillis_nanos, valid_until_millis, valid_until_submillis_nanos FROM projected_nodes LIMIT 0",
         "SELECT session_id, task_key, superseding_node_id, superseded_node_id, event_seq FROM supersession_edges LIMIT 0",
     ];
     Ok(statements
@@ -1917,7 +1987,7 @@ fn reset_schema(connection: &mut Connection) -> Result<(), ContextProjectionErro
         DROP TABLE IF EXISTS projection_checkpoint;
         "#,
     )?;
-    transaction.execute_batch(SCHEMA_V2)?;
+    transaction.execute_batch(SCHEMA_V3)?;
     transaction.pragma_update(None, "user_version", CONTEXT_PROJECTION_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -3025,13 +3095,25 @@ fn apply_context_event(
             reason: error.to_string(),
         }
     })?;
+    let valid_from = validated
+        .node
+        .valid_from
+        .as_ref()
+        .map(projection_timestamp_parts);
+    let valid_until = validated
+        .node
+        .valid_until
+        .as_ref()
+        .map(projection_timestamp_parts);
     transaction
         .execute(
             r#"
         INSERT INTO projected_nodes (
             session_id, task_id, node_id, event_seq, event_id, node_json,
-            epistemic_status, valid_from_millis, valid_until_millis
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            epistemic_status,
+            valid_from_millis, valid_from_submillis_nanos,
+            valid_until_millis, valid_until_submillis_nanos
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         "#,
             params![
                 scope.session_id,
@@ -3041,16 +3123,10 @@ fn apply_context_event(
                 &event.event_id,
                 node_json,
                 epistemic_status(validated.node.epistemic),
-                validated
-                    .node
-                    .valid_from
-                    .as_ref()
-                    .map(DateTime::timestamp_millis),
-                validated
-                    .node
-                    .valid_until
-                    .as_ref()
-                    .map(DateTime::timestamp_millis),
+                valid_from.map(|value| value.0),
+                valid_from.map(|value| value.1),
+                valid_until.map(|value| value.0),
+                valid_until.map(|value| value.1),
             ],
         )
         .map_err(ContextProjectionError::from)?;
@@ -3074,6 +3150,13 @@ fn apply_context_event(
             .map_err(ContextProjectionError::from)?;
     }
     Ok(())
+}
+
+fn projection_timestamp_parts(value: &DateTime<Utc>) -> (i64, i64) {
+    (
+        value.timestamp_millis(),
+        i64::from(value.timestamp_subsec_nanos() % 1_000_000),
+    )
 }
 
 fn cache_preflight_conflicts_with_event(
@@ -3232,6 +3315,21 @@ fn validate_durable_node(node: &ContextNode) -> Result<(), ContextProjectionErro
         serialized_payload.len(),
         MAX_SERIALIZED_CONTEXT_PAYLOAD_BYTES,
     )?;
+    Ok(())
+}
+
+fn validate_new_validity_precision(node: &ContextNode) -> Result<(), ContextProjectionError> {
+    for (field, value) in [
+        ("valid_from", node.valid_from.as_ref()),
+        ("valid_until", node.valid_until.as_ref()),
+    ] {
+        if value.is_some_and(|value| value.timestamp_subsec_nanos() % 1_000_000 != 0) {
+            return Err(ContextProjectionError::NonCanonicalValidityPrecision {
+                node_id: node.id.clone(),
+                field,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -3523,6 +3621,7 @@ mod tests {
     use super::*;
     use ditto_context::{ContextLens, ContextNodeKind, EpistemicStatus};
     use ditto_protocol::NewEvent;
+    use ditto_retrieval::{MAX_TOTAL_CANDIDATE_BYTES, RetrievalWorkKind};
     use serde_json::json;
 
     #[test]
@@ -3716,6 +3815,108 @@ mod tests {
             .expect("persistently corrupted row");
         assert_eq!(cached_json, "{}", "a second rebuild must not have occurred");
         assert_eq!(store.count().expect("source count"), 2);
+    }
+
+    #[test]
+    fn cache_repair_accumulates_candidate_work_across_both_snapshot_attempts() {
+        let directory = tempfile::tempdir().expect("cumulative repair budget fixture");
+        let store = EventStore::open(directory.path().join("state.db")).expect("event store");
+        let projection = ContextProjection::open_in(directory.path()).expect("projection");
+        let source = store
+            .append(NewEvent {
+                session_id: Some("session-cumulative-repair".into()),
+                task_id: None,
+                actor: EventActor::User,
+                kind: "fixture.source".into(),
+                payload: serde_json::json!({"source": true}),
+                causation_id: None,
+                correlation_id: Some("session-cumulative-repair".into()),
+                span_id: None,
+            })
+            .expect("source event");
+        let node = ContextNode {
+            id: "cumulative-repair-node".into(),
+            kind: ContextNodeKind::Claim,
+            summary: "x".repeat(16 * 1024),
+            origin: ContextOrigin::User,
+            epistemic: EpistemicStatus::Verified,
+            scope: ContextScope::Session,
+            lens: ContextLens::Task,
+            confidence: 1.0,
+            source_event_ids: vec![source.event_id.clone()],
+            supersedes: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+        };
+        let candidate_bytes = serde_json::to_string(&node).expect("candidate JSON").len();
+        let recorded = store
+            .append(NewEvent {
+                session_id: Some("session-cumulative-repair".into()),
+                task_id: None,
+                actor: EventActor::System,
+                kind: event_kind::CONTEXT_NODE_RECORDED.into(),
+                payload: serde_json::to_value(ContextNodeRecordedPayloadV1::new(node))
+                    .expect("context payload"),
+                causation_id: Some(source.event_id),
+                correlation_id: Some("session-cumulative-repair".into()),
+                span_id: None,
+            })
+            .expect("context event");
+        projection.rebuild(&store).expect("source-verified rebuild");
+
+        *projection
+            .post_active_snapshot_hook
+            .lock()
+            .expect("active snapshot hook") = Some(Box::new(|path| {
+            let connection = Connection::open(path).expect("cache drift connection");
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO projected_nodes (
+                        session_id, task_id, node_id, event_seq, event_id, node_json
+                    ) VALUES (?1, NULL, ?2, ?3, ?4, ?5)
+                    "#,
+                    params![
+                        "cache-drift-session",
+                        "cache-drift-node",
+                        9_999_999_i64,
+                        "cache-drift-event",
+                        "{}"
+                    ],
+                )
+                .expect("change SQLite data version after first snapshot");
+        }));
+        let retry_headroom = candidate_bytes + candidate_bytes / 2;
+        let mut budget = RetrievalWorkBudget::new();
+        budget
+            .charge_candidate_bytes(MAX_TOTAL_CANDIDATE_BYTES - retry_headroom)
+            .expect("precharge within candidate budget");
+
+        let error = projection
+            .synchronize_and_verified_snapshot_through_at(
+                &store,
+                recorded.seq,
+                "session-cumulative-repair",
+                None,
+                Utc::now(),
+                &mut budget,
+            )
+            .expect_err("combined first and repaired snapshots must exceed the budget");
+        assert!(matches!(
+            error,
+            ContextProjectionError::Retrieval(RetrievalError::WorkBudgetExceeded {
+                kind: RetrievalWorkKind::CandidateBytes,
+                attempted,
+                maximum: MAX_TOTAL_CANDIDATE_BYTES,
+            }) if attempted > MAX_TOTAL_CANDIDATE_BYTES
+        ));
+        assert_eq!(
+            projection
+                .verification_metrics()
+                .expect("repair metrics")
+                .cache_repairs,
+            1
+        );
     }
 
     #[cfg(unix)]
