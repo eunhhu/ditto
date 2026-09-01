@@ -1525,8 +1525,8 @@ mod tests {
         epoch
             .page_in_invocable(&manifest, &schema, deriver.revision.clone())
             .expect("page revision");
-        let call =
-            UntrustedToolCall::new("deep-normalized", "artifact.read", raw).expect("raw call");
+        let call = UntrustedToolCall::new("deep-normalized", "artifact.read", raw.clone())
+            .expect("raw call");
         assert!(matches!(
             InvocationCompiler::compile(
                 epoch.invocable_binding("artifact.read").expect("binding"),
@@ -1537,6 +1537,23 @@ mod tests {
                 stage: super::ArgumentStage::Normalized,
                 source: crate::InvocationSchemaError::InstanceDepthExceeded {
                     maximum: crate::MAX_INVOCATION_VALUE_DEPTH
+                }
+            })
+        ));
+
+        deriver.normalized = Value::Array(vec![Value::Null; crate::MAX_INVOCATION_VALUE_WORK]);
+        let call =
+            UntrustedToolCall::new("wide-normalized", "artifact.read", raw).expect("raw call");
+        assert!(matches!(
+            InvocationCompiler::compile(
+                epoch.invocable_binding("artifact.read").expect("binding"),
+                call,
+                &deriver
+            ),
+            Err(InvocationError::ArgumentsSchema {
+                stage: super::ArgumentStage::Normalized,
+                source: crate::InvocationSchemaError::InstanceWorkExceeded {
+                    maximum: crate::MAX_INVOCATION_VALUE_WORK
                 }
             })
         ));
