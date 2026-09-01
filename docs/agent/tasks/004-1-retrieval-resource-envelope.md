@@ -2,7 +2,9 @@
 
 ## Status
 
-Active under [ADR 0011](../../adr/0011-retrieval-resource-envelope.md).
+Completed under [ADR 0011](../../adr/0011-retrieval-resource-envelope.md).
+The replayable audit record is
+[Task 004.1 verification evidence](004-1-evidence.md).
 
 ## Objective
 

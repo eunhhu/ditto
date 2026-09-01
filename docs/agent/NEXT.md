@@ -3,17 +3,21 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
-## Active — 004.1 Retrieval resource envelope and lifecycle
+## Active
 
-Contract: [tasks/004-1-retrieval-resource-envelope.md](tasks/004-1-retrieval-resource-envelope.md)
-
-Bound the composed memory, lexical, and provider work of Task 004 retrieval;
-separate verified snapshot authority in the type system; and move steady-state
-working-set verification from full session replay to checkpoint deltas. Do not
-start canonical invocation or an effectful executor in this slice.
+No implementation slice is active. The next priority is canonical capability
+invocation and capability-derived effect profiles. Define its task contract and
+amend the governing ADR before changing public invocation, effect, or lease
+semantics.
 
 ## Completed
 
+- [`004.1 Retrieval resource envelope and lifecycle`](tasks/004-1-retrieval-resource-envelope.md):
+  one fixed request-local budget across query, context, and capability work;
+  streaming top-K ranking; active lifecycle capacity; typed verified snapshots;
+  startup/recovery full replay with steady-state delta verification; canonical
+  scope and search validation before provider work; private SQLite paths; and a
+  tracked CI canary plus replayable evidence manifest.
 - [`004 Durable context projection and shared retrieval query`](tasks/004-durable-context-projection.md):
   canonical system-authored session/task context events, a separately stored
   rebuildable projection, kernel-only trusted admission, one bounded V2 query

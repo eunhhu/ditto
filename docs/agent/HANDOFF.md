@@ -9,20 +9,24 @@
   is not a public route.
 - Streaming design: subscribe-first, high-water-bounded, paginated durable
   replay with sequence-gap and lag recovery.
-- Capability state: file-backed manifests, validated complements, strict runtime
-  hard filters, append-only bounded execution epochs, and validated
-  provider-neutral level-2 input/output schema records. Recognized schema
-  keywords are checked recursively against JSON Schema Draft 2020-12 while
-  unknown extension keywords remain opaque.
-- Context state: typed provenance graph, deterministic compiler, shared bounded
-  V2 task query, and a standalone rebuildable SQLite projection of canonical
-  `context.node.recorded` events. Pinning and policy-required inclusion remain
-  trusted ephemeral directives; token cost is derived locally. A compact
-  model-facing capsule projects ordered selected nodes without exposing the
-  compiler receipt, lens, or supersession metadata; its exact serialized fields
-  are charged locally and revalidated for trust, time, and the absolute budget
-  at the model boundary. V2 embedded ordering is carried only by an opaque,
-  non-serializable context-owned ranking and is revalidated after compilation.
+- Capability state: file-backed manifests with default-active
+  active/retired/quarantined lifecycle, active-only bounded retrieval,
+  validated complements, strict runtime hard filters, append-only bounded
+  execution epochs, and validated provider-neutral level-2 input/output schema
+  records. Recognized schema keywords are checked recursively against JSON
+  Schema Draft 2020-12 while unknown extension keywords remain opaque.
+- Context state: typed provenance graph, deterministic compiler, one cumulative
+  V2 retrieval-work budget, and a standalone rebuildable SQLite projection of
+  canonical `context.node.recorded` events. A typed source-verified snapshot is
+  distinct from a derived cache snapshot; open/recovery performs full replay
+  and normal retrieval verifies checkpoint deltas. Pinning and policy-required
+  inclusion remain trusted ephemeral directives; token cost is derived locally.
+  A compact model-facing capsule projects ordered selected nodes without
+  exposing the compiler receipt, lens, or supersession metadata; its exact
+  serialized fields are charged locally and revalidated for trust, time, and
+  the absolute budget at the model boundary. V2 embedded ordering is carried
+  only by an opaque, non-serializable context-owned ranking and is revalidated
+  after compilation.
 - Policy state: leases authorize canonical invocations against orthogonal effect
   dimensions. No effectful executor is connected yet; the sole executable
   builtin is the structurally bounded, lease-free `artifact.read` exception from
@@ -47,6 +51,51 @@
 
 ## Latest verified slice
 
+- Task 004.1 is complete under ADR 0011. The tracked
+  [verification evidence](tasks/004-1-evidence.md) maps every exit criterion to
+  implementation and regression tests. The reviewed implementation is commit
+  `bf58d7a3a001c0505460919a61fa6cc722dc5269`, tree
+  `3c38444eaad0e5065888edcea4e5dc4f6430174a`.
+- One request-local `RetrievalWorkBudget` is shared by query construction,
+  verified context retrieval/ranking, and capability ranking. Version 1 fixes
+  cumulative candidate, document, and lexical work at 64 MiB each, provider
+  input at 32 MiB, and provider calls at 513 including the query. Checked
+  N/N+1 failures occur before the over-budget allocation, tokenization, or
+  provider call. Context and capability documents are processed one at a time
+  and only requested top-K values remain retained.
+- V2 capacity now counts lifecycle-active values. Context scope, supersession,
+  disputed status, validity start, and expiry are applied in SQLite before the
+  10,000-row guard. Capability manifests default to active and retired or
+  quarantined manifests neither count nor page into roots, complements, or
+  execution cards. Hard runtime and positive lexical filters still precede
+  embedding work.
+- Projection schema 2 stores active-filter fields. Kernel open/recovery performs
+  one canonical rebuild and records a non-durable process-local verification
+  generation. Unchanged reads validate the checkpoint anchor and SQLite data
+  version without full replay; later events are canonical delta-validated.
+  External cache drift causes at most one source rebuild/recheck and never
+  authorizes a result. Only `VerifiedContextSnapshot`, not
+  `DerivedContextSnapshot`, can enter the kernel ranking path. Verification
+  metrics expose full replays, delta synchronizations, fast snapshots, and
+  cache repairs for regression evidence.
+- Working-set scope uses bounded canonical `SessionId`, `TaskId`, and
+  `RetrievalScope` values. New durable context admission additionally requires a
+  canonical exact `ContextNodeId`. `SearchContext` bounds and canonicalizes its
+  collections, requires complete runtime fields, and rejects an unavailable
+  preferred placement before the shared query embedding can call a provider.
+- Event and projection SQLite families reject symlink database targets and
+  symlink parents, require current-user ownership on Unix, set data directories
+  to `0700`, and set present database/WAL/SHM members to `0600`.
+  `scripts/agent-canary.sh` is tracked and runs first in the canonical gate; it
+  rejects tracked local-state/build/database artifacts, developer absolute
+  paths, and credential-shaped content.
+- The canonical `rtk ./scripts/agent-check.sh` gate passed the canary,
+  formatting, strict all-target/all-feature Clippy, and 326 tests across 35
+  suites. The all-feature workspace test inside that gate also passed 326 tests;
+  focused runs passed 14 retrieval, 27 capability, 51 context, 36 projection, 8
+  event-store, and 15 durable-kernel tests. `rtk cargo +1.88.0 check --locked
+  --workspace --all-targets` and `rtk git diff --check` passed. No model,
+  network, credential, or billable embedding operation ran.
 - Task 004 is complete under ADR 0010. The immutable event spine is the sole
   durable authority for version-1, system-authored `context.node.recorded`
   events. `ditto-context-projection` owns a separate WAL SQLite cache with
@@ -61,15 +110,15 @@
   assertions require user-authored evidence and model-origin assertions are
   rejected. The kernel derives causation from the greatest durable source
   sequence, independent of source-list order.
-- `ditto-retrieval` owns `TaskSignatureV2` and version-1 `TaskQuery`, bounded
-  canonical normalization, optional injected embeddings, descriptor continuity,
-  and typed fail-closed provider errors. Context summaries accept at most 65,000
-  bytes and the fixed `id=...\nkind=...\nsummary=...` document is bounded at
-  65,287 bytes. Context and capability V2 scans count scope/catalogue candidates
-  before inactive, supersession, lexical, or hard filters; source candidate
-  10,001 fails. Context results and capability roots accept 1 through 256, and
-  expanded epoch cards accept 1 through 512. Zero and N+1 are rejected without
-  clamping or a partial value.
+- `ditto-retrieval` owns `TaskSignatureV2`, version-1 `TaskQuery`, canonical
+  retrieval scope/identity types, and the fixed cumulative work budget. It
+  provides bounded canonical normalization, optional injected embeddings,
+  descriptor continuity, and typed fail-closed provider errors. Context
+  summaries accept at most 65,000 bytes and the fixed
+  `id=...\nkind=...\nsummary=...` document is bounded at 65,287 bytes. Active
+  context and capability candidate 10,001 fails. Context results and capability
+  roots accept 1 through 256, and expanded epoch cards accept 1 through 512.
+  Zero and N+1 are rejected without clamping or a partial value.
 - Historical five-field context signatures, compilers, and raw-string
   capability searches remain separate V1 paths with their existing behavior.
   The explicit fallible V1-to-V2 adapter supplies `resources = []` and applies
@@ -170,7 +219,7 @@
   continuation;
 - additional providers, OpenAI model profiles, reasoning replay, remote cancel,
   and explicit prompt-cache breakpoints;
-- capability worker protocol and lifecycle;
+- capability worker protocol and canonical invocation lifecycle;
 - device registry, local process runner, SSH transport, and secrets;
 - a production embedding worker/provider and persisted embedding cache;
 - completion verifiers and improvement compiler;

@@ -129,6 +129,11 @@ committing `.omo` or `.surf` contents.
   infrastructure and credential boundaries; both remain deferred.
 - Silently canonicalizing durable IDs would make two caller identities alias.
   New ingress rejects non-canonical forms instead.
+- Wall-clock, p95, and process-wide RSS thresholds are host- and scheduler-
+  dependent correctness gates. CI instead exercises the maximum-size lazy
+  generator against fixed checked work counters and exposes replay/delta/cache
+  metrics. Non-gating performance measurements may be added once a stable
+  benchmark host exists; they cannot replace the deterministic envelope.
 
 ## Compatibility and migration
 
