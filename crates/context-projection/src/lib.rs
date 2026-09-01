@@ -10,11 +10,17 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use ditto_context::{ContextNode, ContextOrigin, ContextScope, ContextValidationError};
+use chrono::{DateTime, Utc};
+use ditto_context::{
+    ContextNode, ContextOrigin, ContextScope, ContextValidationError, EpistemicStatus,
+};
 use ditto_event_store::{EventStore, EventStoreError};
 use ditto_protocol::{EventActor, EventQuery, EventRecord, event_kind};
-use ditto_retrieval::{CandidateCount, MAX_CANDIDATE_COUNT, RetrievalError};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use ditto_retrieval::{
+    CandidateCount, ContextNodeId, MAX_CANDIDATE_COUNT, RetrievalError, RetrievalWorkBudget,
+    SessionId, TaskId,
+};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -22,7 +28,7 @@ use thiserror::Error;
 /// Version of the durable context-node event payload.
 pub const CONTEXT_NODE_EVENT_VERSION: u16 = 1;
 /// Version of the independently rebuildable projection schema.
-pub const CONTEXT_PROJECTION_SCHEMA_VERSION: i64 = 1;
+pub const CONTEXT_PROJECTION_SCHEMA_VERSION: i64 = 2;
 /// Fixed filename of the separate derived context cache.
 pub const CONTEXT_PROJECTION_DATABASE_FILENAME: &str = "context-projection.db";
 /// Maximum UTF-8 byte length of a durable node ID.
@@ -44,7 +50,7 @@ const SYNC_PAGE_SIZE: usize = 500;
 const ZERO_TASK_KEY: &str = "";
 const EVENT_STORE_DATABASE_FILENAME: &str = "state.db";
 
-const SCHEMA_V1: &str = r#"
+const SCHEMA_V2: &str = r#"
 CREATE TABLE projection_checkpoint (
     singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version  INTEGER NOT NULL,
@@ -58,7 +64,7 @@ CREATE TABLE projection_checkpoint (
 
 INSERT INTO projection_checkpoint (
     singleton, schema_version, through_seq, through_event_id
-) VALUES (1, 1, 0, NULL);
+) VALUES (1, 2, 0, NULL);
 
 CREATE TABLE projected_nodes (
     session_id   TEXT NOT NULL,
@@ -67,11 +73,20 @@ CREATE TABLE projected_nodes (
     event_seq    INTEGER NOT NULL UNIQUE,
     event_id     TEXT NOT NULL UNIQUE,
     node_json    TEXT NOT NULL,
+    epistemic_status TEXT NOT NULL DEFAULT 'asserted',
+    valid_from_millis INTEGER,
+    valid_until_millis INTEGER,
     PRIMARY KEY (session_id, node_id)
 );
 
 CREATE INDEX projected_nodes_scope_seq
-    ON projected_nodes(session_id, task_id, event_seq);
+ON projected_nodes(session_id, task_id, event_seq);
+
+CREATE INDEX projected_nodes_active_scope
+    ON projected_nodes(
+        session_id, task_id, epistemic_status,
+        valid_from_millis, valid_until_millis, node_id
+    );
 
 CREATE TABLE supersession_edges (
     session_id          TEXT NOT NULL,
@@ -236,13 +251,13 @@ pub struct CommittedContextIdentity {
 /// admission/snapshot gate. Embedding work can safely happen after that gate is
 /// released.
 #[derive(Debug, Clone)]
-pub struct ContextProjectionSnapshot {
+pub struct DerivedContextSnapshot {
     checkpoint: ProjectionCheckpoint,
     scanned_rows: usize,
     candidates: Vec<ContextNode>,
 }
 
-impl ContextProjectionSnapshot {
+impl DerivedContextSnapshot {
     pub fn checkpoint(&self) -> &ProjectionCheckpoint {
         &self.checkpoint
     }
@@ -263,12 +278,43 @@ impl ContextProjectionSnapshot {
     pub fn candidates(&self) -> &[ContextNode] {
         &self.candidates
     }
+}
 
-    /// Consume the detached snapshot and transfer its candidates without
-    /// cloning their summaries or provenance lists.
-    pub fn into_candidates(self) -> Vec<ContextNode> {
-        self.candidates
+/// Source-verified active context rows safe to transfer into authenticated
+/// ranking. Unlike [`DerivedContextSnapshot`], this type can only be returned
+/// after process-local source verification or bounded delta verification.
+#[derive(Debug, Clone)]
+pub struct VerifiedContextSnapshot {
+    snapshot: DerivedContextSnapshot,
+}
+
+impl VerifiedContextSnapshot {
+    pub fn checkpoint(&self) -> &ProjectionCheckpoint {
+        self.snapshot.checkpoint()
     }
+
+    pub const fn scanned_rows(&self) -> usize {
+        self.snapshot.scanned_rows()
+    }
+
+    pub fn candidates(&self) -> &[ContextNode] {
+        self.snapshot.candidates()
+    }
+
+    /// Transfer only source-verified candidates into ranking without cloning.
+    pub fn into_candidates(self) -> Vec<ContextNode> {
+        self.snapshot.candidates
+    }
+}
+
+/// Inspectable source-verification work counters for steady-state regression
+/// tests and local operational evidence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProjectionVerificationMetrics {
+    pub full_replays: u64,
+    pub delta_synchronizations: u64,
+    pub fast_snapshots: u64,
+    pub cache_repairs: u64,
 }
 
 /// Typed projection, durable-admission, and V2 scan failures.
@@ -407,9 +453,22 @@ pub enum ContextProjectionError {
 pub struct ContextProjection {
     connection: Arc<Mutex<Connection>>,
     sync_gate: Arc<Mutex<()>>,
+    verification: Arc<Mutex<ProjectionVerificationState>>,
     path: Arc<PathBuf>,
     #[cfg(test)]
     post_rebuild_snapshot_hook: Arc<Mutex<Option<PostRebuildSnapshotHook>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceVerification {
+    checkpoint: ProjectionCheckpoint,
+    sqlite_data_version: i64,
+}
+
+#[derive(Debug, Default)]
+struct ProjectionVerificationState {
+    source: Option<SourceVerification>,
+    metrics: ProjectionVerificationMetrics,
 }
 
 #[cfg(test)]
@@ -434,13 +493,12 @@ impl ContextProjection {
         {
             return Err(ContextProjectionError::SourceDatabaseCollision);
         }
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)?;
-        }
+        let sqlite_path = prepare_private_sqlite_path(path)?;
 
-        let mut connection = Connection::open(path)?;
+        let mut connection = Connection::open_with_flags(
+            &sqlite_path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         let contains_event_spine: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events')",
             [],
@@ -454,10 +512,12 @@ impl ContextProjection {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         ensure_schema(&mut connection)?;
+        enforce_private_sqlite_files(path)?;
 
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             sync_gate: Arc::new(Mutex::new(())),
+            verification: Arc::new(Mutex::new(ProjectionVerificationState::default())),
             path: Arc::new(path.to_path_buf()),
             #[cfg(test)]
             post_rebuild_snapshot_hook: Arc::new(Mutex::new(None)),
@@ -478,6 +538,158 @@ impl ContextProjection {
         })
     }
 
+    pub fn verification_metrics(
+        &self,
+    ) -> Result<ProjectionVerificationMetrics, ContextProjectionError> {
+        Ok(self.verification_state()?.metrics)
+    }
+
+    fn has_source_verification(&self) -> Result<bool, ContextProjectionError> {
+        Ok(self.verification_state()?.source.is_some())
+    }
+
+    fn source_verification_checkpoint(
+        &self,
+    ) -> Result<Option<ProjectionCheckpoint>, ContextProjectionError> {
+        Ok(self
+            .verification_state()?
+            .source
+            .as_ref()
+            .map(|verified| verified.checkpoint.clone()))
+    }
+
+    fn sqlite_data_version(&self) -> Result<i64, ContextProjectionError> {
+        self.connection()?
+            .pragma_query_value(None, "data_version", |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    fn source_verification_matches_cache(&self) -> Result<bool, ContextProjectionError> {
+        let (checkpoint, sqlite_data_version) = {
+            let connection = self.connection()?;
+            (
+                read_checkpoint(&connection)?,
+                connection.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0))?,
+            )
+        };
+        let state = self.verification_state()?;
+        Ok(match (&state.source, checkpoint) {
+            (Some(source), Some(checkpoint)) => {
+                source.checkpoint == checkpoint && source.sqlite_data_version == sqlite_data_version
+            }
+            _ => false,
+        })
+    }
+
+    fn record_source_verification(
+        &self,
+        checkpoint: &ProjectionCheckpoint,
+        full_replay: bool,
+        cache_repair: bool,
+    ) -> Result<(), ContextProjectionError> {
+        let sqlite_data_version = self.sqlite_data_version()?;
+        let mut state = self.verification_state()?;
+        state.source = Some(SourceVerification {
+            checkpoint: checkpoint.clone(),
+            sqlite_data_version,
+        });
+        if full_replay {
+            state.metrics.full_replays = state.metrics.full_replays.saturating_add(1);
+        }
+        if cache_repair {
+            state.metrics.cache_repairs = state.metrics.cache_repairs.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn record_delta_verification(
+        &self,
+        checkpoint: &ProjectionCheckpoint,
+        advanced: bool,
+    ) -> Result<(), ContextProjectionError> {
+        let sqlite_data_version = self.sqlite_data_version()?;
+        let mut state = self.verification_state()?;
+        state.source = Some(SourceVerification {
+            checkpoint: checkpoint.clone(),
+            sqlite_data_version,
+        });
+        if advanced {
+            state.metrics.delta_synchronizations =
+                state.metrics.delta_synchronizations.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn increment_fast_snapshot(&self) -> Result<(), ContextProjectionError> {
+        let mut state = self.verification_state()?;
+        state.metrics.fast_snapshots = state.metrics.fast_snapshots.saturating_add(1);
+        Ok(())
+    }
+
+    fn preserve_source_verification_after_sync(
+        &self,
+        synchronized: &ProjectionSync,
+        source_verified: bool,
+        before: Option<&ProjectionCheckpoint>,
+        cache_started_at_zero: bool,
+    ) -> Result<(), ContextProjectionError> {
+        if synchronized.rebuilt {
+            return self.record_source_verification(
+                &synchronized.checkpoint,
+                true,
+                source_verified,
+            );
+        }
+        if cache_started_at_zero && !source_verified {
+            return self.record_source_verification(&synchronized.checkpoint, true, false);
+        }
+        if source_verified {
+            let advanced = before.is_none_or(|checkpoint| {
+                checkpoint.through_seq < synchronized.checkpoint.through_seq
+            });
+            self.record_delta_verification(&synchronized.checkpoint, advanced)?;
+        }
+        Ok(())
+    }
+
+    fn snapshot_sync_locked(
+        &self,
+        event_store: &EventStore,
+        high_water: i64,
+    ) -> Result<ProjectionSync, ContextProjectionError> {
+        match self.synchronize_through_locked_internal(event_store, high_water, false) {
+            Ok(synchronized) => Ok(synchronized),
+            Err(SynchronizeThroughError::Public(error)) => Err(error),
+            Err(SynchronizeThroughError::PersistentCacheDivergence { .. }) => {
+                Err(ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water })
+            }
+        }
+    }
+
+    fn rebuild_verified_through_locked(
+        &self,
+        event_store: &EventStore,
+        high_water: i64,
+        cache_repair: bool,
+    ) -> Result<ProjectionSync, ContextProjectionError> {
+        {
+            let mut connection = self.connection()?;
+            reset_schema(&mut connection)?;
+        }
+        let synchronized =
+            match self.synchronize_through_locked_internal(event_store, high_water, true) {
+                Ok(synchronized) => synchronized,
+                Err(SynchronizeThroughError::Public(error)) => return Err(error),
+                Err(SynchronizeThroughError::PersistentCacheDivergence { .. }) => {
+                    return Err(
+                        ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water },
+                    );
+                }
+            };
+        self.record_source_verification(&synchronized.checkpoint, true, cache_repair)?;
+        Ok(synchronized)
+    }
+
     /// Capture the event-spine high-water once and synchronize only through
     /// that stable cutoff.
     pub fn synchronize(
@@ -486,7 +698,17 @@ impl ContextProjection {
     ) -> Result<ProjectionSync, ContextProjectionError> {
         let _gate = self.sync_gate()?;
         let high_water = event_store.latest_seq()?;
-        self.synchronize_through_locked(event_store, high_water, false)
+        let source_verified = self.source_verification_matches_cache()?;
+        let before = self.source_verification_checkpoint()?;
+        let cache_started_at_zero = self.checkpoint()?.through_seq == 0;
+        let synchronized = self.synchronize_through_locked(event_store, high_water, false)?;
+        self.preserve_source_verification_after_sync(
+            &synchronized,
+            source_verified,
+            before.as_ref(),
+            cache_started_at_zero,
+        )?;
+        Ok(synchronized)
     }
 
     /// Synchronize through a caller-captured event-spine high-water.
@@ -496,7 +718,17 @@ impl ContextProjection {
         high_water: i64,
     ) -> Result<ProjectionSync, ContextProjectionError> {
         let _gate = self.sync_gate()?;
-        self.synchronize_through_locked(event_store, high_water, false)
+        let source_verified = self.source_verification_matches_cache()?;
+        let before = self.source_verification_checkpoint()?;
+        let cache_started_at_zero = self.checkpoint()?.through_seq == 0;
+        let synchronized = self.synchronize_through_locked(event_store, high_water, false)?;
+        self.preserve_source_verification_after_sync(
+            &synchronized,
+            source_verified,
+            before.as_ref(),
+            cache_started_at_zero,
+        )?;
+        Ok(synchronized)
     }
 
     /// Synchronize through one exact canonical event. Both its sequence and
@@ -540,11 +772,7 @@ impl ContextProjection {
     ) -> Result<ProjectionSync, ContextProjectionError> {
         let _gate = self.sync_gate()?;
         let high_water = event_store.latest_seq()?;
-        {
-            let mut connection = self.connection()?;
-            reset_schema(&mut connection)?;
-        }
-        self.synchronize_through_locked(event_store, high_water, true)
+        self.rebuild_verified_through_locked(event_store, high_water, false)
     }
 
     /// Synchronize and copy one immutable derived query scope under the
@@ -557,7 +785,7 @@ impl ContextProjection {
         event_store: &EventStore,
         session_id: &str,
         task_id: Option<&str>,
-    ) -> Result<ContextProjectionSnapshot, ContextProjectionError> {
+    ) -> Result<DerivedContextSnapshot, ContextProjectionError> {
         let _gate = self.sync_gate()?;
         let high_water = event_store.latest_seq()?;
         self.synchronize_through_locked(event_store, high_water, false)?;
@@ -578,7 +806,29 @@ impl ContextProjection {
         high_water: i64,
         session_id: &str,
         task_id: Option<&str>,
-    ) -> Result<ContextProjectionSnapshot, ContextProjectionError> {
+    ) -> Result<VerifiedContextSnapshot, ContextProjectionError> {
+        let mut budget = RetrievalWorkBudget::new();
+        self.synchronize_and_verified_snapshot_through_at(
+            event_store,
+            high_water,
+            session_id,
+            task_id,
+            Utc::now(),
+            &mut budget,
+        )
+    }
+
+    /// Return lifecycle-active rows through a source-verified generation while
+    /// charging candidate bytes to the joint working-set envelope.
+    pub fn synchronize_and_verified_snapshot_through_at(
+        &self,
+        event_store: &EventStore,
+        high_water: i64,
+        session_id: &str,
+        task_id: Option<&str>,
+        evaluated_at: DateTime<Utc>,
+        budget: &mut RetrievalWorkBudget,
+    ) -> Result<VerifiedContextSnapshot, ContextProjectionError> {
         let _gate = self.sync_gate()?;
         validate_query_scope(session_id, task_id)?;
         let available = event_store.latest_seq()?;
@@ -589,57 +839,135 @@ impl ContextProjection {
             });
         }
 
-        let synchronized =
-            match self.synchronize_through_locked_internal(event_store, high_water, false) {
-                Ok(synchronized) => synchronized,
-                Err(SynchronizeThroughError::Public(error)) => return Err(error),
-                Err(SynchronizeThroughError::PersistentCacheDivergence { .. }) => {
-                    return Err(
-                        ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water },
-                    );
-                }
-            };
+        let had_source_verification = self.has_source_verification()?;
+        let mut rebuilt = false;
+        let source_checkpoint = self.source_verification_checkpoint()?;
+        let cache_checkpoint = self.checkpoint()?;
+        if self.source_verification_matches_cache()? {
+            let before = source_checkpoint;
+            let synchronized = self.snapshot_sync_locked(event_store, high_water)?;
+            if synchronized.rebuilt {
+                self.record_source_verification(&synchronized.checkpoint, true, true)?;
+                rebuilt = true;
+            } else {
+                let advanced = before
+                    .as_ref()
+                    .is_none_or(|checkpoint| checkpoint.through_seq < high_water);
+                self.record_delta_verification(&synchronized.checkpoint, advanced)?;
+            }
+        } else if source_checkpoint.as_ref() == Some(&cache_checkpoint) {
+            // Preserve canonical delta failure precedence before repairing an
+            // externally changed cache generation.
+            let synchronized = self.snapshot_sync_locked(event_store, high_water)?;
+            if synchronized.rebuilt {
+                self.record_source_verification(&synchronized.checkpoint, true, true)?;
+            } else {
+                self.rebuild_verified_through_locked(event_store, high_water, true)?;
+            }
+            rebuilt = true;
+        } else {
+            self.rebuild_verified_through_locked(event_store, high_water, had_source_verification)?;
+            rebuilt = true;
+        }
         #[cfg(test)]
-        if synchronized.rebuilt {
+        if rebuilt {
             self.run_post_rebuild_snapshot_hook()?;
         }
-        let canonical =
-            canonical_scope_snapshot_view(event_store, high_water, session_id, task_id)?;
-        if let Some(snapshot) = self.verified_snapshot_attempt(
-            &canonical,
-            &synchronized.checkpoint,
-            session_id,
-            task_id,
-        )? {
-            return Ok(snapshot);
-        }
-
-        if synchronized.rebuilt {
-            return Err(ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water });
-        }
-
-        {
-            let mut connection = self.connection()?;
-            reset_schema(&mut connection)?;
-        }
-        let rebuilt = match self.synchronize_through_locked_internal(event_store, high_water, true)
-        {
-            Ok(rebuilt) => rebuilt,
-            Err(SynchronizeThroughError::Public(error)) => return Err(error),
-            Err(SynchronizeThroughError::PersistentCacheDivergence { .. }) => {
+        if !self.source_verification_matches_cache()? {
+            if rebuilt {
                 return Err(
                     ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water },
                 );
             }
-        };
-        #[cfg(test)]
-        self.run_post_rebuild_snapshot_hook()?;
-        if let Some(snapshot) =
-            self.verified_snapshot_attempt(&canonical, &rebuilt.checkpoint, session_id, task_id)?
-        {
-            return Ok(snapshot);
+            self.rebuild_verified_through_locked(event_store, high_water, true)?;
+            rebuilt = true;
+            #[cfg(test)]
+            self.run_post_rebuild_snapshot_hook()?;
         }
 
+        let mut attempted_budget = budget.clone();
+        let mut snapshot = self.capture_active_snapshot_locked(
+            session_id,
+            task_id,
+            evaluated_at,
+            &mut attempted_budget,
+        )?;
+        if !self.source_verification_matches_cache()? {
+            if rebuilt {
+                return Err(
+                    ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water },
+                );
+            }
+            self.rebuild_verified_through_locked(event_store, high_water, true)?;
+            #[cfg(test)]
+            self.run_post_rebuild_snapshot_hook()?;
+            if !self.source_verification_matches_cache()? {
+                return Err(
+                    ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water },
+                );
+            }
+            attempted_budget = budget.clone();
+            snapshot = self.capture_active_snapshot_locked(
+                session_id,
+                task_id,
+                evaluated_at,
+                &mut attempted_budget,
+            )?;
+        }
+        if snapshot.checkpoint.through_seq != high_water {
+            return Err(ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water });
+        }
+
+        *budget = attempted_budget;
+        self.increment_fast_snapshot()?;
+        Ok(VerifiedContextSnapshot { snapshot })
+    }
+
+    /// Explicitly compare an entire selected scope with canonical history.
+    /// Normal working-set retrieval never calls this O(session-history) audit.
+    pub fn audit_source_consistency_through(
+        &self,
+        event_store: &EventStore,
+        high_water: i64,
+        session_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<ProjectionCheckpoint, ContextProjectionError> {
+        let _gate = self.sync_gate()?;
+        validate_query_scope(session_id, task_id)?;
+        let available = event_store.latest_seq()?;
+        if high_water < 0 || high_water > available {
+            return Err(ContextProjectionError::HighWaterAhead {
+                requested: high_water,
+                available,
+            });
+        }
+        let synchronized = self.snapshot_sync_locked(event_store, high_water)?;
+        let canonical =
+            canonical_scope_snapshot_view(event_store, high_water, session_id, task_id)?;
+        if self
+            .verified_snapshot_attempt(&canonical, &synchronized.checkpoint, session_id, task_id)?
+            .is_some()
+        {
+            if synchronized.rebuilt {
+                self.record_source_verification(&synchronized.checkpoint, true, true)?;
+            } else {
+                self.record_delta_verification(&synchronized.checkpoint, false)?;
+            }
+            return Ok(synchronized.checkpoint);
+        }
+        if synchronized.rebuilt {
+            return Err(ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water });
+        }
+
+        let rebuilt = self.rebuild_verified_through_locked(event_store, high_water, true)?;
+        #[cfg(test)]
+        self.run_post_rebuild_snapshot_hook()?;
+        if self
+            .verified_snapshot_attempt(&canonical, &rebuilt.checkpoint, session_id, task_id)?
+            .is_some()
+        {
+            return Ok(rebuilt.checkpoint);
+        }
         Err(ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water })
     }
 
@@ -653,7 +981,7 @@ impl ContextProjection {
         &self,
         session_id: &str,
         task_id: Option<&str>,
-    ) -> Result<ContextProjectionSnapshot, ContextProjectionError> {
+    ) -> Result<DerivedContextSnapshot, ContextProjectionError> {
         let _gate = self.sync_gate()?;
         self.capture_snapshot_locked(session_id, task_id)
     }
@@ -706,6 +1034,11 @@ impl ContextProjection {
         draft: &ContextNodeDraft,
     ) -> Result<ValidatedContextNodeDraft, ContextProjectionError> {
         let _gate = self.sync_gate()?;
+        SessionId::new(draft.session_id.clone())?;
+        if let Some(task_id) = &draft.task_id {
+            TaskId::new(task_id.clone())?;
+        }
+        ContextNodeId::new(draft.node.id.clone())?;
         validate_node_identity_shape(&draft.node)?;
         let available = event_store.latest_seq()?;
         if high_water < 0 || high_water > available {
@@ -1074,7 +1407,7 @@ impl ContextProjection {
         &self,
         session_id: &str,
         task_id: Option<&str>,
-    ) -> Result<ContextProjectionSnapshot, ContextProjectionError> {
+    ) -> Result<DerivedContextSnapshot, ContextProjectionError> {
         validate_query_scope(session_id, task_id)?;
         let connection = self.connection()?;
         let checkpoint = read_checkpoint(&connection)?.ok_or_else(|| {
@@ -1134,7 +1467,87 @@ impl ContextProjection {
             .filter_map(|row| (!row.superseded).then_some(row.node))
             .collect();
 
-        Ok(ContextProjectionSnapshot {
+        Ok(DerivedContextSnapshot {
+            checkpoint,
+            scanned_rows,
+            candidates,
+        })
+    }
+
+    fn capture_active_snapshot_locked(
+        &self,
+        session_id: &str,
+        task_id: Option<&str>,
+        evaluated_at: DateTime<Utc>,
+        budget: &mut RetrievalWorkBudget,
+    ) -> Result<DerivedContextSnapshot, ContextProjectionError> {
+        validate_query_scope(session_id, task_id)?;
+        let connection = self.connection()?;
+        let checkpoint = read_checkpoint(&connection)?.ok_or_else(|| {
+            ContextProjectionError::CorruptProjectionRow {
+                seq: 0,
+                reason: "singleton checkpoint is missing".into(),
+            }
+        })?;
+        let evaluated_at_millis = evaluated_at.timestamp_millis();
+        let mut statement = connection.prepare(
+            r#"
+            SELECT
+                n.session_id,
+                n.task_id,
+                n.node_id,
+                n.event_seq,
+                n.event_id,
+                n.node_json,
+                0
+            FROM projected_nodes AS n
+            WHERE n.session_id = ?1
+              AND (
+                  n.task_id IS NULL
+                  OR (?2 IS NOT NULL AND n.task_id = ?2)
+              )
+              AND n.epistemic_status != 'disputed'
+              AND (n.valid_from_millis IS NULL OR n.valid_from_millis <= ?3)
+              AND (n.valid_until_millis IS NULL OR n.valid_until_millis > ?3)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM supersession_edges AS edge
+                  WHERE edge.session_id = n.session_id
+                    AND edge.task_key = COALESCE(n.task_id, '')
+                    AND edge.superseded_node_id = n.node_id
+              )
+            ORDER BY n.node_id ASC
+            LIMIT 10001
+            "#,
+        )?;
+        let mapped =
+            statement.query_map(params![session_id, task_id, evaluated_at_millis], |row| {
+                Ok(RawProjectedRow {
+                    session_id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    node_id: row.get(2)?,
+                    event_seq: row.get(3)?,
+                    event_id: row.get(4)?,
+                    node_json: row.get(5)?,
+                    superseded: row.get(6)?,
+                })
+            })?;
+        let mut candidates = Vec::new();
+        for raw in mapped {
+            let raw = raw?;
+            CandidateCount::new(candidates.len().saturating_add(1))?;
+            budget.charge_candidate_bytes(raw.node_json.len())?;
+            let projected = projected_row(raw)?;
+            if projected.superseded || !projected.node.is_valid_at(evaluated_at) {
+                return Err(ContextProjectionError::CorruptProjectionRow {
+                    seq: checkpoint.through_seq,
+                    reason: "active lifecycle columns disagree with serialized node".into(),
+                });
+            }
+            candidates.push(projected.node);
+        }
+        let scanned_rows = candidates.len();
+        Ok(DerivedContextSnapshot {
             checkpoint,
             scanned_rows,
             candidates,
@@ -1147,7 +1560,7 @@ impl ContextProjection {
         expected_checkpoint: &ProjectionCheckpoint,
         session_id: &str,
         task_id: Option<&str>,
-    ) -> Result<Option<ContextProjectionSnapshot>, ContextProjectionError> {
+    ) -> Result<Option<DerivedContextSnapshot>, ContextProjectionError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let snapshot = verified_snapshot_from_cache(
@@ -1176,6 +1589,14 @@ impl ContextProjection {
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, ContextProjectionError> {
         self.connection
+            .lock()
+            .map_err(|_| ContextProjectionError::Poisoned)
+    }
+
+    fn verification_state(
+        &self,
+    ) -> Result<MutexGuard<'_, ProjectionVerificationState>, ContextProjectionError> {
+        self.verification
             .lock()
             .map_err(|_| ContextProjectionError::Poisoned)
     }
@@ -1313,6 +1734,141 @@ impl Default for EdgeAccumulator {
     }
 }
 
+fn prepare_private_sqlite_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SQLite database path requires an explicit private parent directory",
+            )
+        })?;
+    ensure_private_directory(parent)?;
+    for candidate in sqlite_family_paths(path) {
+        validate_private_file(&candidate)?;
+    }
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)?;
+    }
+    validate_private_file(path)?;
+    let filename = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite database path has no filename",
+        )
+    })?;
+    Ok(fs::canonicalize(parent)?.join(filename))
+}
+
+fn enforce_private_sqlite_files(path: &Path) -> Result<(), std::io::Error> {
+    for candidate in sqlite_family_paths(path) {
+        validate_private_file(&candidate)?;
+    }
+    Ok(())
+}
+
+fn sqlite_family_paths(path: &Path) -> [PathBuf; 3] {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    [path.to_path_buf(), PathBuf::from(wal), PathBuf::from(shm)]
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), std::io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => validate_private_directory_metadata(path, &metadata)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                let mut builder = fs::DirBuilder::new();
+                builder.recursive(true).mode(0o700).create(path)?;
+            }
+            #[cfg(not(unix))]
+            fs::create_dir_all(path)?;
+            let metadata = fs::symlink_metadata(path)?;
+            validate_private_directory_metadata(path, &metadata)?;
+        }
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn validate_private_directory_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), std::io::Error> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(unsafe_path(
+            path,
+            "private SQLite parent is not a real directory",
+        ));
+    }
+    validate_current_owner(path, metadata)
+}
+
+fn validate_private_file(path: &Path) -> Result<(), std::io::Error> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(unsafe_path(
+            path,
+            "SQLite family member is not a regular file",
+        ));
+    }
+    validate_current_owner(path, &metadata)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_current_owner(path: &Path, metadata: &fs::Metadata) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` reads process identity and has no preconditions.
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        return Err(unsafe_path(
+            path,
+            "SQLite path is not owned by the current user",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_current_owner(_path: &Path, _metadata: &fs::Metadata) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
+fn unsafe_path(path: &Path, reason: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("{reason}: {}", path.display()),
+    )
+}
+
 fn ensure_schema(connection: &mut Connection) -> Result<(), ContextProjectionError> {
     if !schema_is_current(connection)? {
         reset_schema(connection)?;
@@ -1344,7 +1900,7 @@ fn schema_is_current(connection: &Connection) -> Result<bool, ContextProjectionE
     }
     let statements = [
         "SELECT schema_version, through_seq, through_event_id FROM projection_checkpoint LIMIT 0",
-        "SELECT session_id, task_id, node_id, event_seq, event_id, node_json FROM projected_nodes LIMIT 0",
+        "SELECT session_id, task_id, node_id, event_seq, event_id, node_json, epistemic_status, valid_from_millis, valid_until_millis FROM projected_nodes LIMIT 0",
         "SELECT session_id, task_key, superseding_node_id, superseded_node_id, event_seq FROM supersession_edges LIMIT 0",
     ];
     Ok(statements
@@ -1361,7 +1917,7 @@ fn reset_schema(connection: &mut Connection) -> Result<(), ContextProjectionErro
         DROP TABLE IF EXISTS projection_checkpoint;
         "#,
     )?;
-    transaction.execute_batch(SCHEMA_V1)?;
+    transaction.execute_batch(SCHEMA_V2)?;
     transaction.pragma_update(None, "user_version", CONTEXT_PROJECTION_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -2013,7 +2569,7 @@ fn verified_snapshot_from_cache(
     expected_checkpoint: &ProjectionCheckpoint,
     session_id: &str,
     task_id: Option<&str>,
-) -> Result<Option<ContextProjectionSnapshot>, ContextProjectionError> {
+) -> Result<Option<DerivedContextSnapshot>, ContextProjectionError> {
     let Some(checkpoint) = read_checkpoint(transaction)? else {
         return Ok(None);
     };
@@ -2116,7 +2672,7 @@ fn verified_snapshot_from_cache(
         return Ok(None);
     }
 
-    Ok(Some(ContextProjectionSnapshot {
+    Ok(Some(DerivedContextSnapshot {
         checkpoint,
         scanned_rows: cached_row_count,
         candidates,
@@ -2473,8 +3029,9 @@ fn apply_context_event(
         .execute(
             r#"
         INSERT INTO projected_nodes (
-            session_id, task_id, node_id, event_seq, event_id, node_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            session_id, task_id, node_id, event_seq, event_id, node_json,
+            epistemic_status, valid_from_millis, valid_until_millis
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         "#,
             params![
                 scope.session_id,
@@ -2483,6 +3040,17 @@ fn apply_context_event(
                 event.seq,
                 &event.event_id,
                 node_json,
+                epistemic_status(validated.node.epistemic),
+                validated
+                    .node
+                    .valid_from
+                    .as_ref()
+                    .map(DateTime::timestamp_millis),
+                validated
+                    .node
+                    .valid_until
+                    .as_ref()
+                    .map(DateTime::timestamp_millis),
             ],
         )
         .map_err(ContextProjectionError::from)?;
@@ -2827,11 +3395,9 @@ fn validate_query_scope(
     session_id: &str,
     task_id: Option<&str>,
 ) -> Result<(), ContextProjectionError> {
-    if session_id.trim().is_empty() || task_id.is_some_and(|task| task.trim().is_empty()) {
-        return Err(ContextProjectionError::InvalidScope {
-            seq: 0,
-            reason: "query session/task scope is empty".into(),
-        });
+    SessionId::new(session_id)?;
+    if let Some(task_id) = task_id {
+        TaskId::new(task_id)?;
     }
     Ok(())
 }
@@ -2893,6 +3459,15 @@ fn projected_row(raw: RawProjectedRow) -> Result<ProjectedRow, ContextProjection
         node,
         superseded: raw.superseded,
     })
+}
+
+const fn epistemic_status(status: EpistemicStatus) -> &'static str {
+    match status {
+        EpistemicStatus::Asserted => "asserted",
+        EpistemicStatus::Inferred => "inferred",
+        EpistemicStatus::Verified => "verified",
+        EpistemicStatus::Disputed => "disputed",
+    }
 }
 
 const fn origin_actor(origin: ContextOrigin) -> EventActor {
@@ -3141,5 +3716,62 @@ mod tests {
             .expect("persistently corrupted row");
         assert_eq!(cached_json, "{}", "a second rebuild must not have occurred");
         assert_eq!(store.count().expect("source count"), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn projection_sqlite_family_is_private_regular_and_current_user_owned() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempfile::tempdir().expect("projection privacy fixture");
+        let private = directory.path().join("private");
+        fs::create_dir(&private).expect("create projection directory");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o777))
+            .expect("loosen projection directory");
+        let path = private.join(CONTEXT_PROJECTION_DATABASE_FILENAME);
+        let projection = ContextProjection::open(&path).expect("open private projection");
+        let metadata = fs::symlink_metadata(&private).expect("projection directory metadata");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        // SAFETY: `geteuid` reads process identity and has no preconditions.
+        let effective_uid = unsafe { libc::geteuid() };
+        assert_eq!(metadata.uid(), effective_uid);
+        for member in sqlite_family_paths(projection.database_path()) {
+            let Ok(metadata) = fs::symlink_metadata(&member) else {
+                continue;
+            };
+            assert!(metadata.is_file());
+            assert!(!metadata.file_type().is_symlink());
+            assert_eq!(metadata.uid(), effective_uid);
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn projection_open_rejects_database_and_parent_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("projection symlink fixture");
+        let private = directory.path().join("private");
+        fs::create_dir(&private).expect("create private directory");
+        let target = directory.path().join("target.db");
+        fs::File::create(&target).expect("create symlink target");
+        let database_link = private.join(CONTEXT_PROJECTION_DATABASE_FILENAME);
+        symlink(&target, &database_link).expect("create database symlink");
+        assert!(matches!(
+            ContextProjection::open(&database_link),
+            Err(ContextProjectionError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+
+        let real_parent = directory.path().join("real-parent");
+        fs::create_dir(&real_parent).expect("create real parent");
+        let parent_link = directory.path().join("parent-link");
+        symlink(&real_parent, &parent_link).expect("create parent symlink");
+        assert!(matches!(
+            ContextProjection::open(parent_link.join(CONTEXT_PROJECTION_DATABASE_FILENAME)),
+            Err(ContextProjectionError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
     }
 }

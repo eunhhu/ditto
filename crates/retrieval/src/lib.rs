@@ -9,6 +9,7 @@ use std::{collections::BTreeSet, fmt, ops::Deref, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
 
 /// Version of the shared opaque task query.
 pub const TASK_QUERY_VERSION: u16 = 1;
@@ -47,6 +48,41 @@ pub const MAX_CAPABILITY_ROOT_LIMIT: usize = 256;
 pub const MIN_EXECUTION_EPOCH_LIMIT: usize = 1;
 /// Maximum expanded execution epoch count.
 pub const MAX_EXECUTION_EPOCH_LIMIT: usize = 512;
+/// Maximum cumulative bytes retained or inspected as retrieval candidates.
+pub const MAX_TOTAL_CANDIDATE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum cumulative bytes used to construct retrieval documents.
+pub const MAX_TOTAL_DOCUMENT_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum cumulative bytes passed through lexical normalization/tokenization.
+pub const MAX_TOTAL_LEXICAL_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum embedding calls in one joint working-set request, including query.
+pub const MAX_PROVIDER_CALLS: usize = 513;
+/// Maximum cumulative UTF-8 bytes passed to an injected embedding provider.
+pub const MAX_PROVIDER_INPUT_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum UTF-8 byte length of a working-set session, task, or context-node ID.
+pub const MAX_RETRIEVAL_IDENTIFIER_BYTES: usize = 256;
+
+/// One independently bounded dimension of V2 retrieval work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalWorkKind {
+    CandidateBytes,
+    DocumentBytes,
+    LexicalBytes,
+    ProviderCalls,
+    ProviderInputBytes,
+}
+
+impl RetrievalWorkKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CandidateBytes => "candidate_bytes",
+            Self::DocumentBytes => "document_bytes",
+            Self::LexicalBytes => "lexical_bytes",
+            Self::ProviderCalls => "provider_calls",
+            Self::ProviderInputBytes => "provider_input_bytes",
+        }
+    }
+}
 
 /// Errors raised when a V2 query, document, limit, vector, or provider
 /// violates a closed retrieval contract.
@@ -116,6 +152,270 @@ pub enum RetrievalError {
         "embedding provider failure detail is {actual} bytes, exceeding the {maximum}-byte limit"
     )]
     ProviderFailureDetailTooLong { actual: usize, maximum: usize },
+    #[error(
+        "retrieval work budget {kind:?} would reach {attempted}, exceeding the maximum of {maximum}"
+    )]
+    WorkBudgetExceeded {
+        kind: RetrievalWorkKind,
+        attempted: usize,
+        maximum: usize,
+    },
+    #[error("{field} identifier is empty")]
+    EmptyIdentifier { field: &'static str },
+    #[error("{field} identifier is {actual} bytes, exceeding the {maximum}-byte limit")]
+    IdentifierTooLong {
+        field: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error("{field} identifier contains a control or Unicode-format character")]
+    IdentifierForbiddenCharacter { field: &'static str },
+    #[error("{field} identifier has surrounding whitespace")]
+    IdentifierSurroundingWhitespace { field: &'static str },
+    #[error("{field} identifier is not NFC-normalized")]
+    IdentifierNotNfc { field: &'static str },
+    #[error("{field} identifier differs from its canonical exact-match form")]
+    IdentifierNotCanonicalExact { field: &'static str },
+}
+
+macro_rules! scope_identifier {
+    ($name:ident, $field:literal) => {
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, RetrievalError> {
+                let value = value.into();
+                validate_opaque_identifier($field, &value)?;
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn into_string(self) -> String {
+                self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = RetrievalError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<&str> for $name {
+            type Error = RetrievalError;
+
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+scope_identifier!(SessionId, "session_id");
+scope_identifier!(TaskId, "task_id");
+
+/// Canonical scope for one joint context/capability retrieval.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RetrievalScope {
+    session_id: SessionId,
+    #[serde(default)]
+    task_id: Option<TaskId>,
+}
+
+impl RetrievalScope {
+    pub fn session(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            task_id: None,
+        }
+    }
+
+    pub fn task(session_id: SessionId, task_id: TaskId) -> Self {
+        Self {
+            session_id,
+            task_id: Some(task_id),
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        self.session_id.as_str()
+    }
+
+    pub fn task_id(&self) -> Option<&str> {
+        self.task_id.as_ref().map(TaskId::as_str)
+    }
+}
+
+/// Canonical exact-match identity admitted for new durable context nodes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct ContextNodeId(String);
+
+impl ContextNodeId {
+    pub fn new(value: impl Into<String>) -> Result<Self, RetrievalError> {
+        let value = value.into();
+        validate_opaque_identifier("context_node_id", &value)?;
+        if canonical_exact_identity(&value)? != value {
+            return Err(RetrievalError::IdentifierNotCanonicalExact {
+                field: "context_node_id",
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ContextNodeId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Stateful, request-local cumulative V2 work envelope.
+///
+/// This value is deliberately not serializable: callers cannot raise the fixed
+/// version-1 maxima. One instance is shared by query construction, context
+/// projection/ranking, and capability ranking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalWorkBudget {
+    candidate_bytes: usize,
+    document_bytes: usize,
+    lexical_bytes: usize,
+    provider_calls: usize,
+    provider_input_bytes: usize,
+}
+
+impl Default for RetrievalWorkBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RetrievalWorkBudget {
+    pub const fn new() -> Self {
+        Self {
+            candidate_bytes: 0,
+            document_bytes: 0,
+            lexical_bytes: 0,
+            provider_calls: 0,
+            provider_input_bytes: 0,
+        }
+    }
+
+    pub fn charge_candidate_bytes(&mut self, bytes: usize) -> Result<(), RetrievalError> {
+        charge_dimension(
+            &mut self.candidate_bytes,
+            bytes,
+            MAX_TOTAL_CANDIDATE_BYTES,
+            RetrievalWorkKind::CandidateBytes,
+        )
+    }
+
+    pub fn charge_document_bytes(&mut self, bytes: usize) -> Result<(), RetrievalError> {
+        charge_dimension(
+            &mut self.document_bytes,
+            bytes,
+            MAX_TOTAL_DOCUMENT_BYTES,
+            RetrievalWorkKind::DocumentBytes,
+        )
+    }
+
+    pub fn charge_lexical_bytes(&mut self, bytes: usize) -> Result<(), RetrievalError> {
+        charge_dimension(
+            &mut self.lexical_bytes,
+            bytes,
+            MAX_TOTAL_LEXICAL_BYTES,
+            RetrievalWorkKind::LexicalBytes,
+        )
+    }
+
+    /// Reserve one provider call and its complete input before invoking it.
+    pub fn charge_provider_call(&mut self, input_bytes: usize) -> Result<(), RetrievalError> {
+        let calls = checked_dimension(
+            self.provider_calls,
+            1,
+            MAX_PROVIDER_CALLS,
+            RetrievalWorkKind::ProviderCalls,
+        )?;
+        let bytes = checked_dimension(
+            self.provider_input_bytes,
+            input_bytes,
+            MAX_PROVIDER_INPUT_BYTES,
+            RetrievalWorkKind::ProviderInputBytes,
+        )?;
+        self.provider_calls = calls;
+        self.provider_input_bytes = bytes;
+        Ok(())
+    }
+
+    pub const fn candidate_bytes(&self) -> usize {
+        self.candidate_bytes
+    }
+
+    pub const fn document_bytes(&self) -> usize {
+        self.document_bytes
+    }
+
+    pub const fn lexical_bytes(&self) -> usize {
+        self.lexical_bytes
+    }
+
+    pub const fn provider_calls(&self) -> usize {
+        self.provider_calls
+    }
+
+    pub const fn provider_input_bytes(&self) -> usize {
+        self.provider_input_bytes
+    }
+}
+
+fn charge_dimension(
+    current: &mut usize,
+    additional: usize,
+    maximum: usize,
+    kind: RetrievalWorkKind,
+) -> Result<(), RetrievalError> {
+    *current = checked_dimension(*current, additional, maximum, kind)?;
+    Ok(())
+}
+
+fn checked_dimension(
+    current: usize,
+    additional: usize,
+    maximum: usize,
+    kind: RetrievalWorkKind,
+) -> Result<usize, RetrievalError> {
+    let attempted = current.checked_add(additional).unwrap_or(usize::MAX);
+    if attempted > maximum {
+        return Err(RetrievalError::WorkBudgetExceeded {
+            kind,
+            attempted,
+            maximum,
+        });
+    }
+    Ok(attempted)
 }
 
 /// The canonical V2 task signature.  The existing context crate's five-field
@@ -737,6 +1037,15 @@ pub struct TaskQuery {
 impl TaskQuery {
     /// Build a validated lexical-only query.
     pub fn new(signature: impl Into<TaskSignatureV2>) -> Result<Self, RetrievalError> {
+        let mut budget = RetrievalWorkBudget::new();
+        Self::new_with_budget(signature, &mut budget)
+    }
+
+    /// Build a validated lexical-only query inside a caller-owned work budget.
+    pub fn new_with_budget(
+        signature: impl Into<TaskSignatureV2>,
+        budget: &mut RetrievalWorkBudget,
+    ) -> Result<Self, RetrievalError> {
         let signature = signature.into().normalize()?;
         let canonical_text = canonical_text(&signature);
         if canonical_text.len() > MAX_CANONICAL_QUERY_BYTES {
@@ -745,6 +1054,7 @@ impl TaskQuery {
                 maximum: MAX_CANONICAL_QUERY_BYTES,
             });
         }
+        budget.charge_lexical_bytes(canonical_text.len())?;
         let lexical_tokens = lexical_tokens(&canonical_text);
         if lexical_tokens.len() > MAX_LEXICAL_TOKENS {
             return Err(RetrievalError::TooManyLexicalTokens {
@@ -778,9 +1088,20 @@ impl TaskQuery {
         signature: impl Into<TaskSignatureV2>,
         provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<Self, RetrievalError> {
-        let query = Self::new(signature)?;
+        let mut budget = RetrievalWorkBudget::new();
+        Self::with_provider_and_budget(signature, provider, &mut budget)
+    }
+
+    /// Build one query while charging its lexical and optional provider work
+    /// to the request-wide cumulative envelope.
+    pub fn with_provider_and_budget(
+        signature: impl Into<TaskSignatureV2>,
+        provider: Option<&dyn EmbeddingProvider>,
+        budget: &mut RetrievalWorkBudget,
+    ) -> Result<Self, RetrievalError> {
+        let query = Self::new_with_budget(signature, budget)?;
         if let Some(provider) = provider {
-            return query.with_embedded_provider(provider);
+            return query.with_embedded_provider(provider, budget);
         }
         Ok(query)
     }
@@ -788,7 +1109,9 @@ impl TaskQuery {
     fn with_embedded_provider(
         self,
         provider: &dyn EmbeddingProvider,
+        budget: &mut RetrievalWorkBudget,
     ) -> Result<Self, RetrievalError> {
+        budget.charge_provider_call(self.canonical_text.len())?;
         let output = provider
             .embed(EmbeddingPurpose::Query, &self.canonical_text)
             .map_err(provider_error)?;
@@ -822,10 +1145,23 @@ impl TaskQuery {
         provider: &dyn EmbeddingProvider,
         document: &RetrievalDocument,
     ) -> Result<EmbeddingVector, RetrievalError> {
+        let mut budget = RetrievalWorkBudget::new();
+        self.embed_document_with_budget(provider, document, &mut budget)
+    }
+
+    /// Embed one document after atomically reserving the provider call and
+    /// input bytes in the request-wide envelope.
+    pub fn embed_document_with_budget(
+        &self,
+        provider: &dyn EmbeddingProvider,
+        document: &RetrievalDocument,
+        budget: &mut RetrievalWorkBudget,
+    ) -> Result<EmbeddingVector, RetrievalError> {
         let _ = self
             .query_embedding
             .as_ref()
             .ok_or(RetrievalError::EmbeddingNotConfigured)?;
+        budget.charge_provider_call(document.len())?;
         let output = provider
             .embed(EmbeddingPurpose::Document, document.as_str())
             .map_err(provider_error)?;
@@ -874,6 +1210,16 @@ impl TaskQuery {
             .filter(|token| document_tokens.binary_search(token).is_ok())
             .count();
         overlap as f32 / self.lexical_tokens.len() as f32
+    }
+
+    /// Charge and compute positive lexical overlap for one bounded document.
+    pub fn lexical_overlap_with_budget(
+        &self,
+        document: &RetrievalDocument,
+        budget: &mut RetrievalWorkBudget,
+    ) -> Result<f32, RetrievalError> {
+        budget.charge_lexical_bytes(document.len())?;
+        Ok(self.lexical_overlap(document))
     }
 
     /// Test one candidate identity against normalized entity/resource terms.
@@ -1022,13 +1368,71 @@ fn normalize_set(field: &'static str, values: &[String]) -> Result<Vec<String>, 
 
 fn normalize_text(field: &'static str, value: &str) -> Result<String, RetrievalError> {
     let mut lower = String::new();
-    for character in value.chars().flat_map(char::to_lowercase) {
-        if character.is_control() && !character.is_whitespace() {
+    for character in value.nfc().flat_map(char::to_lowercase) {
+        if (character.is_control() && !character.is_whitespace())
+            || is_unicode_format_character(character)
+        {
             return Err(RetrievalError::ControlCharacter { field });
         }
         lower.push(character);
     }
-    Ok(lower.split_whitespace().collect::<Vec<_>>().join(" "))
+    Ok(lower
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .nfc()
+        .collect())
+}
+
+/// Canonical identity form used by exact entity/resource lookup.
+pub fn canonical_exact_identity(value: &str) -> Result<String, RetrievalError> {
+    normalize_text("exact_term", value)
+}
+
+fn validate_opaque_identifier(field: &'static str, value: &str) -> Result<(), RetrievalError> {
+    if value.is_empty() {
+        return Err(RetrievalError::EmptyIdentifier { field });
+    }
+    if value.len() > MAX_RETRIEVAL_IDENTIFIER_BYTES {
+        return Err(RetrievalError::IdentifierTooLong {
+            field,
+            actual: value.len(),
+            maximum: MAX_RETRIEVAL_IDENTIFIER_BYTES,
+        });
+    }
+    if value.trim() != value {
+        return Err(RetrievalError::IdentifierSurroundingWhitespace { field });
+    }
+    if value.nfc().collect::<String>() != value {
+        return Err(RetrievalError::IdentifierNotNfc { field });
+    }
+    if value
+        .chars()
+        .any(|character| character.is_control() || is_unicode_format_character(character))
+    {
+        return Err(RetrievalError::IdentifierForbiddenCharacter { field });
+    }
+    Ok(())
+}
+
+fn is_unicode_format_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x00ad | 0x061c | 0x06dd | 0x070f | 0x08e2 | 0x180e | 0xfeff | 0x110bd | 0x110cd | 0xe0001
+    ) || matches!(
+        character as u32,
+        0x0600..=0x0605
+            | 0x0890..=0x0891
+            | 0x200b..=0x200f
+            | 0x202a..=0x202e
+            | 0x2060..=0x2064
+            | 0x2066..=0x206f
+            | 0xfff9..=0xfffb
+            | 0x13430..=0x1343f
+            | 0x1bca0..=0x1bca3
+            | 0x1d173..=0x1d17a
+            | 0xe0020..=0xe007f
+    )
 }
 
 fn canonical_text(signature: &TaskSignatureV2) -> String {

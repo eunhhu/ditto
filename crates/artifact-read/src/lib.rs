@@ -1278,8 +1278,9 @@ fn map_store_error(error: ArtifactStoreError, reference: ArtifactRef) -> Artifac
 #[cfg(test)]
 mod tests {
     use ditto_capability::{
-        CapabilityKind, CapabilityManifest, DataAccess, EffectProfile, EffectSpec, PlacementSpec,
-        PolicySpec, RetrievalSpec, RuntimeSpec, VerificationSpec, validate_json_schema,
+        CapabilityKind, CapabilityLifecycle, CapabilityManifest, DataAccess, EffectProfile,
+        EffectSpec, PlacementSpec, PolicySpec, RetrievalSpec, RuntimeSpec, VerificationSpec,
+        validate_json_schema,
     };
     use serde_json::Value;
     use tempfile::tempdir;
@@ -1300,6 +1301,7 @@ mod tests {
             version: ARTIFACT_READ_VERSION.to_owned(),
             namespace: "artifact".to_owned(),
             kind: CapabilityKind::Tool,
+            lifecycle: CapabilityLifecycle::Active,
             summary: CAPABILITY_SUMMARY.to_owned(),
             runtime: RuntimeSpec {
                 runtime_type: ditto_capability::RuntimeType::Builtin,

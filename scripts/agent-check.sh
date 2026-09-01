@@ -17,6 +17,7 @@ for file in "${required_files[@]}"; do
   fi
 done
 
+./scripts/agent-canary.sh
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features

@@ -4,11 +4,13 @@ use ditto_context::{
     CompiledContext, CompiledContextValidationError, ContextCapsule, ContextCompileError,
     ContextCompiler, ContextQueryRanking, ContextQueryRankingError,
 };
-use ditto_context_projection::{ContextProjectionError, ProjectionCheckpoint};
+use ditto_context_projection::{
+    ContextProjectionError, ProjectionCheckpoint, ProjectionVerificationMetrics,
+};
 use ditto_event_store::EventStoreError;
 use ditto_retrieval::{
     CapabilityRootLimit, ContextResultLimit, EmbeddingDescriptor, ExecutionEpochLimit,
-    RetrievalError, RetrievalMode, TaskQuery, TaskSignatureV2,
+    RetrievalError, RetrievalMode, RetrievalScope, RetrievalWorkBudget, TaskQuery, TaskSignatureV2,
 };
 use thiserror::Error;
 
@@ -22,8 +24,7 @@ use super::DittoKernel;
 /// [`TaskQuery`] is built.
 #[derive(Debug, Clone)]
 pub struct WorkingSetRequest {
-    pub session_id: String,
-    pub task_id: Option<String>,
+    pub scope: RetrievalScope,
     pub signature: TaskSignatureV2,
     pub context_token_budget: Option<u32>,
     pub context_result_limit: usize,
@@ -135,10 +136,16 @@ impl DittoKernel {
             .map_err(WorkingSetError::CapabilityRootLimit)?;
         let execution_epoch_limit = ExecutionEpochLimit::new(request.execution_epoch_limit)
             .map_err(WorkingSetError::ExecutionEpochLimit)?;
+        request
+            .capability_search
+            .validate()
+            .map_err(CapabilitySearchError::from)?;
 
+        let mut work_budget = RetrievalWorkBudget::new();
         let provider = self.inner.embedding_provider.as_deref();
-        let query = TaskQuery::with_provider(request.signature, provider)
-            .map_err(WorkingSetError::Query)?;
+        let query =
+            TaskQuery::with_provider_and_budget(request.signature, provider, &mut work_budget)
+                .map_err(WorkingSetError::Query)?;
 
         // The clone-shared admission gate covers only the stable high-water,
         // projection synchronization, detached snapshot, and single wall-clock
@@ -151,26 +158,29 @@ impl DittoKernel {
                 .lock()
                 .map_err(|_| WorkingSetError::SharedGatePoisoned)?;
             let high_water = self.inner.events.latest_seq()?;
+            let evaluated_at = Utc::now();
             let snapshot = self
                 .inner
                 .context_projection
-                .synchronize_and_verified_snapshot_through(
+                .synchronize_and_verified_snapshot_through_at(
                     &self.inner.events,
                     high_water,
-                    &request.session_id,
-                    request.task_id.as_deref(),
+                    request.scope.session_id(),
+                    request.scope.task_id(),
+                    evaluated_at,
+                    &mut work_budget,
                 )?;
-            let evaluated_at = Utc::now();
             (snapshot, evaluated_at)
         };
 
         let projection_checkpoint = snapshot.checkpoint().clone();
-        let ranking = ContextQueryRanking::new(
+        let ranking = ContextQueryRanking::new_with_budget(
             &query,
             snapshot.into_candidates(),
             evaluated_at,
             context_result_limit,
             provider,
+            &mut work_budget,
         )?;
         let compiler = ContextCompiler::default();
         let compiled_context =
@@ -183,12 +193,13 @@ impl DittoKernel {
             request.context_token_budget,
         )?;
 
-        let cards = self.inner.capabilities.search_task_query(
+        let cards = self.inner.capabilities.search_task_query_with_budget(
             &query,
             &request.capability_search,
             capability_root_limit,
             execution_epoch_limit,
             provider,
+            &mut work_budget,
         )?;
         let mut execution_epoch = ExecutionEpoch::new(execution_epoch_limit.get());
         execution_epoch.page_in(cards);
@@ -204,5 +215,13 @@ impl DittoKernel {
             context_capsule,
             execution_epoch,
         })
+    }
+
+    /// Inspect source-verification work without exposing projection rows or
+    /// granting cache authority.
+    pub fn retrieval_verification_metrics(
+        &self,
+    ) -> Result<ProjectionVerificationMetrics, ContextProjectionError> {
+        self.inner.context_projection.verification_metrics()
     }
 }

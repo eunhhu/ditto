@@ -709,12 +709,16 @@ fn invalid_scope_origin_sources_and_session_wide_duplicates_fail_before_append()
             ),
         ),
     );
-    assert_durable_bytes_exceeded(
+    assert!(matches!(
         oversized_id,
-        "context node id",
-        MAX_CONTEXT_NODE_ID_BYTES + 1,
-        MAX_CONTEXT_NODE_ID_BYTES,
-    );
+        KernelError::ContextProjection(ContextProjectionError::Retrieval(
+            ditto_retrieval::RetrievalError::IdentifierTooLong {
+                field: "context_node_id",
+                actual,
+                maximum,
+            }
+        )) if actual == MAX_CONTEXT_NODE_ID_BYTES + 1 && maximum == MAX_CONTEXT_NODE_ID_BYTES
+    ));
     let oversized_summary = reject_without_append(
         &fixture,
         &mut receiver,

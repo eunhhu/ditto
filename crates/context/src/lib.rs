@@ -5,7 +5,8 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ditto_retrieval::{
-    CandidateCount, ContextResultLimit, EmbeddingProvider, RetrievalMode, cosine_similarity,
+    CandidateCount, ContextResultLimit, EmbeddingProvider, RetrievalMode, RetrievalWorkBudget,
+    cosine_similarity,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -170,12 +171,32 @@ impl ContextNode {
 /// shape is part of the V2 retrieval contract and has no trailing newline:
 /// `id=<raw id>\nkind=<snake_case kind>\nsummary=<raw summary>`.
 pub fn context_retrieval_document(node: &ContextNode) -> Result<RetrievalDocument, RetrievalError> {
-    RetrievalDocument::new(format!(
-        "id={}\nkind={}\nsummary={}",
-        node.id,
-        node.kind.as_str(),
-        node.summary
-    ))
+    let document_len = context_retrieval_document_len(node)?;
+    let mut document = String::with_capacity(document_len);
+    document.push_str("id=");
+    document.push_str(&node.id);
+    document.push_str("\nkind=");
+    document.push_str(node.kind.as_str());
+    document.push_str("\nsummary=");
+    document.push_str(&node.summary);
+    RetrievalDocument::new(document)
+}
+
+fn context_retrieval_document_len(node: &ContextNode) -> Result<usize, RetrievalError> {
+    let actual = "id="
+        .len()
+        .saturating_add(node.id.len())
+        .saturating_add("\nkind=".len())
+        .saturating_add(node.kind.as_str().len())
+        .saturating_add("\nsummary=".len())
+        .saturating_add(node.summary.len());
+    if actual > MAX_RETRIEVAL_DOCUMENT_BYTES {
+        return Err(RetrievalError::RetrievalDocumentTooLong {
+            actual,
+            maximum: MAX_RETRIEVAL_DOCUMENT_BYTES,
+        });
+    }
+    Ok(actual)
 }
 
 // Defense-in-depth mirrors of ADR 0010's node-local durable V1 bounds.
@@ -739,6 +760,29 @@ impl ContextQueryRanking {
         result_limit: ContextResultLimit,
         provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<Self, ContextQueryRankingError> {
+        let mut budget = RetrievalWorkBudget::new();
+        Self::new_with_budget(
+            query,
+            candidates,
+            evaluated_at,
+            result_limit,
+            provider,
+            &mut budget,
+        )
+    }
+
+    /// Derive a ranking while sharing the caller's cumulative retrieval work
+    /// envelope. Candidate nodes are bounded before retention; documents are
+    /// then constructed, scored, optionally embedded, and dropped one at a
+    /// time while at most `result_limit` ranked nodes are retained.
+    pub fn new_with_budget(
+        query: &TaskQuery,
+        candidates: impl IntoIterator<Item = ContextNode>,
+        evaluated_at: DateTime<Utc>,
+        result_limit: ContextResultLimit,
+        provider: Option<&dyn EmbeddingProvider>,
+        budget: &mut RetrievalWorkBudget,
+    ) -> Result<Self, ContextQueryRankingError> {
         validate_context_query_provider(query, provider)?;
 
         let mut bounded_candidates = Vec::new();
@@ -756,14 +800,21 @@ impl ContextQueryRanking {
             if first_candidate_error.is_some() {
                 continue;
             }
-            if let Err(error) = validate_ranked_context_node(&candidate) {
-                first_candidate_error = Some(error);
-                continue;
-            }
+            let candidate_bytes = match validate_ranked_context_node(&candidate) {
+                Ok(candidate_bytes) => candidate_bytes,
+                Err(error) => {
+                    first_candidate_error = Some(error);
+                    continue;
+                }
+            };
             if !candidate_ids.insert(candidate.id.clone()) {
                 first_candidate_error = Some(ContextQueryRankingError::DuplicateCandidate {
                     node_id: candidate.id.clone(),
                 });
+                continue;
+            }
+            if let Err(error) = budget.charge_candidate_bytes(candidate_bytes) {
+                first_candidate_error = Some(error.into());
                 continue;
             }
             bounded_candidates.push(candidate);
@@ -772,7 +823,8 @@ impl ContextQueryRanking {
             return Err(error);
         }
 
-        let mut ranked = Vec::new();
+        bounded_candidates.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        let mut ranked = Vec::with_capacity(result_limit.get());
         let mut excluded = Vec::new();
         for node in bounded_candidates {
             if !node.is_valid_at(evaluated_at) {
@@ -784,8 +836,11 @@ impl ContextQueryRanking {
                 continue;
             }
 
+            let document_len = context_retrieval_document_len(&node)?;
+            budget.charge_document_bytes(document_len)?;
             let document = context_retrieval_document(&node)?;
-            let (relevance_score, exact) = v2_relevance_from_document(&node, query, &document)?;
+            let (relevance_score, exact) =
+                v2_relevance_from_document_with_budget(&node, query, &document, budget)?;
             if !exact && relevance_score == 0.0 {
                 excluded.push(ContextExclusion {
                     node_id: node.id,
@@ -795,31 +850,27 @@ impl ContextQueryRanking {
                 continue;
             }
 
+            let embedding_similarity = if let Some(provider) = provider {
+                let query_vector = query
+                    .query_embedding()
+                    .ok_or(RetrievalError::EmbeddingNotConfigured)?;
+                let vector = query.embed_document_with_budget(provider, &document, budget)?;
+                Some(cosine_similarity(query_vector, &vector)?)
+            } else {
+                None
+            };
             ranked.push(RankedQueryCandidate {
                 node,
                 exact,
-                embedding_similarity: None,
+                embedding_similarity,
                 relevance_score,
             });
-        }
-
-        // Deterministic validation and hard filtering above complete before
-        // any provider call. Rebuilding each bounded document here avoids
-        // retaining a second maximum-sized copy for all 10,000 candidates.
-        ranked.sort_unstable_by(|left, right| left.node.id.cmp(&right.node.id));
-        if let Some(provider) = provider {
-            let query_vector = query
-                .query_embedding()
-                .ok_or(RetrievalError::EmbeddingNotConfigured)?;
-            for candidate in &mut ranked {
-                let document = context_retrieval_document(&candidate.node)?;
-                let vector = query.embed_document(provider, &document)?;
-                candidate.embedding_similarity = Some(cosine_similarity(query_vector, &vector)?);
+            ranked.sort_unstable_by(ranked_query_candidate_order);
+            if ranked.len() > result_limit.get() {
+                ranked.pop();
             }
         }
 
-        ranked.sort_unstable_by(ranked_query_candidate_order);
-        ranked.truncate(result_limit.get());
         excluded.sort_unstable_by(|left, right| left.node_id.cmp(&right.node_id));
 
         Ok(Self {
@@ -842,7 +893,7 @@ impl ContextQueryRanking {
     }
 }
 
-fn validate_ranked_context_node(node: &ContextNode) -> Result<(), ContextQueryRankingError> {
+fn validate_ranked_context_node(node: &ContextNode) -> Result<usize, ContextQueryRankingError> {
     if node.id.len() > MAX_CONTEXT_NODE_ID_BYTES {
         return Err(ContextQueryRankingError::CandidateIdTooLong {
             actual: node.id.len(),
@@ -887,7 +938,7 @@ fn validate_ranked_context_node(node: &ContextNode) -> Result<(), ContextQueryRa
             ),
         ));
     }
-    Ok(())
+    Ok(serialized.len())
 }
 
 fn validate_ranked_reference_list(
@@ -2084,6 +2135,31 @@ fn v2_relevance_from_document(
     Ok((lexical_overlap * 5.0 + authority + node.confidence, exact))
 }
 
+fn v2_relevance_from_document_with_budget(
+    node: &ContextNode,
+    query: &TaskQuery,
+    document: &RetrievalDocument,
+    budget: &mut RetrievalWorkBudget,
+) -> Result<(f32, bool), RetrievalError> {
+    let lexical_overlap = query.lexical_overlap_with_budget(document, budget)?;
+    budget.charge_lexical_bytes(node.id.len())?;
+    let exact = query.matches_exact_term(&node.id)?;
+
+    if !exact && lexical_overlap == 0.0 {
+        return Ok((0.0, false));
+    }
+
+    let authority = match (node.origin, node.epistemic) {
+        (ContextOrigin::User, EpistemicStatus::Verified | EpistemicStatus::Asserted) => 1.0,
+        (_, EpistemicStatus::Verified) => 0.8,
+        (_, EpistemicStatus::Asserted) => 0.5,
+        (_, EpistemicStatus::Inferred) => 0.2,
+        (_, EpistemicStatus::Disputed) => -10.0,
+    };
+
+    Ok((lexical_overlap * 5.0 + authority + node.confidence, exact))
+}
+
 fn invalid_at_reason(node: &ContextNode, now: DateTime<Utc>) -> &'static str {
     if node.epistemic == EpistemicStatus::Disputed {
         "epistemic status is disputed"
@@ -2133,7 +2209,8 @@ mod tests {
     use chrono::{Duration, Utc};
     use ditto_retrieval::{
         ContextResultLimit, Embedding, EmbeddingProvider, EmbeddingProviderError, EmbeddingPurpose,
-        MAX_CANDIDATE_COUNT, MAX_CONTEXT_RESULT_LIMIT, RetrievalMode,
+        MAX_CANDIDATE_COUNT, MAX_CONTEXT_RESULT_LIMIT, MAX_PROVIDER_CALLS,
+        MAX_TOTAL_CANDIDATE_BYTES, RetrievalMode, RetrievalWorkBudget, RetrievalWorkKind,
     };
 
     use super::{
@@ -3652,6 +3729,67 @@ mod tests {
         assert!(compiled.receipt.excluded.iter().any(|entry| {
             entry.node_id == "irrelevant-id" && entry.reason == ContextExclusionReason::Irrelevant
         }));
+    }
+
+    #[test]
+    fn context_ranking_shares_aggregate_and_provider_budgets_before_work_escapes() {
+        let lexical_query = TaskQuery::new(TaskSignatureV2::new("target")).expect("query");
+        let mut exhausted_candidates = RetrievalWorkBudget::new();
+        exhausted_candidates
+            .charge_candidate_bytes(MAX_TOTAL_CANDIDATE_BYTES)
+            .expect("exact candidate-byte maximum");
+        let error = ContextQueryRanking::new_with_budget(
+            &lexical_query,
+            [node("target", "target")],
+            Utc::now(),
+            ContextResultLimit::new(1).expect("result limit"),
+            None,
+            &mut exhausted_candidates,
+        )
+        .expect_err("candidate-byte N+1");
+        assert!(matches!(
+            error,
+            ContextQueryRankingError::Retrieval(RetrievalError::WorkBudgetExceeded {
+                kind: RetrievalWorkKind::CandidateBytes,
+                maximum: MAX_TOTAL_CANDIDATE_BYTES,
+                ..
+            })
+        ));
+
+        let provider = RankingProvider::new().with_document_vector("target", vec![1.0, 0.0]);
+        let mut provider_budget = RetrievalWorkBudget::new();
+        for _ in 0..(MAX_PROVIDER_CALLS - 1) {
+            provider_budget
+                .charge_provider_call(0)
+                .expect("preload provider budget");
+        }
+        let embedded_query = TaskQuery::with_provider_and_budget(
+            TaskSignatureV2::new("target"),
+            Some(&provider),
+            &mut provider_budget,
+        )
+        .expect("Nth provider call");
+        let error = ContextQueryRanking::new_with_budget(
+            &embedded_query,
+            [node("target", "target")],
+            Utc::now(),
+            ContextResultLimit::new(1).expect("result limit"),
+            Some(&provider),
+            &mut provider_budget,
+        )
+        .expect_err("provider-call N+1");
+        assert!(matches!(
+            error,
+            ContextQueryRankingError::Retrieval(RetrievalError::WorkBudgetExceeded {
+                kind: RetrievalWorkKind::ProviderCalls,
+                attempted,
+                maximum,
+            }) if attempted == MAX_PROVIDER_CALLS + 1 && maximum == MAX_PROVIDER_CALLS
+        ));
+        assert!(
+            provider.document_ids().is_empty(),
+            "over-budget document input must not reach the provider"
+        );
     }
 
     #[test]

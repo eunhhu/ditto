@@ -7,7 +7,9 @@ use std::{
 
 use ditto_retrieval::{
     CapabilityRootLimit, EmbeddingProvider, ExecutionEpochLimit, MAX_CANDIDATE_COUNT,
-    RetrievalDocument, RetrievalError, RetrievalMode, TaskQuery, cosine_similarity,
+    MAX_RETRIEVAL_DOCUMENT_BYTES, MAX_RETRIEVAL_IDENTIFIER_BYTES, RetrievalDocument,
+    RetrievalError, RetrievalMode, RetrievalWorkBudget, TaskQuery, canonical_exact_identity,
+    cosine_similarity,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -108,12 +110,25 @@ pub enum RuntimeType {
     Remote,
 }
 
+/// Administrative lifecycle controlling whether an installed capability may
+/// enter a model-visible catalogue or runtime working set.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityLifecycle {
+    #[default]
+    Active,
+    Retired,
+    Quarantined,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityManifest {
     pub id: String,
     pub version: String,
     pub namespace: String,
     pub kind: CapabilityKind,
+    #[serde(default)]
+    pub lifecycle: CapabilityLifecycle,
     pub summary: String,
     pub runtime: RuntimeSpec,
     #[serde(default)]
@@ -131,6 +146,7 @@ pub struct CapabilityManifest {
 pub fn capability_retrieval_document(
     manifest: &CapabilityManifest,
 ) -> Result<RetrievalDocument, RetrievalError> {
+    let document_len = capability_retrieval_document_len(manifest)?;
     let mut aliases = manifest
         .retrieval
         .aliases
@@ -146,10 +162,13 @@ pub fn capability_retrieval_document(
         .collect::<Vec<_>>();
     intents.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
 
-    let mut document = format!(
-        "id={}\nnamespace={}\nsummary={}",
-        manifest.id, manifest.namespace, manifest.summary
-    );
+    let mut document = String::with_capacity(document_len);
+    document.push_str("id=");
+    document.push_str(&manifest.id);
+    document.push_str("\nnamespace=");
+    document.push_str(&manifest.namespace);
+    document.push_str("\nsummary=");
+    document.push_str(&manifest.summary);
     for alias in aliases {
         document.push_str("\nalias=");
         document.push_str(alias);
@@ -159,6 +178,35 @@ pub fn capability_retrieval_document(
         document.push_str(intent);
     }
     RetrievalDocument::new(document)
+}
+
+fn capability_retrieval_document_len(
+    manifest: &CapabilityManifest,
+) -> Result<usize, RetrievalError> {
+    let mut actual = "id="
+        .len()
+        .saturating_add(manifest.id.len())
+        .saturating_add("\nnamespace=".len())
+        .saturating_add(manifest.namespace.len())
+        .saturating_add("\nsummary=".len())
+        .saturating_add(manifest.summary.len());
+    for alias in &manifest.retrieval.aliases {
+        actual = actual
+            .saturating_add("\nalias=".len())
+            .saturating_add(alias.len());
+    }
+    for intent in &manifest.retrieval.intents {
+        actual = actual
+            .saturating_add("\nintent=".len())
+            .saturating_add(intent.len());
+    }
+    if actual > MAX_RETRIEVAL_DOCUMENT_BYTES {
+        return Err(RetrievalError::RetrievalDocumentTooLong {
+            actual,
+            maximum: MAX_RETRIEVAL_DOCUMENT_BYTES,
+        });
+    }
+    Ok(actual)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -604,6 +652,38 @@ pub enum SearchMode {
     Runtime,
 }
 
+/// Maximum entries accepted by any list-valued runtime search-context field.
+pub const MAX_SEARCH_CONTEXT_ENTRIES: usize = 64;
+/// Maximum UTF-8 byte length of one runtime search-context value.
+pub const MAX_SEARCH_CONTEXT_VALUE_BYTES: usize = MAX_RETRIEVAL_IDENTIFIER_BYTES;
+
+/// Validation failures for model-independent capability placement input.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SearchContextError {
+    #[error("runtime search context is missing {field}")]
+    MissingRuntimeField { field: &'static str },
+    #[error("search context {field} has {actual} entries, exceeding the maximum of {maximum}")]
+    TooManyEntries {
+        field: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error("search context {field} contains an empty value")]
+    EmptyValue { field: &'static str },
+    #[error("search context {field} value is {actual} bytes, exceeding the maximum of {maximum}")]
+    ValueTooLong {
+        field: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error("search context {field} contains a non-canonical exact-match value")]
+    NonCanonicalValue { field: &'static str },
+    #[error("search context {field} contains a duplicate value: {value}")]
+    DuplicateValue { field: &'static str, value: String },
+    #[error("preferred placement {preferred} is not in available_placements")]
+    PreferredPlacementUnavailable { preferred: String },
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchContext {
     #[serde(default)]
@@ -638,6 +718,104 @@ impl SearchContext {
             effect_ceiling: Some(effect_ceiling),
             allowed_capability_ids: None,
         }
+    }
+
+    /// Validate bounded placement input before any embedding provider call.
+    pub fn validate(&self) -> Result<(), SearchContextError> {
+        validate_search_values(
+            "available_placements",
+            self.available_placements.as_deref(),
+            false,
+        )?;
+        validate_search_values(
+            "available_requirements",
+            self.available_requirements.as_deref(),
+            false,
+        )?;
+        validate_search_values(
+            "allowed_capability_ids",
+            self.allowed_capability_ids.as_deref(),
+            true,
+        )?;
+        if let Some(preferred) = self.preferred_placement.as_deref() {
+            validate_search_value("preferred_placement", preferred, false)?;
+            if self
+                .available_placements
+                .as_ref()
+                .is_none_or(|available| !available.iter().any(|value| value == preferred))
+            {
+                return Err(SearchContextError::PreferredPlacementUnavailable {
+                    preferred: preferred.to_owned(),
+                });
+            }
+        }
+        if self.mode == SearchMode::Runtime {
+            for (field, present) in [
+                ("available_placements", self.available_placements.is_some()),
+                (
+                    "available_requirements",
+                    self.available_requirements.is_some(),
+                ),
+                ("effect_ceiling", self.effect_ceiling.is_some()),
+            ] {
+                if !present {
+                    return Err(SearchContextError::MissingRuntimeField { field });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_search_values(
+    field: &'static str,
+    values: Option<&[String]>,
+    allow_wildcard: bool,
+) -> Result<(), SearchContextError> {
+    let Some(values) = values else {
+        return Ok(());
+    };
+    if values.len() > MAX_SEARCH_CONTEXT_ENTRIES {
+        return Err(SearchContextError::TooManyEntries {
+            field,
+            actual: values.len(),
+            maximum: MAX_SEARCH_CONTEXT_ENTRIES,
+        });
+    }
+    let mut seen = HashSet::with_capacity(values.len());
+    for value in values {
+        validate_search_value(field, value, allow_wildcard)?;
+        if !seen.insert(value.as_str()) {
+            return Err(SearchContextError::DuplicateValue {
+                field,
+                value: value.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_search_value(
+    field: &'static str,
+    value: &str,
+    allow_wildcard: bool,
+) -> Result<(), SearchContextError> {
+    if value.is_empty() {
+        return Err(SearchContextError::EmptyValue { field });
+    }
+    if value.len() > MAX_SEARCH_CONTEXT_VALUE_BYTES {
+        return Err(SearchContextError::ValueTooLong {
+            field,
+            actual: value.len(),
+            maximum: MAX_SEARCH_CONTEXT_VALUE_BYTES,
+        });
+    }
+    if allow_wildcard && value == "*" {
+        return Ok(());
+    }
+    match canonical_exact_identity(value) {
+        Ok(canonical) if canonical == value => Ok(()),
+        _ => Err(SearchContextError::NonCanonicalValue { field }),
     }
 }
 
@@ -747,6 +925,8 @@ pub enum CapabilityError {
 /// Failures from the bounded V2 capability retrieval path.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CapabilitySearchError {
+    #[error("capability search context is invalid: {0}")]
+    InvalidSearchContext(#[from] SearchContextError),
     #[error("shared retrieval query or capability document is invalid: {0}")]
     Retrieval(#[from] RetrievalError),
     #[error(
@@ -832,7 +1012,11 @@ impl CapabilityCatalog {
     }
 
     pub fn cards(&self) -> Vec<CapabilityCard> {
-        self.manifests.iter().map(CapabilityCard::from).collect()
+        self.manifests
+            .iter()
+            .filter(|manifest| manifest.lifecycle == CapabilityLifecycle::Active)
+            .map(CapabilityCard::from)
+            .collect()
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<CapabilityCard> {
@@ -906,27 +1090,56 @@ impl CapabilityCatalog {
         epoch_limit: ExecutionEpochLimit,
         provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<Vec<CapabilityCard>, CapabilitySearchError> {
+        let mut budget = RetrievalWorkBudget::new();
+        self.search_task_query_with_budget(
+            query,
+            context,
+            root_limit,
+            epoch_limit,
+            provider,
+            &mut budget,
+        )
+    }
+
+    /// Search while sharing the caller's request-local work envelope with
+    /// query construction and context retrieval.
+    pub fn search_task_query_with_budget(
+        &self,
+        query: &TaskQuery,
+        context: &SearchContext,
+        root_limit: CapabilityRootLimit,
+        epoch_limit: ExecutionEpochLimit,
+        provider: Option<&dyn EmbeddingProvider>,
+        budget: &mut RetrievalWorkBudget,
+    ) -> Result<Vec<CapabilityCard>, CapabilitySearchError> {
+        context.validate()?;
         validate_query_provider(query, provider)?;
 
-        if self.manifests.len() > MAX_CANDIDATE_COUNT {
-            return Err(RetrievalError::CandidateCountExceeded {
-                actual: MAX_CANDIDATE_COUNT + 1,
-                maximum: MAX_CANDIDATE_COUNT,
+        let mut active_count = 0;
+        for manifest in &self.manifests {
+            if manifest.lifecycle == CapabilityLifecycle::Active {
+                active_count += 1;
+                if active_count > MAX_CANDIDATE_COUNT {
+                    return Err(RetrievalError::CandidateCountExceeded {
+                        actual: active_count,
+                        maximum: MAX_CANDIDATE_COUNT,
+                    }
+                    .into());
+                }
             }
-            .into());
         }
 
         // This is the sole V2 catalogue ordering pass.  Complement expansion
         // below uses the existing ID index and never scans or sorts again.
-        let mut manifests = self.manifests.iter().collect::<Vec<_>>();
+        let mut manifests = self
+            .manifests
+            .iter()
+            .filter(|manifest| manifest.lifecycle == CapabilityLifecycle::Active)
+            .collect::<Vec<_>>();
         manifests.sort_unstable_by(|left, right| left.id.cmp(&right.id));
 
-        let mut roots = Vec::new();
-        for manifest in manifests {
-            // Resolve every reference during the one deterministic catalogue
-            // pass, before any provider call.  An invalid complement is a
-            // catalogue error even if its root would later be denied by a
-            // runtime filter.
+        // Resolve references for every active root before any provider call.
+        for manifest in &manifests {
             for complement in &manifest.retrieval.complements {
                 if self.get(complement).is_none() {
                     return Err(CapabilitySearchError::UnknownComplement {
@@ -935,43 +1148,48 @@ impl CapabilityCatalog {
                     });
                 }
             }
+        }
+
+        let mut roots = Vec::with_capacity(root_limit.get());
+        for manifest in manifests {
+            budget.charge_candidate_bytes(capability_candidate_bytes(manifest))?;
             if !matches_context(manifest, context) {
                 continue;
             }
-            if denied_by_negative_examples(manifest, query)? {
+            if denied_by_negative_examples(manifest, query, budget)? {
                 continue;
             }
 
-            // Build and validate every hard-eligible, non-denied candidate's
-            // document before any document embedding call.  This keeps
-            // provider work downstream of all deterministic validation.
+            let document_len = capability_retrieval_document_len(manifest)?;
+            budget.charge_document_bytes(document_len)?;
             let document = capability_retrieval_document(manifest)?;
-            let exact = exact_capability_match(manifest, query)?;
-            let lexical_overlap = query.lexical_overlap(&document);
+            let exact = exact_capability_match(manifest, query, budget)?;
+            let lexical_overlap = query.lexical_overlap_with_budget(&document, budget)?;
             if !exact && lexical_overlap == 0.0 {
                 continue;
             }
-            roots.push(V2Root {
-                manifest,
-                document,
-                exact,
-                lexical_overlap,
-                preferred: preferred_placement_match(manifest, context),
-                embedding_similarity: 0.0,
-            });
-        }
-
-        if let Some(provider) = provider {
-            for root in &mut roots {
-                let vector = query.embed_document(provider, &root.document)?;
+            let embedding_similarity = if let Some(provider) = provider {
+                let vector = query.embed_document_with_budget(provider, &document, budget)?;
                 let query_vector = query
                     .query_embedding()
                     .ok_or(RetrievalError::EmbeddingNotConfigured)?;
-                root.embedding_similarity = cosine_similarity(query_vector, &vector)?;
+                cosine_similarity(query_vector, &vector)?
+            } else {
+                0.0
+            };
+            roots.push(V2Root {
+                manifest,
+                exact,
+                lexical_overlap,
+                preferred: preferred_placement_match(manifest, context),
+                embedding_similarity,
+            });
+            roots.sort_unstable_by(v2_root_order);
+            if roots.len() > root_limit.get() {
+                roots.pop();
             }
         }
 
-        roots.sort_unstable_by(v2_root_order);
         let mut selected = Vec::new();
         let mut seen_ids = HashSet::new();
         let epoch_capacity = epoch_limit.get();
@@ -997,7 +1215,7 @@ impl CapabilityCatalog {
                     }
                 })?;
                 if !matches_context(complement, context)
-                    || denied_by_negative_examples(complement, query)?
+                    || denied_by_negative_examples(complement, query, budget)?
                 {
                     continue;
                 }
@@ -1033,9 +1251,11 @@ fn validate_query_provider(
 fn denied_by_negative_examples(
     manifest: &CapabilityManifest,
     query: &TaskQuery,
+    budget: &mut RetrievalWorkBudget,
 ) -> Result<bool, CapabilitySearchError> {
     let mut denied = false;
     for example in &manifest.retrieval.negative_examples {
+        budget.charge_lexical_bytes(example.len())?;
         if query.contains_normalized_phrase(example)? {
             denied = true;
         }
@@ -1046,11 +1266,14 @@ fn denied_by_negative_examples(
 fn exact_capability_match(
     manifest: &CapabilityManifest,
     query: &TaskQuery,
+    budget: &mut RetrievalWorkBudget,
 ) -> Result<bool, RetrievalError> {
+    budget.charge_lexical_bytes(manifest.id.len())?;
     if query.matches_exact_term(&manifest.id)? {
         return Ok(true);
     }
     for alias in &manifest.retrieval.aliases {
+        budget.charge_lexical_bytes(alias.len())?;
         if query.matches_exact_term(alias)? {
             return Ok(true);
         }
@@ -1058,16 +1281,54 @@ fn exact_capability_match(
     Ok(false)
 }
 
+fn capability_candidate_bytes(manifest: &CapabilityManifest) -> usize {
+    let mut bytes = manifest
+        .id
+        .len()
+        .saturating_add(manifest.version.len())
+        .saturating_add(manifest.namespace.len())
+        .saturating_add(manifest.summary.len());
+    for value in manifest
+        .placement
+        .modes
+        .iter()
+        .chain(&manifest.placement.requires)
+        .chain(&manifest.retrieval.intents)
+        .chain(&manifest.retrieval.negative_examples)
+        .chain(&manifest.retrieval.complements)
+        .chain(&manifest.retrieval.aliases)
+        .chain(&manifest.effects.resources)
+        .chain(&manifest.policy.secret_handles)
+    {
+        bytes = bytes.saturating_add(value.len());
+    }
+    if let Some(value) = manifest.runtime.command.as_deref() {
+        bytes = bytes.saturating_add(value.len());
+    }
+    if let Some(value) = manifest.policy.approval.as_deref() {
+        bytes = bytes.saturating_add(value.len());
+    }
+    if let Some(value) = manifest.verification.default.as_deref() {
+        bytes = bytes.saturating_add(value.len());
+    }
+    bytes
+}
+
 fn preferred_placement_match(manifest: &CapabilityManifest, context: &SearchContext) -> bool {
     context
         .preferred_placement
         .as_ref()
-        .is_some_and(|preferred| manifest.placement.modes.contains(preferred))
+        .is_some_and(|preferred| {
+            context
+                .available_placements
+                .as_ref()
+                .is_some_and(|available| available.contains(preferred))
+                && manifest.placement.modes.contains(preferred)
+        })
 }
 
 struct V2Root<'a> {
     manifest: &'a CapabilityManifest,
-    document: RetrievalDocument,
     exact: bool,
     lexical_overlap: f32,
     preferred: bool,
@@ -1089,6 +1350,9 @@ fn v2_root_order(left: &V2Root<'_>, right: &V2Root<'_>) -> Ordering {
 }
 
 fn matches_context(manifest: &CapabilityManifest, context: &SearchContext) -> bool {
+    if manifest.lifecycle != CapabilityLifecycle::Active {
+        return false;
+    }
     if let Some(allowed) = &context.allowed_capability_ids
         && !allowed.iter().any(|id| id == &manifest.id || id == "*")
     {
@@ -1188,11 +1452,7 @@ fn lexical_score(
         .fold(0.0_f32, f32::max);
     score -= negative_penalty * 3.0;
 
-    if context
-        .preferred_placement
-        .as_ref()
-        .is_some_and(|preferred| manifest.placement.modes.contains(preferred))
-    {
+    if preferred_placement_match(manifest, context) {
         score += 0.25;
     }
 
@@ -1344,17 +1604,19 @@ mod tests {
     use tempfile::tempdir;
 
     use ditto_retrieval::{
-        Embedding, EmbeddingProviderError, EmbeddingPurpose, MAX_REQUEST_BYTES,
-        MAX_RETRIEVAL_DOCUMENT_BYTES, RetrievalError, TaskSignatureV2,
+        Embedding, EmbeddingProviderError, EmbeddingPurpose, MAX_PROVIDER_CALLS, MAX_REQUEST_BYTES,
+        MAX_RETRIEVAL_DOCUMENT_BYTES, RetrievalError, RetrievalWorkBudget, RetrievalWorkKind,
+        TaskSignatureV2,
     };
 
     use super::{
-        CapabilityCard, CapabilityCatalog, CapabilityError, CapabilityKind, CapabilityManifest,
-        CapabilityRootLimit, CapabilitySchema, CapabilitySchemaError, DataAccess, EffectProfile,
-        EffectSpec, EmbeddingProvider, ExecutionEpoch, ExecutionEpochLimit, Externality,
-        JSON_SCHEMA_DRAFT_2020_12_URI, JsonSchemaValidationError, Mutation, PlacementSpec,
-        PolicySpec, Privilege, RetrievalSpec, RuntimeSpec, RuntimeType, SearchContext, SearchMode,
-        TaskQuery, VerificationSpec, capability_retrieval_document, validate_json_schema,
+        CapabilityCard, CapabilityCatalog, CapabilityError, CapabilityKind, CapabilityLifecycle,
+        CapabilityManifest, CapabilityRootLimit, CapabilitySchema, CapabilitySchemaError,
+        DataAccess, EffectProfile, EffectSpec, EmbeddingProvider, ExecutionEpoch,
+        ExecutionEpochLimit, Externality, JSON_SCHEMA_DRAFT_2020_12_URI, JsonSchemaValidationError,
+        Mutation, PlacementSpec, PolicySpec, Privilege, RetrievalSpec, RuntimeSpec, RuntimeType,
+        SearchContext, SearchContextError, SearchMode, TaskQuery, VerificationSpec,
+        capability_retrieval_document, validate_json_schema,
     };
 
     const MANIFEST: &str = r#"
@@ -2097,6 +2359,7 @@ default = "exit-code-and-expected-output"
             .search_task_query(
                 &preferred_query,
                 &SearchContext {
+                    available_placements: Some(vec!["local".into(), "ssh".into()]),
                     preferred_placement: Some("local".into()),
                     ..SearchContext::catalogue()
                 },
@@ -2560,6 +2823,207 @@ default = "exit-code-and-expected-output"
     }
 
     #[test]
+    fn retired_and_quarantined_manifests_do_not_count_or_page_into_working_sets() {
+        let mut catalog = CapabilityCatalog::default();
+        for index in 0..=10_000 {
+            let mut inactive = manifest(
+                &format!("inactive.capability{index:05}"),
+                "wanted inactive operation",
+                &["local"],
+                &[],
+                &[],
+                EffectProfile::default(),
+                EffectProfile::default(),
+            );
+            inactive.lifecycle = if index % 2 == 0 {
+                CapabilityLifecycle::Retired
+            } else {
+                CapabilityLifecycle::Quarantined
+            };
+            catalog.insert(inactive).expect("inactive capability");
+        }
+        catalog
+            .insert(manifest(
+                "wanted.active",
+                "wanted active operation",
+                &["local"],
+                &[],
+                &[],
+                EffectProfile::default(),
+                EffectProfile::default(),
+            ))
+            .expect("active capability");
+
+        let query = TaskQuery::new(TaskSignatureV2::new("wanted")).expect("query");
+        let cards = catalog
+            .search_task_query(
+                &query,
+                &SearchContext::catalogue(),
+                CapabilityRootLimit::new(1).expect("root limit"),
+                ExecutionEpochLimit::new(1).expect("epoch limit"),
+                None,
+            )
+            .expect("only active candidates count");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "wanted.active");
+        assert_eq!(catalog.cards().len(), 1);
+    }
+
+    #[test]
+    fn search_context_is_bounded_canonical_and_validated_before_document_calls() {
+        let valid_values = (0..64)
+            .map(|index| format!("placement-{index:02}"))
+            .collect::<Vec<_>>();
+        let valid = SearchContext {
+            mode: SearchMode::Runtime,
+            available_placements: Some(valid_values.clone()),
+            preferred_placement: Some("placement-00".into()),
+            available_requirements: Some(Vec::new()),
+            effect_ceiling: Some(EffectProfile::default()),
+            allowed_capability_ids: Some(vec!["*".into()]),
+        };
+        valid.validate().expect("exact list maximum");
+
+        let mut too_many = valid.clone();
+        too_many
+            .available_placements
+            .as_mut()
+            .expect("placements")
+            .push("placement-64".into());
+        assert!(matches!(
+            too_many.validate(),
+            Err(SearchContextError::TooManyEntries {
+                field: "available_placements",
+                actual: 65,
+                maximum: 64,
+            })
+        ));
+
+        let mut duplicate = valid.clone();
+        duplicate.available_requirements = Some(vec!["process".into(), "process".into()]);
+        assert!(matches!(
+            duplicate.validate(),
+            Err(SearchContextError::DuplicateValue {
+                field: "available_requirements",
+                ..
+            })
+        ));
+        let mut non_canonical = valid.clone();
+        non_canonical.available_requirements = Some(vec!["Process".into()]);
+        assert_eq!(
+            non_canonical.validate(),
+            Err(SearchContextError::NonCanonicalValue {
+                field: "available_requirements"
+            })
+        );
+        let mut unavailable_preferred = SearchContext::catalogue();
+        unavailable_preferred.available_placements = Some(vec!["ssh".into()]);
+        unavailable_preferred.preferred_placement = Some("local".into());
+        assert_eq!(
+            unavailable_preferred.validate(),
+            Err(SearchContextError::PreferredPlacementUnavailable {
+                preferred: "local".into()
+            })
+        );
+
+        let mut catalog = CapabilityCatalog::default();
+        catalog
+            .insert(manifest(
+                "device.run",
+                "run operation",
+                &["local"],
+                &[],
+                &[],
+                EffectProfile::default(),
+                EffectProfile::default(),
+            ))
+            .expect("capability");
+        let provider = RecordingProvider::new();
+        let query = TaskQuery::with_provider(TaskSignatureV2::new("run"), Some(&provider))
+            .expect("embedded query");
+        let error = catalog
+            .search_task_query(
+                &query,
+                &unavailable_preferred,
+                CapabilityRootLimit::new(1).expect("root limit"),
+                ExecutionEpochLimit::new(1).expect("epoch limit"),
+                Some(&provider),
+            )
+            .expect_err("invalid search context");
+        assert!(matches!(
+            error,
+            super::CapabilitySearchError::InvalidSearchContext(
+                SearchContextError::PreferredPlacementUnavailable { .. }
+            )
+        ));
+        assert_eq!(provider.document_call_count(), 0);
+    }
+
+    #[test]
+    fn capability_ranking_shares_provider_budget_and_keeps_only_bounded_roots() {
+        let mut catalog = CapabilityCatalog::default();
+        for index in 0..1_000 {
+            catalog
+                .insert(manifest(
+                    &format!("device.operation{index:04}"),
+                    "common operation",
+                    &["local"],
+                    &[],
+                    &[],
+                    EffectProfile::default(),
+                    EffectProfile::default(),
+                ))
+                .expect("capability");
+        }
+        let lexical_query =
+            TaskQuery::new(TaskSignatureV2::new("common operation")).expect("lexical query");
+        let cards = catalog
+            .search_task_query(
+                &lexical_query,
+                &SearchContext::catalogue(),
+                CapabilityRootLimit::new(1).expect("root limit"),
+                ExecutionEpochLimit::new(1).expect("epoch limit"),
+                None,
+            )
+            .expect("streaming top-k search");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, "device.operation0000");
+
+        let provider = RecordingProvider::new();
+        let mut budget = RetrievalWorkBudget::new();
+        for _ in 0..(MAX_PROVIDER_CALLS - 1) {
+            budget
+                .charge_provider_call(0)
+                .expect("preload provider budget");
+        }
+        let embedded_query = TaskQuery::with_provider_and_budget(
+            TaskSignatureV2::new("common operation"),
+            Some(&provider),
+            &mut budget,
+        )
+        .expect("Nth provider call");
+        let error = catalog
+            .search_task_query_with_budget(
+                &embedded_query,
+                &SearchContext::catalogue(),
+                CapabilityRootLimit::new(1).expect("root limit"),
+                ExecutionEpochLimit::new(1).expect("epoch limit"),
+                Some(&provider),
+                &mut budget,
+            )
+            .expect_err("N+1 provider call");
+        assert!(matches!(
+            error,
+            super::CapabilitySearchError::Retrieval(RetrievalError::WorkBudgetExceeded {
+                kind: RetrievalWorkKind::ProviderCalls,
+                attempted,
+                maximum,
+            }) if attempted == MAX_PROVIDER_CALLS + 1 && maximum == MAX_PROVIDER_CALLS
+        ));
+        assert_eq!(provider.document_call_count(), 0);
+    }
+
+    #[test]
     fn legacy_search_surface_and_historical_bounds_stay_source_compatible() {
         let _: fn(&CapabilityCatalog, &str, usize) -> Vec<CapabilityCard> =
             CapabilityCatalog::search;
@@ -2946,6 +3410,7 @@ default = "exit-code-and-expected-output"
             version: "0.1.0".into(),
             namespace: id.split('.').next().unwrap_or("test").into(),
             kind: CapabilityKind::Tool,
+            lifecycle: CapabilityLifecycle::Active,
             summary: summary.into(),
             runtime: RuntimeSpec {
                 runtime_type: RuntimeType::Builtin,

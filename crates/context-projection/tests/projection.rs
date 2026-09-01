@@ -13,9 +13,9 @@ use ditto_context::{
 use ditto_context_projection::{
     CONTEXT_NODE_EVENT_VERSION, CONTEXT_PROJECTION_DATABASE_FILENAME, ContextNodeDraft,
     ContextNodeRecordedPayloadV1, ContextProjection, ContextProjectionError,
-    ContextProjectionSnapshot, MAX_CONTEXT_NODE_ID_BYTES, MAX_CONTEXT_SOURCE_EVENT_IDS,
+    DerivedContextSnapshot, MAX_CONTEXT_NODE_ID_BYTES, MAX_CONTEXT_SOURCE_EVENT_IDS,
     MAX_CONTEXT_SUMMARY_BYTES, MAX_CONTEXT_SUPERSEDES, MAX_SERIALIZED_CONTEXT_NODE_BYTES,
-    MAX_SERIALIZED_CONTEXT_PAYLOAD_BYTES,
+    MAX_SERIALIZED_CONTEXT_PAYLOAD_BYTES, VerifiedContextSnapshot,
 };
 use ditto_event_store::EventStore;
 use ditto_protocol::{EventActor, EventRecord, NewEvent, event_kind};
@@ -168,9 +168,25 @@ fn record_node(
     )
 }
 
-fn snapshot_ids(snapshot: &ContextProjectionSnapshot) -> Vec<String> {
+trait SnapshotCandidates {
+    fn candidate_slice(&self) -> &[ContextNode];
+}
+
+impl SnapshotCandidates for DerivedContextSnapshot {
+    fn candidate_slice(&self) -> &[ContextNode] {
+        self.candidates()
+    }
+}
+
+impl SnapshotCandidates for VerifiedContextSnapshot {
+    fn candidate_slice(&self) -> &[ContextNode] {
+        self.candidates()
+    }
+}
+
+fn snapshot_ids(snapshot: &impl SnapshotCandidates) -> Vec<String> {
     snapshot
-        .candidates()
+        .candidate_slice()
         .iter()
         .map(|candidate| candidate.id.clone())
         .collect()
@@ -180,7 +196,7 @@ fn verified_snapshot(
     fixture: &Fixture,
     session_id: &str,
     task_id: Option<&str>,
-) -> Result<ContextProjectionSnapshot, ContextProjectionError> {
+) -> Result<VerifiedContextSnapshot, ContextProjectionError> {
     let high_water = fixture
         .store
         .latest_seq()
@@ -3783,11 +3799,11 @@ fn trusted_draft_validation_is_projection_anchored_and_derives_causation() {
     .expect_err("oversized identity is rejected before event-store access");
     assert!(matches!(
         &oversized_error,
-        ContextProjectionError::DurableBytesExceeded {
-            field: "context node id",
+        ContextProjectionError::Retrieval(RetrievalError::IdentifierTooLong {
+            field: "context_node_id",
             actual: 1_048_576,
             maximum: 256,
-        }
+        })
     ));
     let rendered_oversized_error = oversized_error.to_string();
     assert!(rendered_oversized_error.len() < 256);
@@ -4059,7 +4075,9 @@ fn verified_snapshot_is_clean_and_exactly_isolates_session_and_task_scopes() {
             |row| row.get(0),
         )
         .expect("sibling row remains untouched");
-    assert_eq!(still_corrupt, "{}");
+    let repaired_sibling: ContextNode =
+        serde_json::from_str(&still_corrupt).expect("generation repair restores sibling row");
+    assert_eq!(repaired_sibling.id, "task-b-node");
     drop(connection);
     assert_eq!(
         snapshot_ids(
@@ -4068,6 +4086,128 @@ fn verified_snapshot_is_clean_and_exactly_isolates_session_and_task_scopes() {
         ),
         vec!["session-root", "task-b-node"]
     );
+}
+
+#[test]
+fn verified_snapshot_reuses_one_full_replay_and_advances_by_delta() {
+    let fixture = fixture();
+    let source = append_source_event(
+        &fixture.store,
+        SESSION,
+        None,
+        EventActor::User,
+        "verified.metrics.source",
+    );
+    record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "metrics-first",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "metrics first",
+        ),
+    );
+    fixture
+        .projection
+        .rebuild(&fixture.store)
+        .expect("one startup replay");
+    let initial = fixture
+        .projection
+        .verification_metrics()
+        .expect("initial metrics");
+    assert_eq!(initial.full_replays, 1);
+
+    verified_snapshot(&fixture, SESSION, None).expect("first fast snapshot");
+    verified_snapshot(&fixture, SESSION, None).expect("second fast snapshot");
+    let steady = fixture
+        .projection
+        .verification_metrics()
+        .expect("steady metrics");
+    assert_eq!(steady.full_replays, 1);
+    assert_eq!(steady.delta_synchronizations, 0);
+    assert_eq!(steady.fast_snapshots, 2);
+
+    record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "metrics-second",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id],
+            Vec::new(),
+            "metrics second",
+        ),
+    );
+    let advanced = verified_snapshot(&fixture, SESSION, None).expect("delta snapshot");
+    assert_eq!(
+        snapshot_ids(&advanced),
+        vec!["metrics-first", "metrics-second"]
+    );
+    let delta = fixture
+        .projection
+        .verification_metrics()
+        .expect("delta metrics");
+    assert_eq!(delta.full_replays, 1);
+    assert_eq!(delta.delta_synchronizations, 1);
+    assert_eq!(delta.fast_snapshots, 3);
+}
+
+#[test]
+fn inactive_history_above_candidate_limit_does_not_block_active_snapshot() {
+    let fixture = fixture();
+    let source = append_source_event(
+        &fixture.store,
+        SESSION,
+        None,
+        EventActor::User,
+        "verified.inactive.source",
+    );
+    for index in 0..=MAX_CANDIDATE_COUNT {
+        record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                format!("inactive-{index:05}"),
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Disputed,
+                vec![source.event_id.clone()],
+                Vec::new(),
+                "inactive history",
+            ),
+        );
+    }
+    record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "active-after-history",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id],
+            Vec::new(),
+            "active history",
+        ),
+    );
+    fixture
+        .projection
+        .rebuild(&fixture.store)
+        .expect("rebuild complete history");
+
+    let snapshot = verified_snapshot(&fixture, SESSION, None).expect("active-only snapshot");
+    assert_eq!(snapshot.scanned_rows(), 1);
+    assert_eq!(snapshot_ids(&snapshot), vec!["active-after-history"]);
 }
 
 #[test]
@@ -4381,7 +4521,7 @@ fn verified_snapshot_repairs_complete_incoming_and_outgoing_edge_shapes() {
         let repaired = verified_snapshot(&fixture, SESSION, None).expect("verified edge repair");
         assert_eq!(
             snapshot_ids(&repaired),
-            vec!["other-target", "edge-replacement"],
+            vec!["edge-replacement", "other-target"],
             "{mutation}"
         );
         let connection = Connection::open(&fixture.projection_path).expect("inspect edge repair");
@@ -4604,7 +4744,7 @@ fn behind_checkpoint_deleted_or_altered_supersession_target_rebuilds_before_appl
                 None,
             )
             .expect("target corruption must rebuild before supersession apply");
-        assert_eq!(snapshot.scanned_rows(), 2, "{corruption}");
+        assert_eq!(snapshot.scanned_rows(), 1, "{corruption}");
         assert_eq!(
             snapshot_ids(&snapshot),
             vec!["delta-replacement"],

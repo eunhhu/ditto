@@ -1,12 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use ditto_retrieval::{
-    CandidateCount, CapabilityRootLimit, Embedding, EmbeddingProvider, EmbeddingProviderError,
-    EmbeddingPurpose, EmbeddingVector, ExecutionEpochLimit, MAX_CANONICAL_QUERY_BYTES,
-    MAX_COMPONENT_BYTES, MAX_CONTEXT_RESULT_LIMIT, MAX_EMBEDDING_DESCRIPTOR_BYTES,
-    MAX_EMBEDDING_DIMENSION, MAX_LEXICAL_TOKENS, MAX_REQUEST_BYTES, MAX_RETRIEVAL_DOCUMENT_BYTES,
-    MAX_SET_ENTRIES, RetrievalDocument, RetrievalError, RetrievalMode, TaskQuery, TaskSignatureV2,
-    cosine_similarity,
+    CandidateCount, CapabilityRootLimit, ContextNodeId, Embedding, EmbeddingProvider,
+    EmbeddingProviderError, EmbeddingPurpose, EmbeddingVector, ExecutionEpochLimit,
+    MAX_CANONICAL_QUERY_BYTES, MAX_COMPONENT_BYTES, MAX_CONTEXT_RESULT_LIMIT,
+    MAX_EMBEDDING_DESCRIPTOR_BYTES, MAX_EMBEDDING_DIMENSION, MAX_LEXICAL_TOKENS,
+    MAX_PROVIDER_CALLS, MAX_PROVIDER_INPUT_BYTES, MAX_REQUEST_BYTES, MAX_RETRIEVAL_DOCUMENT_BYTES,
+    MAX_RETRIEVAL_IDENTIFIER_BYTES, MAX_SET_ENTRIES, MAX_TOTAL_CANDIDATE_BYTES,
+    MAX_TOTAL_DOCUMENT_BYTES, MAX_TOTAL_LEXICAL_BYTES, RetrievalDocument, RetrievalError,
+    RetrievalMode, RetrievalScope, RetrievalWorkBudget, RetrievalWorkKind, SessionId, TaskId,
+    TaskQuery, TaskSignatureV2, canonical_exact_identity, cosine_similarity,
 };
 
 #[derive(Clone)]
@@ -542,4 +545,143 @@ fn descriptor_n_plus_one_is_rejected_without_partial_value() {
         }) if actual == MAX_EMBEDDING_DESCRIPTOR_BYTES + 1
     ));
     assert!(ditto_retrieval::EmbeddingDescriptor::new("").is_err());
+}
+
+#[test]
+fn cumulative_work_budget_accepts_each_exact_maximum_and_rejects_n_plus_one() {
+    let dimensions = [
+        (RetrievalWorkKind::CandidateBytes, MAX_TOTAL_CANDIDATE_BYTES),
+        (RetrievalWorkKind::DocumentBytes, MAX_TOTAL_DOCUMENT_BYTES),
+        (RetrievalWorkKind::LexicalBytes, MAX_TOTAL_LEXICAL_BYTES),
+    ];
+
+    for (kind, maximum) in dimensions {
+        let mut budget = RetrievalWorkBudget::new();
+        let charge = match kind {
+            RetrievalWorkKind::CandidateBytes => RetrievalWorkBudget::charge_candidate_bytes,
+            RetrievalWorkKind::DocumentBytes => RetrievalWorkBudget::charge_document_bytes,
+            RetrievalWorkKind::LexicalBytes => RetrievalWorkBudget::charge_lexical_bytes,
+            _ => unreachable!("byte-only dimensions"),
+        };
+        charge(&mut budget, maximum).expect("exact maximum must be accepted");
+        assert_eq!(
+            charge(&mut budget, 1),
+            Err(RetrievalError::WorkBudgetExceeded {
+                kind,
+                attempted: maximum + 1,
+                maximum,
+            })
+        );
+    }
+
+    let mut calls = RetrievalWorkBudget::new();
+    for _ in 0..MAX_PROVIDER_CALLS {
+        calls
+            .charge_provider_call(0)
+            .expect("exact provider-call maximum");
+    }
+    assert_eq!(
+        calls.charge_provider_call(0),
+        Err(RetrievalError::WorkBudgetExceeded {
+            kind: RetrievalWorkKind::ProviderCalls,
+            attempted: MAX_PROVIDER_CALLS + 1,
+            maximum: MAX_PROVIDER_CALLS,
+        })
+    );
+    assert_eq!(calls.provider_calls(), MAX_PROVIDER_CALLS);
+
+    let mut input = RetrievalWorkBudget::new();
+    input
+        .charge_provider_call(MAX_PROVIDER_INPUT_BYTES)
+        .expect("exact provider-input maximum");
+    assert_eq!(
+        input.charge_provider_call(1),
+        Err(RetrievalError::WorkBudgetExceeded {
+            kind: RetrievalWorkKind::ProviderInputBytes,
+            attempted: MAX_PROVIDER_INPUT_BYTES + 1,
+            maximum: MAX_PROVIDER_INPUT_BYTES,
+        })
+    );
+    assert_eq!(input.provider_calls(), 1, "failed reservation is atomic");
+    assert_eq!(input.provider_input_bytes(), MAX_PROVIDER_INPUT_BYTES);
+}
+
+#[test]
+fn provider_budget_is_reserved_before_an_external_call() {
+    let provider = FixtureProvider::success();
+    let mut budget = RetrievalWorkBudget::new();
+    for _ in 0..(MAX_PROVIDER_CALLS - 1) {
+        budget
+            .charge_provider_call(0)
+            .expect("preload the request budget");
+    }
+    let query = TaskQuery::with_provider_and_budget(
+        TaskSignatureV2::new("query"),
+        Some(&provider),
+        &mut budget,
+    )
+    .expect("the Nth provider call must run");
+    assert_eq!(provider.calls().len(), 1);
+
+    let document = RetrievalDocument::new("document").expect("bounded document");
+    assert_eq!(
+        query.embed_document_with_budget(&provider, &document, &mut budget),
+        Err(RetrievalError::WorkBudgetExceeded {
+            kind: RetrievalWorkKind::ProviderCalls,
+            attempted: MAX_PROVIDER_CALLS + 1,
+            maximum: MAX_PROVIDER_CALLS,
+        })
+    );
+    assert_eq!(
+        provider.calls().len(),
+        1,
+        "an over-budget provider call must not escape the process"
+    );
+}
+
+#[test]
+fn working_set_identifiers_are_bounded_and_canonical_at_admission() {
+    let session = SessionId::new("Session-01").expect("opaque session identity");
+    let task = TaskId::new("task-01").expect("opaque task identity");
+    let scope = RetrievalScope::task(session, task);
+    assert_eq!(scope.session_id(), "Session-01");
+    assert_eq!(scope.task_id(), Some("task-01"));
+
+    assert!(SessionId::new("s".repeat(MAX_RETRIEVAL_IDENTIFIER_BYTES)).is_ok());
+    assert!(matches!(
+        SessionId::new("s".repeat(MAX_RETRIEVAL_IDENTIFIER_BYTES + 1)),
+        Err(RetrievalError::IdentifierTooLong {
+            field: "session_id",
+            actual,
+            maximum: MAX_RETRIEVAL_IDENTIFIER_BYTES,
+        }) if actual == MAX_RETRIEVAL_IDENTIFIER_BYTES + 1
+    ));
+    assert_eq!(
+        TaskId::new(" task"),
+        Err(RetrievalError::IdentifierSurroundingWhitespace { field: "task_id" })
+    );
+    assert_eq!(
+        SessionId::new("session\u{200b}"),
+        Err(RetrievalError::IdentifierForbiddenCharacter {
+            field: "session_id"
+        })
+    );
+    assert_eq!(
+        SessionId::new("de\u{301}mo"),
+        Err(RetrievalError::IdentifierNotNfc {
+            field: "session_id"
+        })
+    );
+
+    assert_eq!(
+        canonical_exact_identity("  DÉMO\tNode ").expect("canonical exact identity"),
+        "démo node"
+    );
+    assert!(ContextNodeId::new("démo-node").is_ok());
+    assert_eq!(
+        ContextNodeId::new("DÉMO-node"),
+        Err(RetrievalError::IdentifierNotCanonicalExact {
+            field: "context_node_id"
+        })
+    );
 }
