@@ -1,12 +1,12 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use ditto_protocol::{EventActor, EventQuery, EventRecord, NewEvent};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -75,18 +75,18 @@ pub struct EventStore {
 impl EventStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, EventStoreError> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)?;
-        }
+        let sqlite_path = prepare_private_sqlite_path(path)?;
 
-        let mut connection = Connection::open(path)?;
+        let mut connection = Connection::open_with_flags(
+            &sqlite_path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         apply_migrations(&mut connection)?;
+        enforce_private_sqlite_files(path)?;
 
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -247,6 +247,141 @@ impl EventStore {
             .lock()
             .map_err(|_| EventStoreError::Poisoned)
     }
+}
+
+fn prepare_private_sqlite_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SQLite database path requires an explicit private parent directory",
+            )
+        })?;
+    ensure_private_directory(parent)?;
+    for candidate in sqlite_family_paths(path) {
+        validate_private_file(&candidate)?;
+    }
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)?;
+    }
+    validate_private_file(path)?;
+    let filename = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite database path has no filename",
+        )
+    })?;
+    Ok(fs::canonicalize(parent)?.join(filename))
+}
+
+fn enforce_private_sqlite_files(path: &Path) -> Result<(), std::io::Error> {
+    for candidate in sqlite_family_paths(path) {
+        validate_private_file(&candidate)?;
+    }
+    Ok(())
+}
+
+fn sqlite_family_paths(path: &Path) -> [PathBuf; 3] {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    [path.to_path_buf(), PathBuf::from(wal), PathBuf::from(shm)]
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), std::io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => validate_private_directory_metadata(path, &metadata)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                let mut builder = fs::DirBuilder::new();
+                builder.recursive(true).mode(0o700).create(path)?;
+            }
+            #[cfg(not(unix))]
+            fs::create_dir_all(path)?;
+            let metadata = fs::symlink_metadata(path)?;
+            validate_private_directory_metadata(path, &metadata)?;
+        }
+        Err(error) => return Err(error),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn validate_private_directory_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), std::io::Error> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(unsafe_path(
+            path,
+            "private SQLite parent is not a real directory",
+        ));
+    }
+    validate_current_owner(path, metadata)
+}
+
+fn validate_private_file(path: &Path) -> Result<(), std::io::Error> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(unsafe_path(
+            path,
+            "SQLite family member is not a regular file",
+        ));
+    }
+    validate_current_owner(path, &metadata)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_current_owner(path: &Path, metadata: &fs::Metadata) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: `geteuid` reads process identity and has no preconditions.
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        return Err(unsafe_path(
+            path,
+            "SQLite path is not owned by the current user",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_current_owner(_path: &Path, _metadata: &fs::Metadata) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
+fn unsafe_path(path: &Path, reason: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("{reason}: {}", path.display()),
+    )
 }
 
 fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> {
@@ -600,5 +735,66 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[1].seq == pair[0].seq + 1)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_family_is_private_regular_and_owned_by_the_effective_user() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempdir().expect("temporary directory");
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).expect("create data directory");
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o777))
+            .expect("loosen fixture directory");
+        let path = private.join("state.db");
+        let store = EventStore::open(&path).expect("open private store");
+        store
+            .append(NewEvent::user_input("session", None, "private"))
+            .expect("create WAL family");
+
+        let directory_metadata = std::fs::symlink_metadata(&private).expect("directory metadata");
+        assert_eq!(directory_metadata.permissions().mode() & 0o777, 0o700);
+        // SAFETY: `geteuid` reads process identity and has no preconditions.
+        let effective_uid = unsafe { libc::geteuid() };
+        assert_eq!(directory_metadata.uid(), effective_uid);
+        for member in super::sqlite_family_paths(&path) {
+            let Ok(metadata) = std::fs::symlink_metadata(&member) else {
+                continue;
+            };
+            assert!(metadata.is_file());
+            assert!(!metadata.file_type().is_symlink());
+            assert_eq!(metadata.uid(), effective_uid);
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_open_rejects_database_and_parent_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().expect("temporary directory");
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).expect("create private directory");
+        let target = directory.path().join("target.db");
+        std::fs::File::create(&target).expect("create symlink target");
+        let database_link = private.join("state.db");
+        symlink(&target, &database_link).expect("create database symlink");
+        assert!(matches!(
+            EventStore::open(&database_link),
+            Err(super::EventStoreError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+
+        let real_parent = directory.path().join("real-parent");
+        std::fs::create_dir(&real_parent).expect("create real parent");
+        let parent_link = directory.path().join("parent-link");
+        symlink(&real_parent, &parent_link).expect("create parent symlink");
+        assert!(matches!(
+            EventStore::open(parent_link.join("state.db")),
+            Err(super::EventStoreError::Io(error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
     }
 }

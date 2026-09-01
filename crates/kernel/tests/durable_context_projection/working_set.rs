@@ -350,8 +350,10 @@ fn working_set_admit_task(
 
 fn working_set_request(request: &str) -> ditto_kernel::WorkingSetRequest {
     ditto_kernel::WorkingSetRequest {
-        session_id: SESSION_A.to_owned(),
-        task_id: Some(TASK_A.to_owned()),
+        scope: ditto_retrieval::RetrievalScope::task(
+            ditto_retrieval::SessionId::new(SESSION_A).expect("session scope"),
+            ditto_retrieval::TaskId::new(TASK_A).expect("task scope"),
+        ),
         signature: ditto_retrieval::TaskSignatureV2::new(request),
         context_token_budget: None,
         context_result_limit: 32,
@@ -1170,6 +1172,79 @@ fn prefilter_scan_and_zero_n_plus_one_limits_return_no_partial_working_set() {
             .expect("capability overflow event count"),
         0
     );
+}
+
+#[test]
+fn invalid_scope_and_search_context_are_rejected_before_provider_io() {
+    let provider = WorkingSetProvider::new(WorkingSetProviderMode::Stable);
+    let fixture = WorkingSetFixture::new(&[], Some(Arc::new(provider.clone())));
+
+    assert!(matches!(
+        ditto_retrieval::SessionId::new("bad\nsession"),
+        Err(ditto_retrieval::RetrievalError::IdentifierForbiddenCharacter {
+            field: "session_id"
+        })
+    ));
+    assert!(provider.calls().is_empty());
+
+    let mut request = working_set_request("invalid placement context");
+    request.capability_search.available_placements = Some(vec!["ssh".into()]);
+    request.capability_search.preferred_placement = Some("local".into());
+    let error = fixture
+        .kernel
+        .retrieve_working_set(request)
+        .expect_err("unavailable preferred placement");
+    assert!(matches!(
+        error,
+        ditto_kernel::WorkingSetError::CapabilitySearch(
+            ditto_capability::CapabilitySearchError::InvalidSearchContext(
+                ditto_capability::SearchContextError::PreferredPlacementUnavailable { .. }
+            )
+        )
+    ));
+    assert!(
+        provider.calls().is_empty(),
+        "invalid scope/context must precede the shared query provider call"
+    );
+}
+
+#[test]
+fn repeated_working_sets_reuse_startup_verification_and_advance_by_delta() {
+    let fixture = WorkingSetFixture::new(&[], None);
+    let startup = fixture
+        .kernel
+        .retrieval_verification_metrics()
+        .expect("startup verification metrics");
+    assert_eq!(startup.full_replays, 1);
+
+    let request = working_set_request("steady retrieval");
+    fixture
+        .kernel
+        .retrieve_working_set(request.clone())
+        .expect("first steady snapshot");
+    fixture
+        .kernel
+        .retrieve_working_set(request.clone())
+        .expect("second steady snapshot");
+    let steady = fixture
+        .kernel
+        .retrieval_verification_metrics()
+        .expect("steady verification metrics");
+    assert_eq!(steady.full_replays, 1);
+    assert_eq!(steady.fast_snapshots, 2);
+
+    working_set_source(&fixture.store, SESSION_A, None, "delta-metrics");
+    fixture
+        .kernel
+        .retrieve_working_set(request)
+        .expect("delta working set");
+    let delta = fixture
+        .kernel
+        .retrieval_verification_metrics()
+        .expect("delta verification metrics");
+    assert_eq!(delta.full_replays, 1);
+    assert_eq!(delta.delta_synchronizations, 1);
+    assert_eq!(delta.fast_snapshots, 3);
 }
 
 fn embedded_failure_fixture(

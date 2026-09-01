@@ -6,7 +6,8 @@ Run the canonical gate from the repository root:
 ./scripts/agent-check.sh
 ```
 
-The script checks formatting, strict Clippy, workspace tests, and required agent
+The script checks tracked-artifact, developer-path, and credential-shaped
+canaries before formatting, strict Clippy, workspace tests, and required agent
 control files. CI additionally verifies the declared MSRV.
 
 ## Evidence by change type

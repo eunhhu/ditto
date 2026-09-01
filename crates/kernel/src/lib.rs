@@ -160,7 +160,7 @@ impl DittoKernel {
     ) -> Result<Self, KernelError> {
         let events = EventStore::open(config.data_dir.join("state.db"))?;
         let context_projection = ContextProjection::open_in(&config.data_dir)?;
-        context_projection.synchronize(&events)?;
+        context_projection.rebuild(&events)?;
         let artifacts = ArtifactStore::with_max_object_bytes(
             config.data_dir.join("artifacts"),
             config.artifact_max_object_bytes,
