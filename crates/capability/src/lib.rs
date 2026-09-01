@@ -1701,9 +1701,9 @@ mod tests {
         CapabilityManifest, CapabilityRootLimit, CapabilitySchema, CapabilitySchemaError,
         DataAccess, EffectProfile, EffectSpec, EmbeddingProvider, ExecutionEpochEvidence,
         ExecutionEpochLimit, Externality, JSON_SCHEMA_DRAFT_2020_12_URI, JsonSchemaValidationError,
-        Mutation, PlacementSpec, PolicySpec, Privilege, RetrievalSpec, RuntimeSpec, RuntimeType,
-        SearchContext, SearchContextError, SearchMode, TaskQuery, VerificationSpec,
-        capability_retrieval_document, validate_json_schema,
+        MAX_INVOCATION_VALUE_DEPTH, Mutation, PlacementSpec, PolicySpec, Privilege, RetrievalSpec,
+        RuntimeSpec, RuntimeType, SearchContext, SearchContextError, SearchMode, TaskQuery,
+        VerificationSpec, capability_retrieval_document, validate_json_schema,
     };
 
     const MANIFEST: &str = r#"
@@ -2106,6 +2106,27 @@ default = "exit-code-and-expected-output"
                 })
             ));
         }
+    }
+
+    #[test]
+    fn capability_schema_preflights_complete_depth_before_recursive_structure_checks() {
+        let mut input_schema = serde_json::json!({"type": "string"});
+        for _ in 0..=MAX_INVOCATION_VALUE_DEPTH {
+            input_schema = serde_json::json!({"items": input_schema});
+        }
+        let schema = CapabilitySchema {
+            id: "artifact.read".into(),
+            version: "1.0.0".into(),
+            summary: "Read an artifact".into(),
+            input_schema,
+            output_schema: serde_json::json!(true),
+        };
+        assert!(matches!(
+            schema.validate(),
+            Err(CapabilitySchemaError::InvalidSchema {
+                field: "input_schema"
+            })
+        ));
     }
 
     #[test]
