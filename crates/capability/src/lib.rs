@@ -23,10 +23,10 @@ pub use invocation::{
     ArgumentStage, ArtifactResourceId, CanonicalInvocation, CanonicalPathResource,
     CanonicalPathRoot, CanonicalResource, CanonicalResourceError, CapabilityDeriver,
     CapabilityRevision, CapabilityRevisionError, DerivationBudget, DeriverError, DeriverRevision,
-    IdempotencyKey, InvocableCapabilityBinding, InvocationCompiler, InvocationDigest,
-    InvocationError, InvocationId, LiveExecutionEpoch, ManifestDigest, ResolvedPlacement,
-    SchemaDigest, ToolCallId, UntrustedToolCall, UntrustedToolCallError, canonical_manifest_digest,
-    canonical_schema_digest,
+    EpochAuthorizationTicket, IdempotencyKey, InvocableCapabilityBinding, InvocationCompiler,
+    InvocationDigest, InvocationError, InvocationId, LiveExecutionEpoch, ManifestDigest,
+    ResolvedPlacement, SchemaDigest, ToolCallId, UntrustedToolCall, UntrustedToolCallError,
+    canonical_manifest_digest, canonical_schema_digest,
 };
 pub use schema_instance::{
     InvocationSchemaError, MAX_INVOCATION_ARGUMENT_BYTES, MAX_INVOCATION_SCHEMA_BYTES,

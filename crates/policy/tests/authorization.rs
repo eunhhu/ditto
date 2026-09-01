@@ -97,15 +97,16 @@ fn time() -> DateTime<Utc> {
         .expect("time")
 }
 
-fn authorizer<'epoch>(
-    fixture: &'epoch Fixture,
-    expires_at: DateTime<Utc>,
-) -> InvocationAuthorizer<'epoch> {
-    InvocationAuthorizer::for_epoch(&fixture.epoch, expires_at).expect("epoch authorizer")
+fn authorizer(fixture: &mut Fixture, expires_at: DateTime<Utc>) -> InvocationAuthorizer {
+    let ticket = fixture
+        .epoch
+        .seal_for_authorization()
+        .expect("epoch authorization ticket");
+    InvocationAuthorizer::from_ticket(ticket, expires_at).expect("epoch authorizer")
 }
 
 fn register_lease(
-    authorizer: &InvocationAuthorizer<'_>,
+    authorizer: &InvocationAuthorizer,
     scope: &CanonicalInvocation,
     id: &str,
     calls: u32,
@@ -135,7 +136,7 @@ fn register_lease(
 #[test]
 fn static_artifact_policy_issues_only_a_matching_epoch_bounded_permit() {
     let now = time();
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let canonical = fixture.invocation("static", 1);
     let resource = canonical
         .resources()
@@ -144,7 +145,7 @@ fn static_artifact_policy_issues_only_a_matching_epoch_bounded_permit() {
         .expect("resource")
         .clone();
     let epoch_expiry = now + Duration::minutes(1);
-    let authorizer = authorizer(&fixture, epoch_expiry);
+    let authorizer = authorizer(&mut fixture, epoch_expiry);
     let outcome = authorizer
         .authorize_static(
             &canonical,
@@ -171,8 +172,8 @@ fn static_artifact_policy_issues_only_a_matching_epoch_bounded_permit() {
 #[test]
 fn failed_authorization_does_not_consume_and_successful_retry_consumes_once() {
     let now = time();
-    let fixture = Fixture::new();
-    let authorizer = authorizer(&fixture, now + Duration::hours(1));
+    let mut fixture = Fixture::new();
+    let authorizer = authorizer(&mut fixture, now + Duration::hours(1));
     let invocation = fixture.invocation("retry", 1);
     authorizer
         .register_lease(
@@ -219,12 +220,12 @@ fn failed_authorization_does_not_consume_and_successful_retry_consumes_once() {
 #[test]
 fn invocation_id_digest_conflict_fails_closed_inside_epoch() {
     let now = time();
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let first = fixture.invocation("conflict", 1);
     let conflicting = fixture.invocation("conflict", 2);
     assert_eq!(first.invocation_id(), conflicting.invocation_id());
     assert_ne!(first.digest(), conflicting.digest());
-    let authorizer = authorizer(&fixture, now + Duration::hours(1));
+    let authorizer = authorizer(&mut fixture, now + Duration::hours(1));
     let resource = first.resources().iter().next().expect("resource").clone();
     let policy = StaticPolicy::artifact_read(resource).expect("policy");
     authorizer
@@ -239,9 +240,9 @@ fn invocation_id_digest_conflict_fails_closed_inside_epoch() {
 #[test]
 fn approval_required_issues_no_permit_and_consumes_nothing() {
     let now = time();
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let invocation = fixture.invocation("approval", 1);
-    let authorizer = authorizer(&fixture, now + Duration::hours(1));
+    let authorizer = authorizer(&mut fixture, now + Duration::hours(1));
     register_lease(
         &authorizer,
         &invocation,
@@ -265,10 +266,10 @@ fn approval_required_issues_no_permit_and_consumes_nothing() {
 #[test]
 fn concurrent_one_call_lease_issues_at_most_one_permit() {
     let now = time();
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let first = fixture.invocation("race-a", 1);
     let second = fixture.invocation("race-b", 1);
-    let authorizer = authorizer(&fixture, now + Duration::hours(1));
+    let authorizer = authorizer(&mut fixture, now + Duration::hours(1));
     register_lease(
         &authorizer,
         &first,
@@ -313,7 +314,7 @@ fn concurrent_one_call_lease_issues_at_most_one_permit() {
 #[test]
 fn authorizer_rejects_other_or_expired_epochs() {
     let now = time();
-    let first = Fixture::new();
+    let mut first = Fixture::new();
     let second = Fixture::new();
     let first_invocation = first.invocation("first", 1);
     let second_invocation = second.invocation("second", 1);
@@ -324,7 +325,7 @@ fn authorizer_rejects_other_or_expired_epochs() {
         .expect("resource")
         .clone();
     let policy = StaticPolicy::artifact_read(resource).expect("policy");
-    let authorizer = authorizer(&first, now + Duration::minutes(1));
+    let authorizer = authorizer(&mut first, now + Duration::minutes(1));
     assert_eq!(
         authorizer.authorize_static(&second_invocation, &policy, now),
         Err(PolicyError::EpochMismatch)
@@ -338,7 +339,7 @@ fn authorizer_rejects_other_or_expired_epochs() {
 #[test]
 fn permit_issues_exactly_one_non_cloneable_execution_claim() {
     let now = time();
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let invocation = fixture.invocation("claim", 1);
     let resource = invocation
         .resources()
@@ -346,7 +347,7 @@ fn permit_issues_exactly_one_non_cloneable_execution_claim() {
         .next()
         .expect("resource")
         .clone();
-    let authorizer = authorizer(&fixture, now + Duration::minutes(1));
+    let authorizer = authorizer(&mut fixture, now + Duration::minutes(1));
     let AuthorizationOutcome::Permitted(permit) = authorizer
         .authorize_static(
             &invocation,
@@ -358,7 +359,8 @@ fn permit_issues_exactly_one_non_cloneable_execution_claim() {
         panic!("static policy must permit");
     };
     let duplicate = permit.clone();
-    let claim = authorizer
+    let alternate_path = authorizer.clone();
+    let claim = alternate_path
         .claim_execution(permit, &invocation, now)
         .expect("first claim");
     assert_eq!(claim.epoch_id(), fixture.epoch.id());
@@ -367,4 +369,16 @@ fn permit_issues_exactly_one_non_cloneable_execution_claim() {
         authorizer.claim_execution(duplicate, &invocation, now),
         Err(PolicyError::PermitAlreadyClaimed)
     );
+}
+
+#[test]
+fn dropping_the_authorizer_does_not_rearm_epoch_ticket_issuance() {
+    let now = time();
+    let mut fixture = Fixture::new();
+    let authorizer = authorizer(&mut fixture, now + Duration::minutes(1));
+    drop(authorizer);
+    assert!(matches!(
+        fixture.epoch.seal_for_authorization(),
+        Err(ditto_capability::CapabilityRevisionError::EpochAlreadySealed)
+    ));
 }

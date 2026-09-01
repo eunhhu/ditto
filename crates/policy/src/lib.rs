@@ -5,8 +5,8 @@ use std::{
 
 use chrono::{DateTime, Duration, Utc};
 use ditto_capability::{
-    CanonicalInvocation, CanonicalPathRoot, CanonicalResource, EffectProfile, InvocationDigest,
-    InvocationId, LiveExecutionEpoch,
+    CanonicalInvocation, CanonicalPathRoot, CanonicalResource, EffectProfile,
+    EpochAuthorizationTicket, InvocationDigest, InvocationId,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -360,13 +360,16 @@ pub enum PolicyError {
     PermitAlreadyClaimed,
 }
 
-/// Clone-shared atomic authorization ledger borrowed from exactly one sealed
-/// live epoch. It cannot outlive that epoch and is not daemon-owned state.
+/// Clone-shared handle to the sole atomic ledger issued by one live epoch.
 #[derive(Clone)]
-pub struct InvocationAuthorizer<'epoch> {
-    epoch_id: &'epoch str,
+pub struct InvocationAuthorizer {
+    inner: Arc<AuthorizationLedger>,
+}
+
+struct AuthorizationLedger {
+    ticket: EpochAuthorizationTicket,
     epoch_expires_at: DateTime<Utc>,
-    state: Arc<Mutex<AuthorizationState>>,
+    state: Mutex<AuthorizationState>,
 }
 
 #[derive(Default)]
@@ -377,31 +380,46 @@ struct AuthorizationState {
     claimed_permits: BTreeSet<PermitId>,
 }
 
-impl<'epoch> InvocationAuthorizer<'epoch> {
-    pub fn for_epoch(
-        epoch: &'epoch LiveExecutionEpoch,
+impl InvocationAuthorizer {
+    /// Consume the epoch's sole ticket. Moving one ticket into two independent
+    /// ledgers is rejected by the type system.
+    ///
+    /// ```compile_fail
+    /// use chrono::{DateTime, Utc};
+    /// use ditto_capability::EpochAuthorizationTicket;
+    /// use ditto_policy::InvocationAuthorizer;
+    /// fn duplicate(ticket: EpochAuthorizationTicket, expires_at: DateTime<Utc>) {
+    ///     let _first = InvocationAuthorizer::from_ticket(ticket, expires_at);
+    ///     let _second = InvocationAuthorizer::from_ticket(ticket, expires_at);
+    /// }
+    /// ```
+    pub fn from_ticket(
+        ticket: EpochAuthorizationTicket,
         expires_at: DateTime<Utc>,
     ) -> Result<Self, PolicyError> {
-        if epoch.evidence().invocation_revisions().is_empty() {
-            return Err(PolicyError::InvalidConfiguration);
-        }
         Ok(Self {
-            epoch_id: epoch.id(),
-            epoch_expires_at: expires_at,
-            state: Arc::new(Mutex::new(AuthorizationState::default())),
+            inner: Arc::new(AuthorizationLedger {
+                ticket,
+                epoch_expires_at: expires_at,
+                state: Mutex::new(AuthorizationState::default()),
+            }),
         })
     }
 
     pub fn epoch_id(&self) -> &str {
-        self.epoch_id
+        self.inner.ticket.epoch_id()
     }
 
-    pub const fn expires_at(&self) -> DateTime<Utc> {
-        self.epoch_expires_at
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.inner.epoch_expires_at
     }
 
     pub fn register_lease(&self, lease: CapabilityLease) -> Result<(), PolicyError> {
-        let mut state = self.state.lock().map_err(|_| PolicyError::StatePoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| PolicyError::StatePoisoned)?;
         if state.leases.contains_key(lease.id()) {
             return Err(PolicyError::DuplicateLease {
                 lease_id: lease.id().into(),
@@ -412,7 +430,11 @@ impl<'epoch> InvocationAuthorizer<'epoch> {
     }
 
     pub fn remaining_calls(&self, lease_id: &str) -> Result<u32, PolicyError> {
-        let state = self.state.lock().map_err(|_| PolicyError::StatePoisoned)?;
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| PolicyError::StatePoisoned)?;
         state
             .leases
             .get(lease_id)
@@ -429,7 +451,11 @@ impl<'epoch> InvocationAuthorizer<'epoch> {
         now: DateTime<Utc>,
     ) -> Result<AuthorizationOutcome, PolicyError> {
         self.validate_epoch(invocation, now)?;
-        let mut state = self.state.lock().map_err(|_| PolicyError::StatePoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| PolicyError::StatePoisoned)?;
         bind_or_conflict(&mut state, invocation)?;
         if let Some(decision) = state.decisions.get(invocation.invocation_id()) {
             return Ok(decision.clone());
@@ -443,7 +469,7 @@ impl<'epoch> InvocationAuthorizer<'epoch> {
         let expires_at = now
             .checked_add_signed(policy.permit_ttl)
             .ok_or(PolicyError::InvalidConfiguration)?
-            .min(self.epoch_expires_at);
+            .min(self.inner.epoch_expires_at);
         let outcome = AuthorizationOutcome::Permitted(permit(
             invocation,
             AuthorizationSource::StaticPolicy {
@@ -465,7 +491,11 @@ impl<'epoch> InvocationAuthorizer<'epoch> {
         now: DateTime<Utc>,
     ) -> Result<AuthorizationOutcome, PolicyError> {
         self.validate_epoch(invocation, now)?;
-        let mut state = self.state.lock().map_err(|_| PolicyError::StatePoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| PolicyError::StatePoisoned)?;
         bind_or_conflict(&mut state, invocation)?;
         if let Some(decision) = state.decisions.get(invocation.invocation_id()) {
             return Ok(decision.clone());
@@ -494,7 +524,7 @@ impl<'epoch> InvocationAuthorizer<'epoch> {
                 AuthorizationSource::Lease {
                     lease_id: lease.id.clone(),
                 },
-                lease.expires_at.min(self.epoch_expires_at),
+                lease.expires_at.min(self.inner.epoch_expires_at),
                 lease.approval,
             )
         };
@@ -531,10 +561,14 @@ impl<'epoch> InvocationAuthorizer<'epoch> {
     ) -> Result<ExecutionClaim, PolicyError> {
         self.validate_epoch(invocation, now)?;
         permit.validate(invocation, now)?;
-        if permit.epoch_id() != self.epoch_id {
+        if permit.epoch_id() != self.epoch_id() {
             return Err(PolicyError::EpochMismatch);
         }
-        let mut state = self.state.lock().map_err(|_| PolicyError::StatePoisoned)?;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| PolicyError::StatePoisoned)?;
         let issued_here = matches!(
             state.decisions.get(invocation.invocation_id()),
             Some(AuthorizationOutcome::Permitted(issued))
@@ -549,7 +583,7 @@ impl<'epoch> InvocationAuthorizer<'epoch> {
         }
         Ok(ExecutionClaim {
             claim_id: format!("claim_{}", invocation.digest()),
-            epoch_id: self.epoch_id.to_owned(),
+            epoch_id: self.epoch_id().to_owned(),
             permit_id: permit.permit_id,
             invocation_digest: invocation.digest(),
             claimed_at: now,
@@ -562,10 +596,10 @@ impl<'epoch> InvocationAuthorizer<'epoch> {
         invocation: &CanonicalInvocation,
         now: DateTime<Utc>,
     ) -> Result<(), PolicyError> {
-        if invocation.epoch_id() != self.epoch_id {
+        if invocation.epoch_id() != self.epoch_id() {
             return Err(PolicyError::EpochMismatch);
         }
-        if now >= self.epoch_expires_at {
+        if now >= self.inner.epoch_expires_at {
             return Err(PolicyError::EpochExpired);
         }
         Ok(())
