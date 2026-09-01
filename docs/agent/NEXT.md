@@ -5,9 +5,10 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-- No implementation slice is active. The next listed priority is a compact,
-  source-verified session index that removes session-history rescans from
-  context delta verification and admission; its contract has not been defined.
+- [`005.1 Live epoch, closed schema profile, and bounded authority lifetime`](tasks/005-1-live-epoch-schema-authority.md):
+  separate replay evidence from live invocation authority, close exact schema
+  semantics and structural limits, scope authorization state to one live epoch,
+  and define one-shot execution claims without adding a worker.
 
 ## Completed
 
