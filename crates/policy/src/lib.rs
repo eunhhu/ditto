@@ -6,7 +6,7 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use ditto_capability::{
     CanonicalInvocation, CanonicalPathRoot, CanonicalResource, EffectProfile, InvocationDigest,
-    InvocationId,
+    InvocationId, LiveExecutionEpoch,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -168,6 +168,7 @@ impl PermitId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvocationPermit {
     permit_id: PermitId,
+    epoch_id: String,
     invocation_digest: InvocationDigest,
     authorization_source: AuthorizationSource,
     granted_at: DateTime<Utc>,
@@ -177,6 +178,10 @@ pub struct InvocationPermit {
 impl InvocationPermit {
     pub fn permit_id(&self) -> &PermitId {
         &self.permit_id
+    }
+
+    pub fn epoch_id(&self) -> &str {
+        &self.epoch_id
     }
 
     pub const fn invocation_digest(&self) -> InvocationDigest {
@@ -200,6 +205,9 @@ impl InvocationPermit {
         invocation: &CanonicalInvocation,
         now: DateTime<Utc>,
     ) -> Result<(), PolicyError> {
+        if self.epoch_id != invocation.epoch_id() {
+            return Err(PolicyError::EpochMismatch);
+        }
         if self.invocation_digest != invocation.digest() {
             return Err(PolicyError::PermitInvocationMismatch);
         }
@@ -215,6 +223,7 @@ impl InvocationPermit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalRequest {
     request_id: String,
+    epoch_id: String,
     invocation_digest: InvocationDigest,
     authorization_source: AuthorizationSource,
     requested_at: DateTime<Utc>,
@@ -224,6 +233,10 @@ pub struct ApprovalRequest {
 impl ApprovalRequest {
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    pub fn epoch_id(&self) -> &str {
+        &self.epoch_id
     }
 
     pub const fn invocation_digest(&self) -> InvocationDigest {
@@ -247,6 +260,64 @@ impl ApprovalRequest {
 pub enum AuthorizationOutcome {
     Permitted(InvocationPermit),
     ApprovalRequired(ApprovalRequest),
+}
+
+/// One-shot ingress token required by any future effectful worker.
+///
+/// The epoch authorizer issues at most one claim for a permit. A future worker
+/// must consume this value by ownership and must never accept an
+/// `InvocationPermit` directly. Task 005.1 intentionally adds no worker.
+///
+/// ```compile_fail
+/// use ditto_policy::ExecutionClaim;
+/// let _ = ExecutionClaim { claim_id: String::new() };
+/// ```
+///
+/// ```compile_fail
+/// use ditto_policy::ExecutionClaim;
+/// fn requires_deserialize<T: serde::de::DeserializeOwned>() {}
+/// requires_deserialize::<ExecutionClaim>();
+/// ```
+///
+/// ```compile_fail
+/// use ditto_policy::ExecutionClaim;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<ExecutionClaim>();
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExecutionClaim {
+    claim_id: String,
+    epoch_id: String,
+    permit_id: PermitId,
+    invocation_digest: InvocationDigest,
+    claimed_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+impl ExecutionClaim {
+    pub fn claim_id(&self) -> &str {
+        &self.claim_id
+    }
+
+    pub fn epoch_id(&self) -> &str {
+        &self.epoch_id
+    }
+
+    pub fn permit_id(&self) -> &PermitId {
+        &self.permit_id
+    }
+
+    pub const fn invocation_digest(&self) -> InvocationDigest {
+        self.invocation_digest
+    }
+
+    pub const fn claimed_at(&self) -> DateTime<Utc> {
+        self.claimed_at
+    }
+
+    pub const fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -279,11 +350,22 @@ pub enum PolicyError {
     PermitInvocationMismatch,
     #[error("permit is not currently valid")]
     PermitExpired,
+    #[error("invocation or permit belongs to a different live execution epoch")]
+    EpochMismatch,
+    #[error("live execution epoch authority window expired")]
+    EpochExpired,
+    #[error("permit was not issued by this live execution epoch")]
+    PermitNotIssuedByEpoch,
+    #[error("permit already issued its one execution claim")]
+    PermitAlreadyClaimed,
 }
 
-/// Clone-shared, process-local atomic authorization ledger.
-#[derive(Clone, Default)]
-pub struct InvocationAuthorizer {
+/// Clone-shared atomic authorization ledger borrowed from exactly one sealed
+/// live epoch. It cannot outlive that epoch and is not daemon-owned state.
+#[derive(Clone)]
+pub struct InvocationAuthorizer<'epoch> {
+    epoch_id: &'epoch str,
+    epoch_expires_at: DateTime<Utc>,
     state: Arc<Mutex<AuthorizationState>>,
 }
 
@@ -292,11 +374,30 @@ struct AuthorizationState {
     bindings: BTreeMap<InvocationId, InvocationDigest>,
     decisions: BTreeMap<InvocationId, AuthorizationOutcome>,
     leases: BTreeMap<String, CapabilityLease>,
+    claimed_permits: BTreeSet<PermitId>,
 }
 
-impl InvocationAuthorizer {
-    pub fn new() -> Self {
-        Self::default()
+impl<'epoch> InvocationAuthorizer<'epoch> {
+    pub fn for_epoch(
+        epoch: &'epoch LiveExecutionEpoch,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Self, PolicyError> {
+        if epoch.evidence().invocation_revisions().is_empty() {
+            return Err(PolicyError::InvalidConfiguration);
+        }
+        Ok(Self {
+            epoch_id: epoch.id(),
+            epoch_expires_at: expires_at,
+            state: Arc::new(Mutex::new(AuthorizationState::default())),
+        })
+    }
+
+    pub fn epoch_id(&self) -> &str {
+        self.epoch_id
+    }
+
+    pub const fn expires_at(&self) -> DateTime<Utc> {
+        self.epoch_expires_at
     }
 
     pub fn register_lease(&self, lease: CapabilityLease) -> Result<(), PolicyError> {
@@ -327,6 +428,7 @@ impl InvocationAuthorizer {
         policy: &StaticPolicy,
         now: DateTime<Utc>,
     ) -> Result<AuthorizationOutcome, PolicyError> {
+        self.validate_epoch(invocation, now)?;
         let mut state = self.state.lock().map_err(|_| PolicyError::StatePoisoned)?;
         bind_or_conflict(&mut state, invocation)?;
         if let Some(decision) = state.decisions.get(invocation.invocation_id()) {
@@ -340,7 +442,8 @@ impl InvocationAuthorizer {
         )?;
         let expires_at = now
             .checked_add_signed(policy.permit_ttl)
-            .ok_or(PolicyError::InvalidConfiguration)?;
+            .ok_or(PolicyError::InvalidConfiguration)?
+            .min(self.epoch_expires_at);
         let outcome = AuthorizationOutcome::Permitted(permit(
             invocation,
             AuthorizationSource::StaticPolicy {
@@ -361,6 +464,7 @@ impl InvocationAuthorizer {
         lease_id: &str,
         now: DateTime<Utc>,
     ) -> Result<AuthorizationOutcome, PolicyError> {
+        self.validate_epoch(invocation, now)?;
         let mut state = self.state.lock().map_err(|_| PolicyError::StatePoisoned)?;
         bind_or_conflict(&mut state, invocation)?;
         if let Some(decision) = state.decisions.get(invocation.invocation_id()) {
@@ -390,7 +494,7 @@ impl InvocationAuthorizer {
                 AuthorizationSource::Lease {
                     lease_id: lease.id.clone(),
                 },
-                lease.expires_at,
+                lease.expires_at.min(self.epoch_expires_at),
                 lease.approval,
             )
         };
@@ -415,6 +519,56 @@ impl InvocationAuthorizer {
             .decisions
             .insert(invocation.invocation_id().clone(), outcome.clone());
         Ok(outcome)
+    }
+
+    /// Atomically consume the sole future effectful-dispatch slot carried by
+    /// one permit. No worker is implemented by Task 005.1.
+    pub fn claim_execution(
+        &self,
+        permit: InvocationPermit,
+        invocation: &CanonicalInvocation,
+        now: DateTime<Utc>,
+    ) -> Result<ExecutionClaim, PolicyError> {
+        self.validate_epoch(invocation, now)?;
+        permit.validate(invocation, now)?;
+        if permit.epoch_id() != self.epoch_id {
+            return Err(PolicyError::EpochMismatch);
+        }
+        let mut state = self.state.lock().map_err(|_| PolicyError::StatePoisoned)?;
+        let issued_here = matches!(
+            state.decisions.get(invocation.invocation_id()),
+            Some(AuthorizationOutcome::Permitted(issued))
+                if issued.permit_id() == permit.permit_id()
+                    && issued.invocation_digest() == permit.invocation_digest()
+        );
+        if !issued_here {
+            return Err(PolicyError::PermitNotIssuedByEpoch);
+        }
+        if !state.claimed_permits.insert(permit.permit_id().clone()) {
+            return Err(PolicyError::PermitAlreadyClaimed);
+        }
+        Ok(ExecutionClaim {
+            claim_id: format!("claim_{}", invocation.digest()),
+            epoch_id: self.epoch_id.to_owned(),
+            permit_id: permit.permit_id,
+            invocation_digest: invocation.digest(),
+            claimed_at: now,
+            expires_at: permit.expires_at,
+        })
+    }
+
+    fn validate_epoch(
+        &self,
+        invocation: &CanonicalInvocation,
+        now: DateTime<Utc>,
+    ) -> Result<(), PolicyError> {
+        if invocation.epoch_id() != self.epoch_id {
+            return Err(PolicyError::EpochMismatch);
+        }
+        if now >= self.epoch_expires_at {
+            return Err(PolicyError::EpochExpired);
+        }
+        Ok(())
     }
 }
 
@@ -495,6 +649,7 @@ fn permit(
 ) -> InvocationPermit {
     InvocationPermit {
         permit_id: PermitId(format!("permit_{}", invocation.digest())),
+        epoch_id: invocation.epoch_id().to_owned(),
         invocation_digest: invocation.digest(),
         authorization_source,
         granted_at,
@@ -510,6 +665,7 @@ fn approval_request(
 ) -> ApprovalRequest {
     ApprovalRequest {
         request_id: format!("approval_{}", invocation.digest()),
+        epoch_id: invocation.epoch_id().to_owned(),
         invocation_digest: invocation.digest(),
         authorization_source,
         requested_at,

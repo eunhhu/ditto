@@ -4,12 +4,13 @@ use std::{
     thread,
 };
 
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use ditto_artifact_read::{ArtifactReadDeriver, capability_schema};
 use ditto_capability::{
-    CapabilityDeriver, CapabilityKind, CapabilityLifecycle, CapabilityManifest, EffectProfile,
-    EffectSpec, ExecutionEpoch, InvocationCompiler, PlacementSpec, PolicySpec, RetrievalSpec,
-    RuntimeSpec, RuntimeType, UntrustedToolCall, VerificationSpec,
+    CanonicalInvocation, CapabilityDeriver, CapabilityKind, CapabilityLifecycle,
+    CapabilityManifest, EffectProfile, EffectSpec, InvocationCompiler, LiveExecutionEpoch,
+    PlacementSpec, PolicySpec, RetrievalSpec, RuntimeSpec, RuntimeType, UntrustedToolCall,
+    VerificationSpec,
 };
 use ditto_policy::{
     ApprovalRequirement, AuthorizationOutcome, CapabilityLease, InvocationAuthorizer, PolicyError,
@@ -52,47 +53,69 @@ fn manifest() -> CapabilityManifest {
     }
 }
 
-fn invocation(call_id: &str, length: u64) -> ditto_capability::CanonicalInvocation {
-    let manifest = manifest();
-    let schema = capability_schema();
-    let deriver = ArtifactReadDeriver::default();
-    let mut epoch = ExecutionEpoch::new(1);
-    epoch
-        .page_in_invocable(&manifest, &schema, deriver.revision().clone())
-        .expect("page exact revision");
-    InvocationCompiler::compile(
-        &epoch,
-        &manifest,
-        &schema,
-        UntrustedToolCall::new(
-            call_id,
-            "artifact.read",
-            json!({
-                "reference": format!("artifact:sha256:{}", "a".repeat(64)),
-                "offset": 0,
-                "length": length
-            }),
+struct Fixture {
+    epoch: LiveExecutionEpoch,
+    deriver: ArtifactReadDeriver,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let manifest = manifest();
+        let schema = capability_schema();
+        let deriver = ArtifactReadDeriver::default();
+        let mut epoch = LiveExecutionEpoch::new(1);
+        epoch
+            .page_in_invocable(&manifest, &schema, deriver.revision().clone())
+            .expect("page exact revision");
+        Self { epoch, deriver }
+    }
+
+    fn invocation(&self, call_id: &str, length: u64) -> CanonicalInvocation {
+        InvocationCompiler::compile(
+            self.epoch
+                .invocable_binding("artifact.read")
+                .expect("live binding"),
+            UntrustedToolCall::new(
+                call_id,
+                "artifact.read",
+                json!({
+                    "reference": format!("artifact:sha256:{}", "a".repeat(64)),
+                    "offset": 0,
+                    "length": length
+                }),
+            )
+            .expect("call"),
+            &self.deriver,
         )
-        .expect("call"),
-        &deriver,
-    )
-    .expect("canonical invocation")
+        .expect("canonical invocation")
+    }
+}
+
+fn time() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2029, 1, 1, 0, 0, 0)
+        .single()
+        .expect("time")
+}
+
+fn authorizer<'epoch>(
+    fixture: &'epoch Fixture,
+    expires_at: DateTime<Utc>,
+) -> InvocationAuthorizer<'epoch> {
+    InvocationAuthorizer::for_epoch(&fixture.epoch, expires_at).expect("epoch authorizer")
 }
 
 fn register_lease(
-    authorizer: &InvocationAuthorizer,
+    authorizer: &InvocationAuthorizer<'_>,
+    scope: &CanonicalInvocation,
     id: &str,
     calls: u32,
     approval: ApprovalRequirement,
 ) {
-    let scope = invocation("scope-fixture", 1);
     authorizer
         .register_lease(
             CapabilityLease::new(
                 id,
-                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0)
-                    .single()
-                    .expect("time"),
+                time() + Duration::hours(1),
                 EffectProfile::read_content(),
                 calls,
                 BTreeSet::from(["artifact.read".into()]),
@@ -110,19 +133,18 @@ fn register_lease(
 }
 
 #[test]
-fn static_artifact_policy_issues_only_a_matching_sealed_permit() {
-    let now = Utc
-        .with_ymd_and_hms(2029, 1, 1, 0, 0, 0)
-        .single()
-        .expect("time");
-    let canonical = invocation("static", 1);
+fn static_artifact_policy_issues_only_a_matching_epoch_bounded_permit() {
+    let now = time();
+    let fixture = Fixture::new();
+    let canonical = fixture.invocation("static", 1);
     let resource = canonical
         .resources()
         .iter()
         .next()
         .expect("resource")
         .clone();
-    let authorizer = InvocationAuthorizer::new();
+    let epoch_expiry = now + Duration::minutes(1);
+    let authorizer = authorizer(&fixture, epoch_expiry);
     let outcome = authorizer
         .authorize_static(
             &canonical,
@@ -133,25 +155,25 @@ fn static_artifact_policy_issues_only_a_matching_sealed_permit() {
     let AuthorizationOutcome::Permitted(permit) = outcome else {
         panic!("static artifact policy cannot require approval");
     };
+    assert_eq!(permit.epoch_id(), fixture.epoch.id());
+    assert_eq!(permit.expires_at(), epoch_expiry);
     permit.validate(&canonical, now).expect("matching permit");
     assert_eq!(
-        permit.validate(&invocation("other", 1), now),
+        permit.validate(&fixture.invocation("other", 1), now),
         Err(PolicyError::PermitInvocationMismatch)
     );
     assert_eq!(
-        permit.validate(&canonical, now + Duration::minutes(5)),
+        permit.validate(&canonical, epoch_expiry),
         Err(PolicyError::PermitExpired)
     );
 }
 
 #[test]
 fn failed_authorization_does_not_consume_and_successful_retry_consumes_once() {
-    let now = Utc
-        .with_ymd_and_hms(2029, 1, 1, 0, 0, 0)
-        .single()
-        .expect("time");
-    let authorizer = InvocationAuthorizer::new();
-    let invocation = invocation("retry", 1);
+    let now = time();
+    let fixture = Fixture::new();
+    let authorizer = authorizer(&fixture, now + Duration::hours(1));
+    let invocation = fixture.invocation("retry", 1);
     authorizer
         .register_lease(
             CapabilityLease::new(
@@ -177,7 +199,13 @@ fn failed_authorization_does_not_consume_and_successful_retry_consumes_once() {
         1
     );
 
-    register_lease(&authorizer, "lease-good", 1, ApprovalRequirement::Never);
+    register_lease(
+        &authorizer,
+        &invocation,
+        "lease-good",
+        1,
+        ApprovalRequirement::Never,
+    );
     let first = authorizer
         .authorize_with_lease(&invocation, "lease-good", now)
         .expect("first permit");
@@ -189,42 +217,14 @@ fn failed_authorization_does_not_consume_and_successful_retry_consumes_once() {
 }
 
 #[test]
-fn invocation_id_digest_conflict_fails_closed() {
-    let now = Utc
-        .with_ymd_and_hms(2029, 1, 1, 0, 0, 0)
-        .single()
-        .expect("time");
-    let manifest = manifest();
-    let schema = capability_schema();
-    let deriver = ArtifactReadDeriver::default();
-    let mut epoch = ExecutionEpoch::new(1);
-    epoch
-        .page_in_invocable(&manifest, &schema, deriver.revision().clone())
-        .expect("page exact revision");
-    let compile = |length| {
-        InvocationCompiler::compile(
-            &epoch,
-            &manifest,
-            &schema,
-            UntrustedToolCall::new(
-                "conflict",
-                "artifact.read",
-                json!({
-                    "reference": format!("artifact:sha256:{}", "a".repeat(64)),
-                    "offset": 0,
-                    "length": length
-                }),
-            )
-            .expect("call"),
-            &deriver,
-        )
-        .expect("canonical invocation")
-    };
-    let first = compile(1);
-    let conflicting = compile(2);
+fn invocation_id_digest_conflict_fails_closed_inside_epoch() {
+    let now = time();
+    let fixture = Fixture::new();
+    let first = fixture.invocation("conflict", 1);
+    let conflicting = fixture.invocation("conflict", 2);
     assert_eq!(first.invocation_id(), conflicting.invocation_id());
     assert_ne!(first.digest(), conflicting.digest());
-    let authorizer = InvocationAuthorizer::new();
+    let authorizer = authorizer(&fixture, now + Duration::hours(1));
     let resource = first.resources().iter().next().expect("resource").clone();
     let policy = StaticPolicy::artifact_read(resource).expect("policy");
     authorizer
@@ -238,22 +238,24 @@ fn invocation_id_digest_conflict_fails_closed() {
 
 #[test]
 fn approval_required_issues_no_permit_and_consumes_nothing() {
-    let now = Utc
-        .with_ymd_and_hms(2029, 1, 1, 0, 0, 0)
-        .single()
-        .expect("time");
-    let authorizer = InvocationAuthorizer::new();
+    let now = time();
+    let fixture = Fixture::new();
+    let invocation = fixture.invocation("approval", 1);
+    let authorizer = authorizer(&fixture, now + Duration::hours(1));
     register_lease(
         &authorizer,
+        &invocation,
         "lease-approval",
         1,
         ApprovalRequirement::Always,
     );
-    let invocation = invocation("approval", 1);
     let outcome = authorizer
         .authorize_with_lease(&invocation, "lease-approval", now)
         .expect("approval outcome");
-    assert!(matches!(outcome, AuthorizationOutcome::ApprovalRequired(_)));
+    let AuthorizationOutcome::ApprovalRequired(request) = outcome else {
+        panic!("approval-required lease cannot issue a permit");
+    };
+    assert_eq!(request.epoch_id(), fixture.epoch.id());
     assert_eq!(
         authorizer.remaining_calls("lease-approval").expect("calls"),
         1
@@ -262,27 +264,35 @@ fn approval_required_issues_no_permit_and_consumes_nothing() {
 
 #[test]
 fn concurrent_one_call_lease_issues_at_most_one_permit() {
-    let now = Utc
-        .with_ymd_and_hms(2029, 1, 1, 0, 0, 0)
-        .single()
-        .expect("time");
-    let authorizer = InvocationAuthorizer::new();
-    register_lease(&authorizer, "lease-race", 1, ApprovalRequirement::Never);
+    let now = time();
+    let fixture = Fixture::new();
+    let first = fixture.invocation("race-a", 1);
+    let second = fixture.invocation("race-b", 1);
+    let authorizer = authorizer(&fixture, now + Duration::hours(1));
+    register_lease(
+        &authorizer,
+        &first,
+        "lease-race",
+        1,
+        ApprovalRequirement::Never,
+    );
     let barrier = Arc::new(Barrier::new(3));
-    let mut handles = Vec::new();
-    for invocation in [invocation("race-a", 1), invocation("race-b", 1)] {
-        let authorizer = authorizer.clone();
-        let barrier = barrier.clone();
-        handles.push(thread::spawn(move || {
-            barrier.wait();
-            authorizer.authorize_with_lease(&invocation, "lease-race", now)
-        }));
-    }
-    barrier.wait();
-    let results = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("authorization thread"))
-        .collect::<Vec<_>>();
+    let mut results = Vec::new();
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for invocation in [&first, &second] {
+            let authorizer = authorizer.clone();
+            let barrier = barrier.clone();
+            handles.push(scope.spawn(move || {
+                barrier.wait();
+                authorizer.authorize_with_lease(invocation, "lease-race", now)
+            }));
+        }
+        barrier.wait();
+        for handle in handles {
+            results.push(handle.join().expect("authorization thread"));
+        }
+    });
     assert_eq!(
         results
             .iter()
@@ -298,4 +308,63 @@ fn concurrent_one_call_lease_issues_at_most_one_permit() {
         1
     );
     assert_eq!(authorizer.remaining_calls("lease-race").expect("calls"), 0);
+}
+
+#[test]
+fn authorizer_rejects_other_or_expired_epochs() {
+    let now = time();
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let first_invocation = first.invocation("first", 1);
+    let second_invocation = second.invocation("second", 1);
+    let resource = first_invocation
+        .resources()
+        .iter()
+        .next()
+        .expect("resource")
+        .clone();
+    let policy = StaticPolicy::artifact_read(resource).expect("policy");
+    let authorizer = authorizer(&first, now + Duration::minutes(1));
+    assert_eq!(
+        authorizer.authorize_static(&second_invocation, &policy, now),
+        Err(PolicyError::EpochMismatch)
+    );
+    assert_eq!(
+        authorizer.authorize_static(&first_invocation, &policy, now + Duration::minutes(1)),
+        Err(PolicyError::EpochExpired)
+    );
+}
+
+#[test]
+fn permit_issues_exactly_one_non_cloneable_execution_claim() {
+    let now = time();
+    let fixture = Fixture::new();
+    let invocation = fixture.invocation("claim", 1);
+    let resource = invocation
+        .resources()
+        .iter()
+        .next()
+        .expect("resource")
+        .clone();
+    let authorizer = authorizer(&fixture, now + Duration::minutes(1));
+    let AuthorizationOutcome::Permitted(permit) = authorizer
+        .authorize_static(
+            &invocation,
+            &StaticPolicy::artifact_read(resource).expect("policy"),
+            now,
+        )
+        .expect("permit")
+    else {
+        panic!("static policy must permit");
+    };
+    let duplicate = permit.clone();
+    let claim = authorizer
+        .claim_execution(permit, &invocation, now)
+        .expect("first claim");
+    assert_eq!(claim.epoch_id(), fixture.epoch.id());
+    assert_eq!(claim.invocation_digest(), invocation.digest());
+    assert_eq!(
+        authorizer.claim_execution(duplicate, &invocation, now),
+        Err(PolicyError::PermitAlreadyClaimed)
+    );
 }

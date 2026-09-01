@@ -1,105 +1,425 @@
-use std::collections::BTreeSet;
+use std::{cmp::Ordering, collections::BTreeSet};
 
 use regex::Regex;
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 use thiserror::Error;
-
-use super::validate_json_schema;
 
 pub const MAX_INVOCATION_SCHEMA_BYTES: usize = 1024 * 1024;
 pub const MAX_INVOCATION_ARGUMENT_BYTES: usize = 1024 * 1024;
-pub const MAX_SCHEMA_INSTANCE_DEPTH: usize = 64;
-pub const MAX_SCHEMA_INSTANCE_WORK: usize = 100_000;
+pub const MAX_INVOCATION_VALUE_DEPTH: usize = 64;
+pub const MAX_INVOCATION_VALUE_WORK: usize = 100_000;
 const MAX_PATTERN_BYTES: usize = 16 * 1024;
 const MAX_ERROR_PATH_BYTES: usize = 1024;
 
-/// Fixed-budget failure from evaluating an invocation argument as a JSON
-/// Schema Draft 2020-12 instance.
+/// Failure from the closed Ditto Invocation Schema Profile V1.
+///
+/// This profile is intentionally not a complete JSON Schema Draft 2020-12
+/// evaluator. Unsupported syntax fails closed at live capability binding.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum JsonSchemaInstanceError {
-    #[error("invocation JSON Schema is structurally invalid: {reason}")]
-    InvalidSchema { reason: String },
-    #[error("invocation JSON Schema is {actual} bytes, exceeding {maximum}")]
+pub enum InvocationSchemaError {
+    #[error("invocation schema is {actual} bytes, exceeding {maximum}")]
     SchemaTooLarge { actual: usize, maximum: usize },
     #[error("invocation arguments are {actual} bytes, exceeding {maximum}")]
     InstanceTooLarge { actual: usize, maximum: usize },
-    #[error("JSON Schema instance evaluation exceeded depth {maximum}")]
-    DepthExceeded { maximum: usize },
-    #[error("JSON Schema instance evaluation exceeded {maximum} work units")]
-    WorkExceeded { maximum: usize },
-    #[error("JSON Schema instance is invalid at {path} ({keyword})")]
+    #[error("invocation schema exceeds JSON depth {maximum}")]
+    SchemaDepthExceeded { maximum: usize },
+    #[error("invocation arguments exceed JSON depth {maximum}")]
+    InstanceDepthExceeded { maximum: usize },
+    #[error("invocation schema exceeds {maximum} structural work units")]
+    SchemaWorkExceeded { maximum: usize },
+    #[error("invocation arguments exceed {maximum} structural work units")]
+    InstanceWorkExceeded { maximum: usize },
+    #[error("invocation schema is invalid in the Ditto profile: {reason}")]
+    InvalidProfileSchema { reason: String },
+    #[error("invocation schema keyword is outside the Ditto profile: {keyword}")]
+    UnsupportedKeyword { keyword: String },
+    #[error("invocation schema type is outside the Ditto profile: {type_name}")]
+    UnsupportedType { type_name: String },
+    #[error("invocation JSON instance is invalid at {path} ({keyword})")]
     InvalidInstance { path: String, keyword: String },
-    #[error("JSON Schema reference is unsupported during invocation: {reference}")]
-    UnsupportedReference { reference: String },
-    #[error("JSON Schema keyword is unsupported during invocation: {keyword}")]
-    UnsupportedKeyword { keyword: &'static str },
-    #[error("JSON Schema pattern is unsupported during invocation")]
+    #[error("invocation schema pattern is outside the Ditto regex profile")]
     UnsupportedPattern,
+    #[error("invocation instance evaluation exceeded {maximum} work units")]
+    EvaluationWorkExceeded { maximum: usize },
 }
 
-/// Evaluate one JSON value against a structurally valid provider-neutral
-/// Draft 2020-12 schema under fixed deterministic limits.
-pub fn validate_json_schema_instance(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueEnvelopeError {
+    TooLarge { actual: usize },
+    DepthExceeded,
+    WorkExceeded,
+}
+
+/// Iteratively prove the complete JSON value fits the fixed byte, depth, and
+/// node envelope before any recursive structural validation begins.
+pub(crate) fn validate_value_envelope(
+    value: &Value,
+    maximum_bytes: usize,
+) -> Result<usize, ValueEnvelopeError> {
+    let mut stack = vec![(value, 0_usize)];
+    let mut bytes = 0_usize;
+    let mut work = 0_usize;
+
+    while let Some((current, depth)) = stack.pop() {
+        if depth > MAX_INVOCATION_VALUE_DEPTH {
+            return Err(ValueEnvelopeError::DepthExceeded);
+        }
+        work = work
+            .checked_add(1)
+            .ok_or(ValueEnvelopeError::WorkExceeded)?;
+        if work > MAX_INVOCATION_VALUE_WORK {
+            return Err(ValueEnvelopeError::WorkExceeded);
+        }
+        match current {
+            Value::Null => add_bytes(&mut bytes, 4, maximum_bytes)?,
+            Value::Bool(true) => add_bytes(&mut bytes, 4, maximum_bytes)?,
+            Value::Bool(false) => add_bytes(&mut bytes, 5, maximum_bytes)?,
+            Value::Number(number) => {
+                add_bytes(&mut bytes, number.to_string().len(), maximum_bytes)?;
+            }
+            Value::String(string) => add_bytes(
+                &mut bytes,
+                serde_json::to_string(string)
+                    .expect("serializing one JSON string cannot fail")
+                    .len(),
+                maximum_bytes,
+            )?,
+            Value::Array(values) => {
+                add_bytes(
+                    &mut bytes,
+                    2_usize.saturating_add(values.len().saturating_sub(1)),
+                    maximum_bytes,
+                )?;
+                for child in values.iter().rev() {
+                    stack.push((child, depth + 1));
+                }
+            }
+            Value::Object(object) => {
+                add_bytes(
+                    &mut bytes,
+                    2_usize.saturating_add(object.len().saturating_sub(1)),
+                    maximum_bytes,
+                )?;
+                for (key, child) in object.iter().rev() {
+                    let key_bytes = serde_json::to_string(key)
+                        .expect("serializing one JSON object key cannot fail")
+                        .len();
+                    add_bytes(&mut bytes, key_bytes.saturating_add(1), maximum_bytes)?;
+                    stack.push((child, depth + 1));
+                }
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+fn add_bytes(total: &mut usize, amount: usize, maximum: usize) -> Result<(), ValueEnvelopeError> {
+    *total = total
+        .checked_add(amount)
+        .ok_or(ValueEnvelopeError::TooLarge { actual: usize::MAX })?;
+    if *total > maximum {
+        return Err(ValueEnvelopeError::TooLarge { actual: *total });
+    }
+    Ok(())
+}
+
+/// Validate only the closed schema subset executable by Ditto invocation V1.
+pub fn validate_invocation_schema_profile(schema: &Value) -> Result<(), InvocationSchemaError> {
+    map_schema_envelope(validate_value_envelope(schema, MAX_INVOCATION_SCHEMA_BYTES))?;
+    ProfileValidator {
+        remaining_work: MAX_INVOCATION_VALUE_WORK,
+    }
+    .validate(schema, 0)
+}
+
+/// Evaluate one raw or normalized argument value under the closed profile.
+pub fn validate_invocation_instance(
     schema: &Value,
     instance: &Value,
-) -> Result<(), JsonSchemaInstanceError> {
-    validate_json_schema(schema).map_err(|error| JsonSchemaInstanceError::InvalidSchema {
-        reason: error.to_string(),
-    })?;
-    let schema_bytes = serialized_len(schema);
-    if schema_bytes > MAX_INVOCATION_SCHEMA_BYTES {
-        return Err(JsonSchemaInstanceError::SchemaTooLarge {
-            actual: schema_bytes,
-            maximum: MAX_INVOCATION_SCHEMA_BYTES,
-        });
-    }
-    let instance_bytes = serialized_len(instance);
-    if instance_bytes > MAX_INVOCATION_ARGUMENT_BYTES {
-        return Err(JsonSchemaInstanceError::InstanceTooLarge {
-            actual: instance_bytes,
-            maximum: MAX_INVOCATION_ARGUMENT_BYTES,
-        });
-    }
-
+) -> Result<(), InvocationSchemaError> {
+    validate_invocation_schema_profile(schema)?;
+    map_instance_envelope(validate_value_envelope(
+        instance,
+        MAX_INVOCATION_ARGUMENT_BYTES,
+    ))?;
     Evaluator {
-        root: schema,
-        remaining_work: MAX_SCHEMA_INSTANCE_WORK,
+        remaining_work: MAX_INVOCATION_VALUE_WORK,
     }
     .evaluate(schema, instance, "$", 0)
 }
 
-fn serialized_len(value: &Value) -> usize {
-    serde_json::to_vec(value)
-        .expect("serializing serde_json::Value cannot fail")
-        .len()
+fn map_schema_envelope(
+    result: Result<usize, ValueEnvelopeError>,
+) -> Result<usize, InvocationSchemaError> {
+    result.map_err(|error| match error {
+        ValueEnvelopeError::TooLarge { actual } => InvocationSchemaError::SchemaTooLarge {
+            actual,
+            maximum: MAX_INVOCATION_SCHEMA_BYTES,
+        },
+        ValueEnvelopeError::DepthExceeded => InvocationSchemaError::SchemaDepthExceeded {
+            maximum: MAX_INVOCATION_VALUE_DEPTH,
+        },
+        ValueEnvelopeError::WorkExceeded => InvocationSchemaError::SchemaWorkExceeded {
+            maximum: MAX_INVOCATION_VALUE_WORK,
+        },
+    })
 }
 
-struct Evaluator<'a> {
-    root: &'a Value,
+fn map_instance_envelope(
+    result: Result<usize, ValueEnvelopeError>,
+) -> Result<usize, InvocationSchemaError> {
+    result.map_err(|error| match error {
+        ValueEnvelopeError::TooLarge { actual } => InvocationSchemaError::InstanceTooLarge {
+            actual,
+            maximum: MAX_INVOCATION_ARGUMENT_BYTES,
+        },
+        ValueEnvelopeError::DepthExceeded => InvocationSchemaError::InstanceDepthExceeded {
+            maximum: MAX_INVOCATION_VALUE_DEPTH,
+        },
+        ValueEnvelopeError::WorkExceeded => InvocationSchemaError::InstanceWorkExceeded {
+            maximum: MAX_INVOCATION_VALUE_WORK,
+        },
+    })
+}
+
+struct ProfileValidator {
     remaining_work: usize,
 }
 
-impl Evaluator<'_> {
+impl ProfileValidator {
+    fn validate(&mut self, schema: &Value, depth: usize) -> Result<(), InvocationSchemaError> {
+        if depth > MAX_INVOCATION_VALUE_DEPTH {
+            return Err(InvocationSchemaError::SchemaDepthExceeded {
+                maximum: MAX_INVOCATION_VALUE_DEPTH,
+            });
+        }
+        self.charge(1)?;
+        match schema {
+            Value::Bool(_) => Ok(()),
+            Value::Object(object) => self.validate_object(object, depth),
+            _ => Err(invalid_profile("schema root must be a boolean or object")),
+        }
+    }
+
+    fn validate_object(
+        &mut self,
+        schema: &Map<String, Value>,
+        depth: usize,
+    ) -> Result<(), InvocationSchemaError> {
+        const ALLOWED: &[&str] = &[
+            "$schema",
+            "$comment",
+            "title",
+            "description",
+            "default",
+            "examples",
+            "deprecated",
+            "readOnly",
+            "writeOnly",
+            "type",
+            "const",
+            "enum",
+            "multipleOf",
+            "maximum",
+            "exclusiveMaximum",
+            "minimum",
+            "exclusiveMinimum",
+            "maxLength",
+            "minLength",
+            "pattern",
+            "maxItems",
+            "minItems",
+            "uniqueItems",
+            "items",
+            "maxProperties",
+            "minProperties",
+            "required",
+            "properties",
+            "additionalProperties",
+        ];
+        for keyword in schema.keys() {
+            self.charge(1)?;
+            if !ALLOWED.contains(&keyword.as_str()) {
+                return Err(InvocationSchemaError::UnsupportedKeyword {
+                    keyword: bounded(keyword),
+                });
+            }
+        }
+
+        for keyword in ["$schema", "$comment", "title", "description"] {
+            if schema.get(keyword).is_some_and(|value| !value.is_string()) {
+                return Err(invalid_profile(&format!("{keyword} must be a string")));
+            }
+        }
+        if let Some(dialect) = schema.get("$schema").and_then(Value::as_str)
+            && dialect != super::JSON_SCHEMA_DRAFT_2020_12_URI
+        {
+            return Err(invalid_profile("$schema dialect is unsupported"));
+        }
+        if schema
+            .get("examples")
+            .is_some_and(|value| !value.is_array())
+        {
+            return Err(invalid_profile("examples must be an array"));
+        }
+        for keyword in ["deprecated", "readOnly", "writeOnly"] {
+            if schema.get(keyword).is_some_and(|value| !value.is_boolean()) {
+                return Err(invalid_profile(&format!("{keyword} must be boolean")));
+            }
+        }
+        if let Some(types) = schema.get("type") {
+            validate_profile_types(types)?;
+        }
+        if let Some(values) = schema.get("enum")
+            && values.as_array().is_none_or(Vec::is_empty)
+        {
+            return Err(invalid_profile("enum must be a non-empty array"));
+        }
+        if let Some(value) = schema.get("multipleOf")
+            && exact_positive_integer(value).is_none()
+        {
+            return Err(invalid_profile(
+                "multipleOf must be a positive JSON integer",
+            ));
+        }
+        for keyword in ["maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum"] {
+            if let Some(value) = schema.get(keyword)
+                && exact_integer(value).is_none()
+            {
+                return Err(invalid_profile(&format!(
+                    "{keyword} must be a JSON integer"
+                )));
+            }
+        }
+        for keyword in [
+            "maxLength",
+            "minLength",
+            "maxItems",
+            "minItems",
+            "maxProperties",
+            "minProperties",
+        ] {
+            if let Some(value) = schema.get(keyword)
+                && value.as_u64().is_none()
+            {
+                return Err(invalid_profile(&format!(
+                    "{keyword} must be a non-negative JSON integer"
+                )));
+            }
+        }
+        if let Some(pattern) = schema.get("pattern") {
+            let Some(pattern) = pattern.as_str() else {
+                return Err(invalid_profile("pattern must be a string"));
+            };
+            if pattern.len() > MAX_PATTERN_BYTES || Regex::new(pattern).is_err() {
+                return Err(InvocationSchemaError::UnsupportedPattern);
+            }
+        }
+        if schema
+            .get("uniqueItems")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            return Err(invalid_profile("uniqueItems must be boolean"));
+        }
+        if let Some(required) = schema.get("required") {
+            validate_unique_string_array(required)?;
+        }
+        if let Some(items) = schema.get("items") {
+            self.validate(items, depth + 1)?;
+        }
+        if let Some(additional) = schema.get("additionalProperties") {
+            self.validate(additional, depth + 1)?;
+        }
+        if let Some(properties) = schema.get("properties") {
+            let Some(properties) = properties.as_object() else {
+                return Err(invalid_profile("properties must be an object"));
+            };
+            for property_schema in properties.values() {
+                self.validate(property_schema, depth + 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn charge(&mut self, amount: usize) -> Result<(), InvocationSchemaError> {
+        self.remaining_work = self.remaining_work.checked_sub(amount).ok_or(
+            InvocationSchemaError::SchemaWorkExceeded {
+                maximum: MAX_INVOCATION_VALUE_WORK,
+            },
+        )?;
+        Ok(())
+    }
+}
+
+fn validate_profile_types(types: &Value) -> Result<(), InvocationSchemaError> {
+    let names = match types {
+        Value::String(name) => vec![name.as_str()],
+        Value::Array(values) if !values.is_empty() => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid_profile("type array entries must be strings"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(invalid_profile("type must be a string or non-empty array")),
+    };
+    let mut unique = BTreeSet::new();
+    for name in names {
+        if !matches!(
+            name,
+            "null" | "boolean" | "object" | "array" | "string" | "integer"
+        ) {
+            return Err(InvocationSchemaError::UnsupportedType {
+                type_name: bounded(name),
+            });
+        }
+        if !unique.insert(name) {
+            return Err(invalid_profile("type entries must be unique"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_unique_string_array(value: &Value) -> Result<(), InvocationSchemaError> {
+    let Some(values) = value.as_array() else {
+        return Err(invalid_profile("required must be an array"));
+    };
+    let mut unique = BTreeSet::new();
+    for value in values {
+        let Some(value) = value.as_str() else {
+            return Err(invalid_profile("required entries must be strings"));
+        };
+        if !unique.insert(value) {
+            return Err(invalid_profile("required entries must be unique"));
+        }
+    }
+    Ok(())
+}
+
+struct Evaluator {
+    remaining_work: usize,
+}
+
+impl Evaluator {
     fn evaluate(
         &mut self,
         schema: &Value,
         instance: &Value,
         path: &str,
         depth: usize,
-    ) -> Result<(), JsonSchemaInstanceError> {
-        if depth > MAX_SCHEMA_INSTANCE_DEPTH {
-            return Err(JsonSchemaInstanceError::DepthExceeded {
-                maximum: MAX_SCHEMA_INSTANCE_DEPTH,
+    ) -> Result<(), InvocationSchemaError> {
+        if depth > MAX_INVOCATION_VALUE_DEPTH {
+            return Err(InvocationSchemaError::InstanceDepthExceeded {
+                maximum: MAX_INVOCATION_VALUE_DEPTH,
             });
         }
         self.charge(1)?;
         match schema {
             Value::Bool(true) => Ok(()),
-            Value::Bool(false) => Err(invalid(path, "false_schema")),
+            Value::Bool(false) => Err(invalid_instance(path, "false_schema")),
             Value::Object(object) => self.evaluate_object(object, instance, path, depth),
-            _ => Err(JsonSchemaInstanceError::InvalidSchema {
-                reason: "schema root is not a boolean or object".into(),
-            }),
+            _ => Err(invalid_profile("schema root must be a boolean or object")),
         }
     }
 
@@ -109,36 +429,26 @@ impl Evaluator<'_> {
         instance: &Value,
         path: &str,
         depth: usize,
-    ) -> Result<(), JsonSchemaInstanceError> {
-        for keyword in ["$dynamicRef", "unevaluatedItems", "unevaluatedProperties"] {
-            if schema.contains_key(keyword) {
-                return Err(JsonSchemaInstanceError::UnsupportedKeyword { keyword });
-            }
-        }
-
-        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-            let target = resolve_local_reference(self.root, reference)?;
-            self.evaluate(target, instance, path, depth + 1)?;
-        }
-
+    ) -> Result<(), InvocationSchemaError> {
         if let Some(types) = schema.get("type")
             && !matches_type(types, instance)
         {
-            return Err(invalid(path, "type"));
+            return Err(invalid_instance(path, "type"));
         }
         if let Some(expected) = schema.get("const")
-            && expected != instance
+            && !profile_instance_equal(expected, instance)
         {
-            return Err(invalid(path, "const"));
+            return Err(invalid_instance(path, "const"));
         }
-        if let Some(Value::Array(values)) = schema.get("enum")
-            && !values.iter().any(|value| value == instance)
+        if let Some(values) = schema.get("enum").and_then(Value::as_array)
+            && !values
+                .iter()
+                .any(|expected| profile_instance_equal(expected, instance))
         {
-            return Err(invalid(path, "enum"));
+            return Err(invalid_instance(path, "enum"));
         }
-
-        if instance.is_number() {
-            self.evaluate_number(schema, instance, path)?;
+        if exact_integer(instance).is_some() {
+            self.evaluate_integer(schema, instance, path)?;
         }
         if let Some(value) = instance.as_str() {
             self.evaluate_string(schema, value, path)?;
@@ -147,43 +457,56 @@ impl Evaluator<'_> {
             self.evaluate_array(schema, values, path, depth)?;
         }
         if let Some(object) = instance.as_object() {
-            self.evaluate_instance_object(schema, instance, object, path, depth)?;
+            self.evaluate_instance_object(schema, object, path, depth)?;
         }
-
-        self.evaluate_combiners(schema, instance, path, depth)
+        Ok(())
     }
 
-    fn evaluate_number(
+    fn evaluate_integer(
         &mut self,
         schema: &Map<String, Value>,
         instance: &Value,
         path: &str,
-    ) -> Result<(), JsonSchemaInstanceError> {
-        let Some(actual) = instance.as_f64() else {
-            return Err(invalid(path, "number"));
-        };
-        for (keyword, predicate) in [
-            ("minimum", actual >= number(schema.get("minimum"))),
-            ("maximum", actual <= number(schema.get("maximum"))),
+    ) -> Result<(), InvocationSchemaError> {
+        let actual = exact_integer(instance).expect("caller established exact integer");
+        for (keyword, allowed) in [
+            (
+                "minimum",
+                schema
+                    .get("minimum")
+                    .and_then(exact_integer)
+                    .is_none_or(|bound| actual.cmp(&bound) != Ordering::Less),
+            ),
+            (
+                "maximum",
+                schema
+                    .get("maximum")
+                    .and_then(exact_integer)
+                    .is_none_or(|bound| actual.cmp(&bound) != Ordering::Greater),
+            ),
             (
                 "exclusiveMinimum",
-                actual > number(schema.get("exclusiveMinimum")),
+                schema
+                    .get("exclusiveMinimum")
+                    .and_then(exact_integer)
+                    .is_none_or(|bound| actual.cmp(&bound) == Ordering::Greater),
             ),
             (
                 "exclusiveMaximum",
-                actual < number(schema.get("exclusiveMaximum")),
+                schema
+                    .get("exclusiveMaximum")
+                    .and_then(exact_integer)
+                    .is_none_or(|bound| actual.cmp(&bound) == Ordering::Less),
             ),
         ] {
-            if schema.contains_key(keyword) && !predicate {
-                return Err(invalid(path, keyword));
+            if !allowed {
+                return Err(invalid_instance(path, keyword));
             }
         }
-        if let Some(multiple) = schema.get("multipleOf").and_then(Value::as_f64) {
-            let quotient = actual / multiple;
-            let tolerance = f64::EPSILON * quotient.abs().max(1.0) * 8.0;
-            if (quotient - quotient.round()).abs() > tolerance {
-                return Err(invalid(path, "multipleOf"));
-            }
+        if let Some(multiple) = schema.get("multipleOf").and_then(exact_positive_integer)
+            && actual.as_i128() % multiple.as_i128() != 0
+        {
+            return Err(invalid_instance(path, "multipleOf"));
         }
         Ok(())
     }
@@ -193,31 +516,28 @@ impl Evaluator<'_> {
         schema: &Map<String, Value>,
         value: &str,
         path: &str,
-    ) -> Result<(), JsonSchemaInstanceError> {
+    ) -> Result<(), InvocationSchemaError> {
         let length = value.chars().count() as u64;
         if schema
             .get("minLength")
             .and_then(Value::as_u64)
             .is_some_and(|minimum| length < minimum)
         {
-            return Err(invalid(path, "minLength"));
+            return Err(invalid_instance(path, "minLength"));
         }
         if schema
             .get("maxLength")
             .and_then(Value::as_u64)
             .is_some_and(|maximum| length > maximum)
         {
-            return Err(invalid(path, "maxLength"));
+            return Err(invalid_instance(path, "maxLength"));
         }
         if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
-            if pattern.len() > MAX_PATTERN_BYTES {
-                return Err(JsonSchemaInstanceError::UnsupportedPattern);
-            }
             self.charge(pattern.len().max(1))?;
             let expression =
-                Regex::new(pattern).map_err(|_| JsonSchemaInstanceError::UnsupportedPattern)?;
+                Regex::new(pattern).map_err(|_| InvocationSchemaError::UnsupportedPattern)?;
             if !expression.is_match(value) {
-                return Err(invalid(path, "pattern"));
+                return Err(invalid_instance(path, "pattern"));
             }
         }
         Ok(())
@@ -229,48 +549,34 @@ impl Evaluator<'_> {
         values: &[Value],
         path: &str,
         depth: usize,
-    ) -> Result<(), JsonSchemaInstanceError> {
+    ) -> Result<(), InvocationSchemaError> {
         let length = values.len() as u64;
         if schema
             .get("minItems")
             .and_then(Value::as_u64)
             .is_some_and(|minimum| length < minimum)
         {
-            return Err(invalid(path, "minItems"));
+            return Err(invalid_instance(path, "minItems"));
         }
         if schema
             .get("maxItems")
             .and_then(Value::as_u64)
             .is_some_and(|maximum| length > maximum)
         {
-            return Err(invalid(path, "maxItems"));
+            return Err(invalid_instance(path, "maxItems"));
         }
         if schema.get("uniqueItems") == Some(&Value::Bool(true)) {
             for left in 0..values.len() {
                 for right in left + 1..values.len() {
                     self.charge(1)?;
-                    if values[left] == values[right] {
-                        return Err(invalid(path, "uniqueItems"));
+                    if profile_instance_equal(&values[left], &values[right]) {
+                        return Err(invalid_instance(path, "uniqueItems"));
                     }
                 }
             }
         }
-
-        let prefix = schema
-            .get("prefixItems")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        for (index, (item_schema, value)) in prefix.iter().zip(values).enumerate() {
-            self.evaluate(
-                item_schema,
-                value,
-                &child_path(path, &index.to_string()),
-                depth + 1,
-            )?;
-        }
         if let Some(item_schema) = schema.get("items") {
-            for (index, value) in values.iter().enumerate().skip(prefix.len()) {
+            for (index, value) in values.iter().enumerate() {
                 self.evaluate(
                     item_schema,
                     value,
@@ -279,198 +585,93 @@ impl Evaluator<'_> {
                 )?;
             }
         }
-
-        if let Some(contains) = schema.get("contains") {
-            let mut matches = 0_u64;
-            for (index, value) in values.iter().enumerate() {
-                match self.evaluate(
-                    contains,
-                    value,
-                    &child_path(path, &index.to_string()),
-                    depth + 1,
-                ) {
-                    Ok(()) => matches += 1,
-                    Err(error) if is_mismatch(&error) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            let minimum = schema
-                .get("minContains")
-                .and_then(Value::as_u64)
-                .unwrap_or(1);
-            let maximum = schema
-                .get("maxContains")
-                .and_then(Value::as_u64)
-                .unwrap_or(u64::MAX);
-            if matches < minimum || matches > maximum {
-                return Err(invalid(path, "contains"));
-            }
-        }
         Ok(())
     }
 
     fn evaluate_instance_object(
         &mut self,
         schema: &Map<String, Value>,
-        instance: &Value,
         object: &Map<String, Value>,
         path: &str,
         depth: usize,
-    ) -> Result<(), JsonSchemaInstanceError> {
+    ) -> Result<(), InvocationSchemaError> {
         let length = object.len() as u64;
         if schema
             .get("minProperties")
             .and_then(Value::as_u64)
             .is_some_and(|minimum| length < minimum)
         {
-            return Err(invalid(path, "minProperties"));
+            return Err(invalid_instance(path, "minProperties"));
         }
         if schema
             .get("maxProperties")
             .and_then(Value::as_u64)
             .is_some_and(|maximum| length > maximum)
         {
-            return Err(invalid(path, "maxProperties"));
+            return Err(invalid_instance(path, "maxProperties"));
         }
-        if let Some(Value::Array(required)) = schema.get("required") {
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
             for key in required.iter().filter_map(Value::as_str) {
                 self.charge(1)?;
                 if !object.contains_key(key) {
-                    return Err(invalid(path, "required"));
+                    return Err(invalid_instance(path, "required"));
                 }
             }
         }
-
         let properties = schema.get("properties").and_then(Value::as_object);
-        let patterns = compile_pattern_map(schema.get("patternProperties"), self)?;
-        let mut evaluated = BTreeSet::new();
         for (key, value) in object {
-            let item_path = child_path(path, key);
             if let Some(property_schema) = properties.and_then(|map| map.get(key)) {
-                self.evaluate(property_schema, value, &item_path, depth + 1)?;
-                evaluated.insert(key.as_str());
-            }
-            for (pattern, pattern_schema) in &patterns {
-                self.charge(1)?;
-                if pattern.is_match(key) {
-                    self.evaluate(pattern_schema, value, &item_path, depth + 1)?;
-                    evaluated.insert(key.as_str());
-                }
-            }
-        }
-        if let Some(additional) = schema.get("additionalProperties") {
-            for (key, value) in object {
-                if !evaluated.contains(key.as_str()) {
-                    self.evaluate(additional, value, &child_path(path, key), depth + 1)?;
-                }
-            }
-        }
-
-        if let Some(Value::Object(dependencies)) = schema.get("dependentRequired") {
-            for (trigger, required) in dependencies {
-                if object.contains_key(trigger)
-                    && let Some(required) = required.as_array()
-                {
-                    for key in required.iter().filter_map(Value::as_str) {
-                        self.charge(1)?;
-                        if !object.contains_key(key) {
-                            return Err(invalid(path, "dependentRequired"));
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(Value::Object(dependencies)) = schema.get("dependentSchemas") {
-            for (trigger, dependent_schema) in dependencies {
-                if object.contains_key(trigger) {
-                    self.evaluate(dependent_schema, instance, path, depth + 1)?;
-                }
-            }
-        }
-        if let Some(property_names) = schema.get("propertyNames") {
-            for key in object.keys() {
-                self.evaluate(
-                    property_names,
-                    &Value::String(key.clone()),
-                    &child_path(path, key),
-                    depth + 1,
-                )?;
+                self.evaluate(property_schema, value, &child_path(path, key), depth + 1)?;
+            } else if let Some(additional) = schema.get("additionalProperties") {
+                self.evaluate(additional, value, &child_path(path, key), depth + 1)?;
             }
         }
         Ok(())
     }
 
-    fn evaluate_combiners(
-        &mut self,
-        schema: &Map<String, Value>,
-        instance: &Value,
-        path: &str,
-        depth: usize,
-    ) -> Result<(), JsonSchemaInstanceError> {
-        if let Some(Value::Array(branches)) = schema.get("allOf") {
-            for branch in branches {
-                self.evaluate(branch, instance, path, depth + 1)?;
-            }
-        }
-        if let Some(Value::Array(branches)) = schema.get("anyOf") {
-            let mut matched = false;
-            for branch in branches {
-                match self.evaluate(branch, instance, path, depth + 1) {
-                    Ok(()) => matched = true,
-                    Err(error) if is_mismatch(&error) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            if !matched {
-                return Err(invalid(path, "anyOf"));
-            }
-        }
-        if let Some(Value::Array(branches)) = schema.get("oneOf") {
-            let mut matches = 0;
-            for branch in branches {
-                match self.evaluate(branch, instance, path, depth + 1) {
-                    Ok(()) => matches += 1,
-                    Err(error) if is_mismatch(&error) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            if matches != 1 {
-                return Err(invalid(path, "oneOf"));
-            }
-        }
-        if let Some(not_schema) = schema.get("not") {
-            match self.evaluate(not_schema, instance, path, depth + 1) {
-                Ok(()) => return Err(invalid(path, "not")),
-                Err(error) if is_mismatch(&error) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        if let Some(if_schema) = schema.get("if") {
-            match self.evaluate(if_schema, instance, path, depth + 1) {
-                Ok(()) => {
-                    if let Some(then_schema) = schema.get("then") {
-                        self.evaluate(then_schema, instance, path, depth + 1)?;
-                    }
-                }
-                Err(error) if is_mismatch(&error) => {
-                    if let Some(else_schema) = schema.get("else") {
-                        self.evaluate(else_schema, instance, path, depth + 1)?;
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
-    }
-
-    fn charge(&mut self, amount: usize) -> Result<(), JsonSchemaInstanceError> {
+    fn charge(&mut self, amount: usize) -> Result<(), InvocationSchemaError> {
         self.remaining_work = self.remaining_work.checked_sub(amount).ok_or(
-            JsonSchemaInstanceError::WorkExceeded {
-                maximum: MAX_SCHEMA_INSTANCE_WORK,
+            InvocationSchemaError::EvaluationWorkExceeded {
+                maximum: MAX_INVOCATION_VALUE_WORK,
             },
         )?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExactInteger {
+    Negative(i64),
+    NonNegative(u64),
+}
+
+impl ExactInteger {
+    fn as_i128(self) -> i128 {
+        match self {
+            Self::Negative(value) => i128::from(value),
+            Self::NonNegative(value) => i128::from(value),
+        }
+    }
+
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_i128().cmp(&other.as_i128())
+    }
+}
+
+fn exact_integer(value: &Value) -> Option<ExactInteger> {
+    let number = value.as_number()?;
+    if let Some(value) = number.as_i64() {
+        return Some(if value < 0 {
+            ExactInteger::Negative(value)
+        } else {
+            ExactInteger::NonNegative(value as u64)
+        });
+    }
+    number.as_u64().map(ExactInteger::NonNegative)
+}
+
+fn exact_positive_integer(value: &Value) -> Option<ExactInteger> {
+    exact_integer(value).filter(|integer| integer.as_i128() > 0)
 }
 
 fn matches_type(schema_type: &Value, instance: &Value) -> bool {
@@ -490,75 +691,51 @@ fn matches_type_name(name: &str, instance: &Value) -> bool {
         "boolean" => instance.is_boolean(),
         "object" => instance.is_object(),
         "array" => instance.is_array(),
-        "number" => instance.is_number(),
         "string" => instance.is_string(),
-        "integer" => instance.as_number().is_some_and(|number| {
-            number.as_i64().is_some()
-                || number.as_u64().is_some()
-                || number.as_f64().is_some_and(|value| value.fract() == 0.0)
-        }),
+        "integer" => exact_integer(instance).is_some(),
         _ => false,
     }
 }
 
-fn number(value: Option<&Value>) -> f64 {
-    value.and_then(Value::as_f64).unwrap_or(0.0)
-}
-
-fn compile_pattern_map<'a>(
-    value: Option<&'a Value>,
-    evaluator: &mut Evaluator<'_>,
-) -> Result<Vec<(Regex, &'a Value)>, JsonSchemaInstanceError> {
-    let Some(map) = value.and_then(Value::as_object) else {
-        return Ok(Vec::new());
-    };
-    let mut patterns = Vec::with_capacity(map.len());
-    for (pattern, schema) in map {
-        if pattern.len() > MAX_PATTERN_BYTES {
-            return Err(JsonSchemaInstanceError::UnsupportedPattern);
+fn profile_instance_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(left), Value::Bool(right)) => left == right,
+        (Value::Number(left), Value::Number(right)) => {
+            number_representation(left) == number_representation(right)
         }
-        evaluator.charge(pattern.len().max(1))?;
-        patterns.push((
-            Regex::new(pattern).map_err(|_| JsonSchemaInstanceError::UnsupportedPattern)?,
-            schema,
-        ));
+        (Value::String(left), Value::String(right)) => left == right,
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| profile_instance_equal(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| profile_instance_equal(left, right))
+                })
+        }
+        _ => false,
     }
-    Ok(patterns)
 }
 
-fn resolve_local_reference<'a>(
-    root: &'a Value,
-    reference: &str,
-) -> Result<&'a Value, JsonSchemaInstanceError> {
-    if reference == "#" {
-        return Ok(root);
-    }
-    let Some(pointer) = reference.strip_prefix("#/") else {
-        return Err(JsonSchemaInstanceError::UnsupportedReference {
-            reference: bounded(reference),
-        });
-    };
-    let mut current = root;
-    for raw in pointer.split('/') {
-        let token = raw.replace("~1", "/").replace("~0", "~");
-        current = current
-            .as_object()
-            .and_then(|object| object.get(&token))
-            .or_else(|| {
-                token
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|index| current.as_array().and_then(|array| array.get(index)))
-            })
-            .ok_or_else(|| JsonSchemaInstanceError::UnsupportedReference {
-                reference: bounded(reference),
-            })?;
-    }
-    Ok(current)
+fn number_representation(number: &Number) -> String {
+    number.to_string()
 }
 
-fn invalid(path: &str, keyword: &str) -> JsonSchemaInstanceError {
-    JsonSchemaInstanceError::InvalidInstance {
+fn invalid_profile(reason: &str) -> InvocationSchemaError {
+    InvocationSchemaError::InvalidProfileSchema {
+        reason: bounded(reason),
+    }
+}
+
+fn invalid_instance(path: &str, keyword: &str) -> InvocationSchemaError {
+    InvocationSchemaError::InvalidInstance {
         path: bounded(path),
         keyword: bounded(keyword),
     }
@@ -580,92 +757,118 @@ fn bounded(value: &str) -> String {
     value[..end].to_owned()
 }
 
-fn is_mismatch(error: &JsonSchemaInstanceError) -> bool {
-    matches!(error, JsonSchemaInstanceError::InvalidInstance { .. })
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::{
-        JsonSchemaInstanceError, MAX_SCHEMA_INSTANCE_DEPTH, validate_json_schema_instance,
+        InvocationSchemaError, MAX_INVOCATION_VALUE_DEPTH, validate_invocation_instance,
+        validate_invocation_schema_profile,
     };
 
-    #[test]
-    fn validates_object_ranges_patterns_and_unknown_fields() {
-        let schema = json!({
+    fn artifact_schema() -> Value {
+        json!({
             "type": "object",
             "properties": {
                 "reference": {"type": "string", "pattern": "^artifact:sha256:[0-9a-f]{64}$"},
-                "offset": {"type": "integer", "minimum": 0},
+                "offset": {"type": "integer", "minimum": 0, "maximum": u64::MAX},
                 "length": {"type": "integer", "minimum": 1, "maximum": 16384}
             },
             "required": ["reference", "offset", "length"],
             "additionalProperties": false
-        });
-        validate_json_schema_instance(
+        })
+    }
+
+    #[test]
+    fn artifact_profile_is_exact_and_rejects_float_integer_spelling() {
+        let schema = artifact_schema();
+        let reference = format!("artifact:sha256:{}", "a".repeat(64));
+        validate_invocation_instance(
             &schema,
-            &json!({
-                "reference": format!("artifact:sha256:{}", "a".repeat(64)),
-                "offset": 0,
-                "length": 16384
-            }),
+            &json!({"reference": reference, "offset": 0, "length": 16384}),
         )
-        .expect("valid instance");
+        .expect("valid artifact arguments");
         for invalid in [
+            json!({"reference": format!("artifact:sha256:{}", "a".repeat(64)), "offset": 0, "length": 1.0}),
             json!({"reference": "artifact:sha256:AA", "offset": 0, "length": 1}),
             json!({"reference": format!("artifact:sha256:{}", "a".repeat(64)), "offset": -1, "length": 1}),
             json!({"reference": format!("artifact:sha256:{}", "a".repeat(64)), "offset": 0, "length": 0}),
             json!({"reference": format!("artifact:sha256:{}", "a".repeat(64)), "offset": 0, "length": 1, "effect": "content"}),
         ] {
             assert!(matches!(
-                validate_json_schema_instance(&schema, &invalid),
-                Err(JsonSchemaInstanceError::InvalidInstance { .. })
+                validate_invocation_instance(&schema, &invalid),
+                Err(InvocationSchemaError::InvalidInstance { .. })
             ));
         }
     }
 
     #[test]
-    fn combiners_and_local_refs_are_evaluated() {
-        let schema = json!({
-            "$defs": {"positive": {"type": "integer", "minimum": 1}},
-            "allOf": [
-                {"$ref": "#/$defs/positive"},
-                {"not": {"const": 2}},
-                {"anyOf": [{"const": 1}, {"const": 3}]}
-            ]
+    fn equality_keywords_distinguish_integer_and_float_representations() {
+        assert!(validate_invocation_instance(&json!({"const": 1}), &json!(1)).is_ok());
+        assert!(validate_invocation_instance(&json!({"const": 1}), &json!(1.0)).is_err());
+        assert!(validate_invocation_instance(&json!({"enum": [1]}), &json!(1)).is_ok());
+        assert!(validate_invocation_instance(&json!({"enum": [1]}), &json!(1.0)).is_err());
+        validate_invocation_instance(
+            &json!({"type": "array", "uniqueItems": true}),
+            &json!([1, 1.0]),
+        )
+        .expect("representationally distinct numbers are unique");
+        assert!(
+            validate_invocation_instance(
+                &json!({"type": "array", "uniqueItems": true}),
+                &json!([1, 1])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn large_integers_and_multiple_of_use_exact_arithmetic() {
+        let exact = json!({
+            "type": "integer",
+            "minimum": 9_007_199_254_740_993_u64,
+            "maximum": 9_007_199_254_740_995_u64,
+            "multipleOf": 3
         });
-        validate_json_schema_instance(&schema, &json!(3)).expect("matches all branches");
-        assert!(validate_json_schema_instance(&schema, &json!(2)).is_err());
+        validate_invocation_instance(&exact, &json!(9_007_199_254_740_993_u64))
+            .expect("large exact multiple");
+        assert!(validate_invocation_instance(&exact, &json!(9_007_199_254_740_994_u64)).is_err());
+        assert!(validate_invocation_instance(&exact, &json!(9_007_199_254_740_996_u64)).is_err());
     }
 
     #[test]
-    fn mathematically_integral_json_numbers_match_integer_type() {
-        let schema = json!({"type": "integer"});
-        validate_json_schema_instance(&schema, &json!(1.0)).expect("1.0 is an integer");
-        assert!(validate_json_schema_instance(&schema, &json!(1.5)).is_err());
-    }
-
-    #[test]
-    fn recursive_refs_stop_at_the_fixed_depth() {
-        let schema = json!({"$ref": "#"});
+    fn structural_depth_is_rejected_by_iterative_preflight() {
+        let mut schema = json!({"type": "integer"});
+        for _ in 0..=MAX_INVOCATION_VALUE_DEPTH {
+            schema = json!({"type": "array", "items": schema});
+        }
         assert_eq!(
-            validate_json_schema_instance(&schema, &json!(null)),
-            Err(JsonSchemaInstanceError::DepthExceeded {
-                maximum: MAX_SCHEMA_INSTANCE_DEPTH
+            validate_invocation_schema_profile(&schema),
+            Err(InvocationSchemaError::SchemaDepthExceeded {
+                maximum: MAX_INVOCATION_VALUE_DEPTH
             })
         );
     }
 
     #[test]
-    fn unsupported_runtime_keywords_fail_closed() {
-        let schema = json!({"unevaluatedProperties": false});
+    fn structural_work_is_rejected_by_iterative_preflight() {
+        let schema = json!({"const": vec![Value::Null; super::MAX_INVOCATION_VALUE_WORK]});
         assert_eq!(
-            validate_json_schema_instance(&schema, &json!({})),
-            Err(JsonSchemaInstanceError::UnsupportedKeyword {
-                keyword: "unevaluatedProperties"
+            validate_invocation_schema_profile(&schema),
+            Err(InvocationSchemaError::SchemaWorkExceeded {
+                maximum: super::MAX_INVOCATION_VALUE_WORK
             })
         );
+    }
+
+    #[test]
+    fn unsupported_semantics_fail_at_profile_binding() {
+        for schema in [
+            json!({"type": "number"}),
+            json!({"$ref": "#/definitions/value"}),
+            json!({"allOf": [{"type": "integer"}]}),
+        ] {
+            assert!(validate_invocation_schema_profile(&schema).is_err());
+        }
     }
 }

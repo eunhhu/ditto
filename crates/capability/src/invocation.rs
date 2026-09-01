@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -7,10 +10,12 @@ use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
 use super::{
-    CapabilityLifecycle, CapabilityManifest, CapabilitySchema, EffectProfile, ExecutionEpoch,
-    RuntimeType, valid_capability_id, valid_semver,
+    CapabilityCard, CapabilityLifecycle, CapabilityManifest, CapabilitySchema, EffectProfile,
+    ExecutionEpochEvidence, RuntimeType, valid_capability_id, valid_semver,
 };
-use crate::{JsonSchemaInstanceError, validate_json_schema_instance};
+use crate::{
+    InvocationSchemaError, validate_invocation_instance, validate_invocation_schema_profile,
+};
 
 pub const MAX_TOOL_CALL_ID_BYTES: usize = 512;
 pub const MAX_DERIVER_REVISION_BYTES: usize = 128;
@@ -318,6 +323,158 @@ pub enum CapabilityRevisionError {
         "execution epoch already contains a different or discovery-only revision for {capability_id}"
     )]
     EpochRevisionConflict { capability_id: String },
+    #[error("live epoch binding card does not match its capability revision")]
+    BindingCardMismatch,
+    #[error("capability input schema is outside the Ditto invocation profile: {reason}")]
+    InvocationSchemaProfile { reason: String },
+}
+
+/// One process-local execution epoch that alone can issue live invocation
+/// bindings.
+///
+/// The type has private fields and implements neither `Serialize` nor
+/// `Deserialize`.
+///
+/// ```compile_fail
+/// use ditto_capability::LiveExecutionEpoch;
+/// let _ = LiveExecutionEpoch { evidence: todo!(), bindings: todo!() };
+/// ```
+///
+/// ```compile_fail
+/// use ditto_capability::LiveExecutionEpoch;
+/// fn requires_deserialize<T: serde::de::DeserializeOwned>() {}
+/// requires_deserialize::<LiveExecutionEpoch>();
+/// ```
+///
+/// ```compile_fail
+/// use ditto_capability::LiveExecutionEpoch;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<LiveExecutionEpoch>();
+/// ```
+#[derive(Debug)]
+pub struct LiveExecutionEpoch {
+    evidence: ExecutionEpochEvidence,
+    bindings: BTreeMap<String, InvocableCapabilityBinding>,
+}
+
+impl LiveExecutionEpoch {
+    pub fn new(max_working_set: usize) -> Self {
+        Self {
+            evidence: ExecutionEpochEvidence::new(max_working_set),
+            bindings: BTreeMap::new(),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        self.evidence.id()
+    }
+
+    pub fn evidence(&self) -> &ExecutionEpochEvidence {
+        &self.evidence
+    }
+
+    pub fn into_evidence(self) -> ExecutionEpochEvidence {
+        self.evidence
+    }
+
+    pub fn page_in(&mut self, cards: impl IntoIterator<Item = CapabilityCard>) -> usize {
+        self.evidence.page_in(cards)
+    }
+
+    /// Bind one complete live capability contract into this epoch. Discovery-
+    /// only cards cannot be upgraded by replay evidence or by ID alone.
+    pub fn page_in_invocable(
+        &mut self,
+        manifest: &CapabilityManifest,
+        schema: &CapabilitySchema,
+        deriver_revision: DeriverRevision,
+    ) -> Result<usize, CapabilityRevisionError> {
+        validate_invocation_schema_profile(&schema.input_schema).map_err(|error| {
+            CapabilityRevisionError::InvocationSchemaProfile {
+                reason: error.to_string(),
+            }
+        })?;
+        let revision = CapabilityRevision::from_contract(manifest, schema, deriver_revision)?;
+        if let Some(existing) = self.bindings.get(&manifest.id) {
+            return if existing.revision == revision {
+                Ok(0)
+            } else {
+                Err(CapabilityRevisionError::EpochRevisionConflict {
+                    capability_id: manifest.id.clone(),
+                })
+            };
+        }
+        let card = CapabilityCard::from(manifest);
+        let inserted = self
+            .evidence
+            .page_in_bound(card.clone(), revision.clone())?;
+        if inserted == 1 {
+            self.bindings.insert(
+                manifest.id.clone(),
+                InvocableCapabilityBinding {
+                    epoch_id: self.evidence.id().to_owned(),
+                    card,
+                    manifest: manifest.clone(),
+                    schema: schema.clone(),
+                    revision,
+                },
+            );
+        }
+        Ok(inserted)
+    }
+
+    pub fn invocable_binding(&self, capability_id: &str) -> Option<&InvocableCapabilityBinding> {
+        self.bindings.get(capability_id)
+    }
+}
+
+/// Sealed complete contract issued only by a [`LiveExecutionEpoch`].
+///
+/// ```compile_fail
+/// use ditto_capability::InvocableCapabilityBinding;
+/// let _ = InvocableCapabilityBinding { epoch_id: String::new() };
+/// ```
+///
+/// ```compile_fail
+/// use ditto_capability::InvocableCapabilityBinding;
+/// fn requires_deserialize<T: serde::de::DeserializeOwned>() {}
+/// requires_deserialize::<InvocableCapabilityBinding>();
+/// ```
+///
+/// ```compile_fail
+/// use ditto_capability::InvocableCapabilityBinding;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<InvocableCapabilityBinding>();
+/// ```
+#[derive(Debug)]
+pub struct InvocableCapabilityBinding {
+    epoch_id: String,
+    card: CapabilityCard,
+    manifest: CapabilityManifest,
+    schema: CapabilitySchema,
+    revision: CapabilityRevision,
+}
+
+impl InvocableCapabilityBinding {
+    pub fn epoch_id(&self) -> &str {
+        &self.epoch_id
+    }
+
+    pub fn card(&self) -> &CapabilityCard {
+        &self.card
+    }
+
+    pub fn manifest(&self) -> &CapabilityManifest {
+        &self.manifest
+    }
+
+    pub fn schema(&self) -> &CapabilitySchema {
+        &self.schema
+    }
+
+    pub fn revision(&self) -> &CapabilityRevision {
+        &self.revision
+    }
 }
 
 pub fn canonical_manifest_digest(manifest: &CapabilityManifest) -> ManifestDigest {
@@ -682,30 +839,47 @@ impl CanonicalInvocation {
     }
 }
 
+/// Compiler ingress accepts only a sealed live binding, never replay evidence.
+///
+/// ```compile_fail
+/// use ditto_capability::{ExecutionEpochEvidence, InvocationCompiler};
+/// let evidence = ExecutionEpochEvidence::new(1);
+/// let _ = InvocationCompiler::compile(&evidence, todo!(), todo!());
+/// ```
 pub struct InvocationCompiler;
 
 impl InvocationCompiler {
     pub fn compile(
-        epoch: &ExecutionEpoch,
-        manifest: &CapabilityManifest,
-        schema: &CapabilitySchema,
+        binding: &InvocableCapabilityBinding,
         call: UntrustedToolCall,
         deriver: &dyn CapabilityDeriver,
     ) -> Result<CanonicalInvocation, InvocationError> {
+        let manifest = binding.manifest();
+        let schema = binding.schema();
         if call.capability_id != deriver.capability_id() {
             return Err(InvocationError::DeriverCapabilityMismatch);
+        }
+        if call.capability_id != binding.revision().capability_id() {
+            return Err(InvocationError::BindingContractMismatch {
+                field: "capability_id",
+            });
         }
         if manifest.lifecycle != CapabilityLifecycle::Active {
             return Err(InvocationError::CapabilityInactive);
         }
-        let expected = epoch
-            .invocation_revision(&call.capability_id)
-            .ok_or(InvocationError::CapabilityNotBoundInEpoch)?;
+        if canonical_json_bytes(binding.card())
+            != canonical_json_bytes(&CapabilityCard::from(manifest))
+        {
+            return Err(InvocationError::BindingContractMismatch {
+                field: "model_visible_card",
+            });
+        }
+        let expected = binding.revision();
         let before_revision = deriver.revision().clone();
         let current = CapabilityRevision::from_contract(manifest, schema, before_revision.clone())?;
         ensure_same_revision(expected, &current)?;
 
-        validate_json_schema_instance(&schema.input_schema, &call.arguments).map_err(|source| {
+        validate_invocation_instance(&schema.input_schema, &call.arguments).map_err(|source| {
             InvocationError::ArgumentsSchema {
                 stage: ArgumentStage::Raw,
                 source,
@@ -723,7 +897,7 @@ impl InvocationCompiler {
                 maximum: crate::MAX_INVOCATION_ARGUMENT_BYTES,
             });
         }
-        validate_json_schema_instance(&schema.input_schema, &normalized).map_err(|source| {
+        validate_invocation_instance(&schema.input_schema, &normalized).map_err(|source| {
             InvocationError::ArgumentsSchema {
                 stage: ArgumentStage::Normalized,
                 source,
@@ -758,14 +932,20 @@ impl InvocationCompiler {
             "inv_{}",
             domain_digest(
                 b"ditto.invocation-id.v1",
-                &[epoch.id.as_bytes(), call.call_id.as_str().as_bytes()]
+                &[
+                    binding.epoch_id().as_bytes(),
+                    call.call_id.as_str().as_bytes(),
+                ]
             )
         ));
         let idempotency_key = IdempotencyKey(format!(
             "idem_{}",
             domain_digest(
                 b"ditto.idempotency-key.v1",
-                &[epoch.id.as_bytes(), call.call_id.as_str().as_bytes()]
+                &[
+                    binding.epoch_id().as_bytes(),
+                    call.call_id.as_str().as_bytes(),
+                ]
             )
         ));
         #[derive(Serialize)]
@@ -784,7 +964,7 @@ impl InvocationCompiler {
             InvocationDigest::from_bytes(sha256(&canonical_json_bytes(&DigestProjection {
                 invocation_id: invocation_id.as_str(),
                 source_call_id: call.call_id.as_str(),
-                epoch_id: &epoch.id,
+                epoch_id: binding.epoch_id(),
                 capability_revision: &current,
                 normalized_arguments: &normalized,
                 effect,
@@ -795,7 +975,7 @@ impl InvocationCompiler {
         Ok(CanonicalInvocation {
             invocation_id,
             source_call_id: call.call_id,
-            epoch_id: epoch.id.clone(),
+            epoch_id: binding.epoch_id().to_owned(),
             capability_revision: current,
             normalized_arguments: CanonicalArguments(normalized),
             effect,
@@ -821,15 +1001,15 @@ pub enum InvocationError {
     DeriverCapabilityMismatch,
     #[error("capability is not active")]
     CapabilityInactive,
-    #[error("capability is not exactly revision-bound in the execution epoch")]
-    CapabilityNotBoundInEpoch,
+    #[error("live invocation binding mismatched at {field}")]
+    BindingContractMismatch { field: &'static str },
     #[error("execution epoch capability revision mismatched at {field}")]
     RevisionMismatch { field: &'static str },
     #[error("invocation {stage:?} arguments failed JSON Schema validation: {source}")]
     ArgumentsSchema {
         stage: ArgumentStage,
         #[source]
-        source: JsonSchemaInstanceError,
+        source: InvocationSchemaError,
     },
     #[error("capability deriver failed: {0}")]
     Deriver(#[source] DeriverError),
@@ -1060,8 +1240,8 @@ mod tests {
     };
     use crate::{
         CapabilityKind, CapabilityLifecycle, CapabilityManifest, CapabilitySchema, EffectProfile,
-        EffectSpec, ExecutionEpoch, PlacementSpec, PolicySpec, RetrievalSpec, RuntimeSpec,
-        RuntimeType, VerificationSpec,
+        EffectSpec, ExecutionEpochEvidence, LiveExecutionEpoch, PlacementSpec, PolicySpec,
+        RetrievalSpec, RuntimeSpec, RuntimeType, VerificationSpec,
     };
 
     struct FixtureDeriver {
@@ -1202,22 +1382,17 @@ mod tests {
         let (manifest, schema, deriver) = fixture();
         let call = UntrustedToolCall::new("call-1", "artifact.read", deriver.normalized.clone())
             .expect("call");
-        let mut epoch = ExecutionEpoch::new(1);
+        let mut epoch = LiveExecutionEpoch::new(1);
         epoch
             .page_in_invocable(&manifest, &schema, deriver.revision.clone())
             .expect("page revision");
-        let invocation = InvocationCompiler::compile(&epoch, &manifest, &schema, call, &deriver)
-            .expect("canonical invocation");
+        let binding = epoch
+            .invocable_binding("artifact.read")
+            .expect("live binding");
+        let invocation =
+            InvocationCompiler::compile(binding, call, &deriver).expect("canonical invocation");
         assert_eq!(invocation.effect(), EffectProfile::read_content());
         assert_eq!(invocation.resources().len(), 1);
-
-        let call = UntrustedToolCall::new("call-2", "artifact.read", deriver.normalized.clone())
-            .expect("call");
-        let legacy_epoch = ExecutionEpoch::new(1);
-        assert!(matches!(
-            InvocationCompiler::compile(&legacy_epoch, &manifest, &schema, call, &deriver),
-            Err(InvocationError::CapabilityNotBoundInEpoch)
-        ));
 
         let mut bad_deriver = deriver;
         bad_deriver.normalized = json!({"reference": "invalid", "offset": 0, "length": 1});
@@ -1228,7 +1403,7 @@ mod tests {
         )
         .expect("call");
         assert!(matches!(
-            InvocationCompiler::compile(&epoch, &manifest, &schema, call, &bad_deriver),
+            InvocationCompiler::compile(binding, call, &bad_deriver),
             Err(InvocationError::ArgumentsSchema {
                 stage: super::ArgumentStage::Normalized,
                 ..
@@ -1238,8 +1413,8 @@ mod tests {
 
     #[test]
     fn derived_effect_must_satisfy_both_manifest_bounds() {
-        let (mut manifest, schema, mut deriver) = fixture();
-        let mut epoch = ExecutionEpoch::new(1);
+        let (manifest, schema, mut deriver) = fixture();
+        let mut epoch = LiveExecutionEpoch::new(1);
         epoch
             .page_in_invocable(&manifest, &schema, deriver.revision.clone())
             .expect("page revision");
@@ -1247,88 +1422,92 @@ mod tests {
         let call = UntrustedToolCall::new("call-low", "artifact.read", deriver.normalized.clone())
             .expect("call");
         assert!(matches!(
-            InvocationCompiler::compile(&epoch, &manifest, &schema, call, &deriver),
+            InvocationCompiler::compile(
+                epoch.invocable_binding("artifact.read").expect("binding"),
+                call,
+                &deriver
+            ),
             Err(InvocationError::EffectBelowMinimum)
         ));
 
-        let (base_manifest, _, mut deriver) = fixture();
-        manifest = base_manifest;
+        let (_, _, mut deriver) = fixture();
         deriver.effect.mutation = crate::Mutation::Reversible;
         let call = UntrustedToolCall::new("call-high", "artifact.read", deriver.normalized.clone())
             .expect("call");
         assert!(matches!(
-            InvocationCompiler::compile(&epoch, &manifest, &schema, call, &deriver),
+            InvocationCompiler::compile(
+                epoch.invocable_binding("artifact.read").expect("binding"),
+                call,
+                &deriver
+            ),
             Err(InvocationError::EffectAboveMaximum)
         ));
     }
 
     #[test]
-    fn every_epoch_revision_component_is_exact() {
+    fn live_epoch_rejects_every_revision_mismatch() {
         let (manifest, schema, deriver) = fixture();
-        let mut epoch = ExecutionEpoch::new(1);
+        let mut epoch = LiveExecutionEpoch::new(2);
         epoch
             .page_in_invocable(&manifest, &schema, deriver.revision.clone())
             .expect("page revision");
-        let compile = |manifest: &CapabilityManifest,
-                       schema: &CapabilitySchema,
-                       deriver: &FixtureDeriver,
-                       call_id: &str| {
-            InvocationCompiler::compile(
-                &epoch,
-                manifest,
-                schema,
-                UntrustedToolCall::new(
-                    call_id,
-                    "artifact.read",
-                    json!({
-                        "reference": format!("artifact:sha256:{}", "a".repeat(64)),
-                        "offset": 0,
-                        "length": 1
-                    }),
-                )
-                .expect("call"),
-                deriver,
-            )
-        };
 
         let mut changed_version_manifest = manifest.clone();
         changed_version_manifest.version = "0.2.0".into();
         let mut changed_version_schema = schema.clone();
         changed_version_schema.version = "0.2.0".into();
         assert!(matches!(
-            compile(
+            epoch.page_in_invocable(
                 &changed_version_manifest,
                 &changed_version_schema,
-                &deriver,
-                "version"
+                deriver.revision.clone()
             ),
-            Err(InvocationError::RevisionMismatch {
-                field: "capability_version"
-            })
+            Err(super::CapabilityRevisionError::EpochRevisionConflict { .. })
         ));
 
         let mut changed_manifest = manifest.clone();
         changed_manifest.summary = "Changed".into();
         assert!(matches!(
-            compile(&changed_manifest, &schema, &deriver, "manifest"),
-            Err(InvocationError::RevisionMismatch {
-                field: "manifest_digest"
-            })
+            epoch.page_in_invocable(&changed_manifest, &schema, deriver.revision.clone()),
+            Err(super::CapabilityRevisionError::EpochRevisionConflict { .. })
         ));
 
         let mut changed_schema = schema.clone();
         changed_schema.input_schema["maxProperties"] = json!(3);
         assert!(matches!(
-            compile(&manifest, &changed_schema, &deriver, "schema"),
-            Err(InvocationError::RevisionMismatch {
-                field: "schema_digest"
-            })
+            epoch.page_in_invocable(&manifest, &changed_schema, deriver.revision.clone()),
+            Err(super::CapabilityRevisionError::EpochRevisionConflict { .. })
+        ));
+
+        let mut wrong_capability_schema = schema.clone();
+        wrong_capability_schema.id = "artifact.other".into();
+        assert!(matches!(
+            LiveExecutionEpoch::new(1).page_in_invocable(
+                &manifest,
+                &wrong_capability_schema,
+                deriver.revision.clone()
+            ),
+            Err(super::CapabilityRevisionError::SchemaCapabilityMismatch)
         ));
 
         let mut changed_deriver = deriver;
         changed_deriver.revision = DeriverRevision::new("artifact-read-v2").expect("revision");
         assert!(matches!(
-            compile(&manifest, &schema, &changed_deriver, "deriver"),
+            epoch.page_in_invocable(&manifest, &schema, changed_deriver.revision.clone()),
+            Err(super::CapabilityRevisionError::EpochRevisionConflict { .. })
+        ));
+        let call = UntrustedToolCall::new(
+            "deriver-change",
+            "artifact.read",
+            changed_deriver.normalized.clone(),
+        )
+        .expect("call");
+        assert!(matches!(
+            InvocationCompiler::compile(
+                epoch.invocable_binding("artifact.read").expect("binding"),
+                call,
+                &changed_deriver
+            ),
             Err(InvocationError::RevisionMismatch {
                 field: "deriver_revision"
             })
@@ -1336,24 +1515,42 @@ mod tests {
     }
 
     #[test]
-    fn bound_epoch_revision_evidence_round_trips_but_legacy_cards_do_not_authorize() {
+    fn live_binding_projects_replay_evidence_without_round_trip_authority() {
         let (manifest, schema, deriver) = fixture();
-        let mut bound = ExecutionEpoch::new(1);
+        let mut bound = LiveExecutionEpoch::new(1);
         bound
             .page_in_invocable(&manifest, &schema, deriver.revision.clone())
             .expect("page revision");
-        let encoded = serde_json::to_value(&bound).expect("serialize bound epoch");
+        let encoded = serde_json::to_value(bound.evidence()).expect("serialize evidence");
         assert_eq!(
             encoded["invocation_revisions"][0]["capability_id"],
             "artifact.read"
         );
-        let decoded: ExecutionEpoch =
+        let decoded: ExecutionEpochEvidence =
             serde_json::from_value(encoded).expect("deserialize bound epoch");
-        assert_eq!(decoded.invocation_revisions(), bound.invocation_revisions());
+        assert_eq!(
+            decoded.invocation_revisions(),
+            bound.evidence().invocation_revisions()
+        );
+        let binding = bound
+            .invocable_binding("artifact.read")
+            .expect("live binding");
+        assert_eq!(binding.epoch_id(), bound.id());
+        assert_eq!(
+            serde_json::to_value(binding.card()).expect("binding card"),
+            serde_json::to_value(&bound.evidence().capabilities()[0]).expect("evidence card")
+        );
+        assert_eq!(
+            binding.revision(),
+            bound
+                .evidence()
+                .invocation_revision("artifact.read")
+                .expect("evidence revision")
+        );
 
-        let mut legacy = ExecutionEpoch::new(1);
+        let mut legacy = ExecutionEpochEvidence::new(1);
         legacy.page_in([crate::CapabilityCard::from(&manifest)]);
-        let decoded: ExecutionEpoch =
+        let decoded: ExecutionEpochEvidence =
             serde_json::from_value(serde_json::to_value(&legacy).expect("serialize legacy epoch"))
                 .expect("deserialize legacy epoch");
         assert!(decoded.invocation_revisions().is_empty());
