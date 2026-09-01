@@ -2,8 +2,9 @@
 
 ## Status
 
-Active under the Task 005.1 pre-merge amendment to
-[ADR 0012](../../adr/0012-canonical-capability-invocation.md).
+Complete under the Task 005.1 pre-merge amendment to
+[ADR 0012](../../adr/0012-canonical-capability-invocation.md). See the tracked
+[verification evidence](005-1-evidence.md).
 
 ## Objective
 

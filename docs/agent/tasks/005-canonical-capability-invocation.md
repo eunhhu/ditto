@@ -4,7 +4,11 @@
 
 Completed under
 [ADR 0012](../../adr/0012-canonical-capability-invocation.md). The replayable
-audit record is [Task 005 verification evidence](005-evidence.md).
+audit record is [Task 005 verification evidence](005-evidence.md). The
+pre-merge [Task 005.1 correction](005-1-live-epoch-schema-authority.md)
+supersedes this task's dual-purpose epoch, Draft evaluator, and daemon-lifetime
+authorizer wording without changing its authority-free call, canonical
+derivation, permit, or `artifact.read` objectives.
 
 ## Objective
 

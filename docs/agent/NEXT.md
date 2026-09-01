@@ -5,13 +5,16 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-- [`005.1 Live epoch, closed schema profile, and bounded authority lifetime`](tasks/005-1-live-epoch-schema-authority.md):
-  separate replay evidence from live invocation authority, close exact schema
-  semantics and structural limits, scope authorization state to one live epoch,
-  and define one-shot execution claims without adding a worker.
+- None. Task 005.1 is complete, and this run stops before opening the compact
+  session-index task.
 
 ## Completed
 
+- [`005.1 Live epoch, closed schema profile, and bounded authority lifetime`](tasks/005-1-live-epoch-schema-authority.md):
+  replayable evidence is separate from sealed live invocation bindings; the
+  exact closed invocation schema profile is preflight-bounded; authorization is
+  live-epoch-scoped; and future effectful dispatch requires a one-shot sealed
+  execution claim without adding a worker.
 - [`005 Canonical capability invocation and effect/resource authority`](tasks/005-canonical-capability-invocation.md):
   authority-free model calls, exact epoch/revision binding, bounded raw and
   normalized schema validation, typed effect/resource derivation, sealed

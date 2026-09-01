@@ -1,5 +1,10 @@
 # Task 005 verification evidence
 
+> Historical Task 005 closing evidence. The verified
+> [Task 005.1 evidence](005-1-evidence.md) supersedes this record's
+> dual-purpose epoch, Draft evaluator, and daemon-lifetime authorization-ledger
+> descriptions before merge.
+
 ## Reviewed range
 
 - Base commit: `99963faa6fe96dfee5fdc4eb4ae5eb84b57437df`
