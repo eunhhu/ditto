@@ -2,7 +2,7 @@
 
 ## Canonical state
 
-- Branch: `main`.
+- Branch: `feat/task-005-canonical-invocation`.
 - Runtime: Rust daemon and CLI.
 - Durable stores: SQLite event spine plus local SHA-256 artifact objects.
 - Public mutation ingress: typed user-input command only; arbitrary event append
@@ -15,6 +15,10 @@
   execution epochs, and validated provider-neutral level-2 input/output schema
   records. Recognized schema keywords are checked recursively against JSON
   Schema Draft 2020-12 while unknown extension keywords remain opaque.
+  Invocable epoch entries additionally bind the exact capability ID/version,
+  manifest digest, schema digest, and capability-specific deriver revision;
+  legacy card-only entries remain discoverable and replayable but cannot
+  authorize a new live invocation.
 - Context state: typed provenance graph, deterministic compiler, one cumulative
   V2 retrieval-work budget, and a standalone rebuildable SQLite projection of
   canonical `context.node.recorded` events. A typed source-verified snapshot is
@@ -28,10 +32,14 @@
   are charged locally and revalidated for trust, time, and the absolute budget
   at the model boundary. V2 embedded ordering is carried only by an opaque,
   non-serializable context-owned ranking and is revalidated after compilation.
-- Policy state: leases authorize canonical invocations against orthogonal effect
-  dimensions. No effectful executor is connected yet; the sole executable
-  builtin is the structurally bounded, lease-free `artifact.read` exception from
-  ADR 0009.
+- Policy state: sealed canonical invocations carry only harness-derived effect,
+  typed resource, and local-builtin placement authority. One clone-shared
+  process-local ledger atomically binds invocation IDs to digests, evaluates a
+  trusted static policy or harness-selected lease, consumes a successful lease
+  at most once, and issues a sealed expiring permit or approval-required
+  outcome. The existing bounded `artifact.read` executor now requires a
+  matching no-approval static-policy permit; no general effectful worker is
+  connected.
 - Model state: `ditto-model` owns version 1 of the provider-neutral request,
   driver, and backpressured stream-event contract. It preserves ordered stable
   prefix/volatile turn data, structured tool-call lifecycles, final structured
@@ -52,6 +60,38 @@
 
 ## Latest verified slice
 
+- Task 005 is complete under [ADR 0012](../adr/0012-canonical-capability-invocation.md).
+  The tracked [verification evidence](tasks/005-evidence.md) maps every exit
+  criterion to implementation, adversarial tests, concurrency tests, and four
+  sealed-type compile-fail cases. The contract, authority core, and
+  `artifact.read` migration are coherent commits `f1177bc`, `8215ea0`, and
+  `590e455d048492783d6aa4f3522fad8867b08d1c`.
+- `UntrustedToolCall` accepts only call ID, capability ID, and raw JSON
+  arguments. Canonicalization resolves the exact invocable epoch revision,
+  validates raw and normalized arguments under fixed Draft 2020-12 evaluator
+  bounds, runs the deterministic I/O-free `artifact.read` deriver, requires the
+  derived effect within both manifest bounds, and seals typed resources,
+  local-builtin placement, invocation identity, idempotency key, and digest.
+  Canonical path primitives reject traversal, sibling-prefix, control,
+  backslash, root, and non-NFC authority without touching a filesystem.
+- Policy authorization holds invocation-ID binding, decision lookup, lease
+  checks, decrement, and permit insertion under one mutex. Tests prove failure
+  and approval-required consume nothing, one success consumes once, retry
+  returns the same permit, an ID/digest conflict fails closed, and two
+  concurrent invocations against one remaining call yield at most one permit.
+- The live `artifact.read` turn obtains and validates an exact static-policy
+  permit after the existing source-event high-water scope check and before the
+  existing bounded read. Its Task 003 payload version, ordering, results,
+  continuation, unverified terminal, and no-I/O replay semantics remain
+  unchanged. New exact revision evidence is additive; legacy epochs still
+  replay, while a forged recorded deriver revision fails closed.
+- Focused Task 005 runs passed 118 tests across 8 suites and strict Clippy. The
+  canonical `rtk ./scripts/agent-check.sh` gate passed the tracked canary,
+  formatting, strict workspace/all-feature Clippy, and 344 tests across 36
+  suites. `rtk cargo +1.88.0 check --locked --workspace --all-targets` and
+  `rtk git diff --check` passed. No capability worker, subprocess capability,
+  network, model, credential, provider, SSH, approval-fulfillment, or billable
+  operation ran.
 - Task 004.2 is complete under the ADR 0011 amendment. The tracked
   [verification evidence](tasks/004-2-evidence.md) maps both post-review
   correctness findings to implementation and adversarial tests.
@@ -242,7 +282,8 @@
   continuation;
 - additional providers, OpenAI model profiles, reasoning replay, remote cancel,
   and explicit prompt-cache breakpoints;
-- capability worker protocol and canonical invocation lifecycle;
+- additional capability derivers, durable/cross-process authorization,
+  approval fulfillment, and the capability worker protocol;
 - device registry, local process runner, SSH transport, and secrets;
 - a production embedding worker/provider and persisted embedding cache;
 - completion verifiers and improvement compiler;

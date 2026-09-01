@@ -2,8 +2,9 @@
 
 ## Status
 
-Active under
-[ADR 0012](../../adr/0012-canonical-capability-invocation.md).
+Completed under
+[ADR 0012](../../adr/0012-canonical-capability-invocation.md). The replayable
+audit record is [Task 005 verification evidence](005-evidence.md).
 
 ## Objective
 
@@ -105,4 +106,3 @@ execution or replay semantics.
 - Focused tests, strict Clippy, `./scripts/agent-check.sh`,
   `cargo +1.88.0 check --locked --workspace --all-targets`, and diff hygiene
   pass. Reproducible evidence is tracked before the task is marked complete.
-

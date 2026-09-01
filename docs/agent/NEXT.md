@@ -5,15 +5,18 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-- [`005 Canonical capability invocation and effect/resource authority`](tasks/005-canonical-capability-invocation.md):
-  exact epoch/revision resolution, raw and normalized JSON Schema instance
-  validation, bounded capability derivation, sealed canonical invocation,
-  atomic authorization, sealed invocation-bound permit, and the existing
-  `artifact.read` reference migration. The stopping point is permit issuance;
-  no worker or external effect is in scope.
+- No implementation slice is active. The next listed priority is a compact,
+  source-verified session index that removes session-history rescans from
+  context delta verification and admission; its contract has not been defined.
 
 ## Completed
 
+- [`005 Canonical capability invocation and effect/resource authority`](tasks/005-canonical-capability-invocation.md):
+  authority-free model calls, exact epoch/revision binding, bounded raw and
+  normalized schema validation, typed effect/resource derivation, sealed
+  canonical invocations, atomic idempotent authorization, sealed invocation-
+  bound permits, and the existing `artifact.read` migration through a static
+  no-approval permit without Task 003 execution or replay drift.
 - [`004.2 Repair budget and validity precision`](tasks/004-2-repair-budget-validity-precision.md):
   monotonic work charging across cache repair, millisecond-canonical new
   validity admission, and schema-3 exact replay of legacy fine-precision
