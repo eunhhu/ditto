@@ -3,13 +3,14 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
-## Next priority — Canonical capability invocation and effect derivation
+## Active — 004.1 Retrieval resource envelope and lifecycle
 
-This remains an unimplemented priority, not an active contract. Define its ADR
-and task file before changing the frontier or connecting an effectful executor.
-The slice must derive a canonical effect profile from validated capability
-arguments and authorize it with a bounded lease; it must not add a fake success
-path for the still-deferred worker lifecycle.
+Contract: [tasks/004-1-retrieval-resource-envelope.md](tasks/004-1-retrieval-resource-envelope.md)
+
+Bound the composed memory, lexical, and provider work of Task 004 retrieval;
+separate verified snapshot authority in the type system; and move steady-state
+working-set verification from full session replay to checkpoint deltas. Do not
+start canonical invocation or an effectful executor in this slice.
 
 ## Completed
 
@@ -39,6 +40,7 @@ path for the still-deferred worker lifecycle.
 
 ## Later
 
+- canonical capability invocation and effect derivation;
 - device registry and local process worker;
 - SSH as placement transport;
 - gateway inspector and approval UX;
