@@ -2202,6 +2202,7 @@ fn tokenize(input: &str) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         collections::HashMap,
         sync::{Arc, Mutex},
     };
@@ -3790,6 +3791,43 @@ mod tests {
             provider.document_ids().is_empty(),
             "over-budget document input must not reach the provider"
         );
+    }
+
+    #[test]
+    fn maximum_size_ten_thousand_candidate_generator_stops_at_the_shared_byte_budget() {
+        let query = TaskQuery::new(TaskSignatureV2::new("target")).expect("lexical query");
+        let maximum_summary = "s".repeat(MAX_CONTEXT_NODE_SUMMARY_BYTES);
+        let yielded = Cell::new(0_usize);
+        let candidates = (0..MAX_CANDIDATE_COUNT).map(|index| {
+            yielded.set(yielded.get() + 1);
+            node(&format!("maximum-{index:05}"), &maximum_summary)
+        });
+        let mut budget = RetrievalWorkBudget::new();
+
+        let error = ContextQueryRanking::new_with_budget(
+            &query,
+            candidates,
+            Utc::now(),
+            ContextResultLimit::new(1).expect("result limit"),
+            None,
+            &mut budget,
+        )
+        .expect_err("maximum-size generator must hit the cumulative candidate budget");
+
+        assert_eq!(yielded.get(), MAX_CANDIDATE_COUNT);
+        assert!(matches!(
+            error,
+            ContextQueryRankingError::Retrieval(RetrievalError::WorkBudgetExceeded {
+                kind: RetrievalWorkKind::CandidateBytes,
+                maximum: MAX_TOTAL_CANDIDATE_BYTES,
+                ..
+            })
+        ));
+        assert!(budget.candidate_bytes() <= MAX_TOTAL_CANDIDATE_BYTES);
+        assert_eq!(budget.document_bytes(), 0);
+        assert_eq!(budget.lexical_bytes(), 0);
+        assert_eq!(budget.provider_calls(), 0);
+        assert_eq!(budget.provider_input_bytes(), 0);
     }
 
     #[test]
