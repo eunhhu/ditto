@@ -677,13 +677,42 @@ fn invalid_scope_origin_sources_and_session_wide_duplicates_fail_before_append()
         &user_session.event_id,
         "invalid time window",
     );
-    invalid_window.valid_from = Some(Utc::now() + Duration::minutes(2));
-    invalid_window.valid_until = Some(Utc::now() + Duration::minutes(1));
+    let validity_base = chrono::DateTime::from_timestamp_millis(1_800_000_000_000)
+        .expect("millisecond validity fixture");
+    invalid_window.valid_from = Some(validity_base + Duration::minutes(2));
+    invalid_window.valid_until = Some(validity_base + Duration::minutes(1));
     reject_without_append(
         &fixture,
         &mut receiver,
         TrustedContextNodeDraft::task(SESSION_A, TASK_A, invalid_window),
     );
+    for (field, microseconds) in [("valid_from", 1_i64), ("valid_until", 2_i64)] {
+        let mut noncanonical = task_user_node(
+            format!("submillisecond-{field}"),
+            &user_session.event_id,
+            "submillisecond validity is not admitted",
+        );
+        let value = validity_base + Duration::microseconds(microseconds);
+        if field == "valid_from" {
+            noncanonical.valid_from = Some(value);
+        } else {
+            noncanonical.valid_until = Some(value);
+        }
+        let error = reject_without_append(
+            &fixture,
+            &mut receiver,
+            TrustedContextNodeDraft::task(SESSION_A, TASK_A, noncanonical),
+        );
+        assert!(matches!(
+            error,
+            KernelError::ContextProjection(
+                ContextProjectionError::NonCanonicalValidityPrecision {
+                    field: actual_field,
+                    ..
+                }
+            ) if actual_field == field
+        ));
+    }
     let mut invalid_confidence = task_user_node(
         "invalid-confidence",
         &user_session.event_id,

@@ -12,9 +12,14 @@ semantics.
 
 ## Completed
 
+- [`004.2 Repair budget and validity precision`](tasks/004-2-repair-budget-validity-precision.md):
+  monotonic work charging across cache repair, millisecond-canonical new
+  validity admission, and schema-3 exact replay of legacy fine-precision
+  inclusive-start/exclusive-end windows.
 - [`004.1 Retrieval resource envelope and lifecycle`](tasks/004-1-retrieval-resource-envelope.md):
   one fixed request-local budget across query, context, and capability work;
-  streaming top-K ranking; active lifecycle capacity; typed verified snapshots;
+  bounded context candidate materialization, streaming document processing, and
+  top-K ranked retention; active lifecycle capacity; typed verified snapshots;
   startup/recovery full replay with steady-state delta verification; canonical
   scope and search validation before provider work; private SQLite paths; and a
   tracked CI canary plus replayable evidence manifest.
@@ -45,6 +50,12 @@ semantics.
 ## Later
 
 - canonical capability invocation and effect derivation;
+- compact source-verified session indexes that remove session-history rescans
+  from context delta verification and admission;
+- a bounded capability package-header index with symlink-safe discovery and
+  cold full-manifest paging before a large capability ecosystem;
+- batched, compact rerank pools and descriptor/hash caching before a production
+  embedding worker;
 - device registry and local process worker;
 - SSH as placement transport;
 - gateway inspector and approval UX;

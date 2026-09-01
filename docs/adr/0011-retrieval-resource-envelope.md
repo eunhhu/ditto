@@ -38,12 +38,15 @@ provider input bytes      32 MiB
 ```
 
 All counters use checked addition and fail with a typed budget-dimension error
-before the over-budget allocation, tokenization, or provider call. The query
+before the over-budget allocation, tokenization, or provider call. Cache
+repair/recheck attempts continue from the work already charged by a failed
+snapshot attempt; retry is not a budget transaction boundary. The query
 embedding consumes one call and its canonical query bytes. Each document is
 constructed, charged, scored/embedded, and dropped before the next candidate.
-Context and capability ranking retain at most their requested top-K roots, not
-all eligible documents. Provider failure or budget exhaustion still fails the
-whole working set without fallback or a partial result.
+Context ranking uses bounded candidate materialization followed by streaming
+document processing and top-K ranked retention; capability ranking streams
+documents while retaining top-K roots. Provider failure or budget exhaustion
+still fails the whole working set without fallback or a partial result.
 
 The existing per-value and 10,000 active-candidate maxima remain. A request may
 therefore fail before candidate 10,000 when its cumulative byte/work envelope
@@ -63,9 +66,10 @@ installed manifest before lifecycle filtering is superseded.
 - Hard runtime filters and positive lexical eligibility still precede embedding
   work and never become authority through similarity.
 
-Projection schema version 2 stores the lifecycle fields needed to filter active
-rows in SQLite before materialization. A schema-1 cache is discarded and
-rebuilt; canonical events are unchanged.
+Projection schema version 3 stores the lifecycle fields and exact timestamp
+sub-millisecond remainder needed to filter active rows in SQLite before
+materialization. A schema-1 or schema-2 cache is discarded and rebuilt;
+canonical events are unchanged.
 
 ### Full replay once, delta verification thereafter
 
@@ -100,6 +104,13 @@ from the retrieval layer's canonical exact-identity form. Existing version-1
 events remain replayable; the stricter rule applies to new kernel admissions and
 does not rewrite history.
 
+New trusted context admissions also require `valid_from` and `valid_until`, when
+present, to be exact millisecond timestamps. This matches the event spine's
+canonical time precision and prevents SQL/Rust lifecycle disagreement. Existing
+version-1 events with finer timestamps remain replayable: schema 3 stores the
+millisecond value plus its nanosecond remainder and applies the same inclusive
+start/exclusive end comparison as `ContextNode::is_valid_at`.
+
 `SearchContext` validates fixed collection and component bounds, uniqueness,
 canonical Unicode, and runtime completeness before query embedding. A preferred
 placement is valid only when it is in the available-placement set, and the
@@ -129,6 +140,9 @@ committing `.omo` or `.surf` contents.
   infrastructure and credential boundaries; both remain deferred.
 - Silently canonicalizing durable IDs would make two caller identities alias.
   New ingress rejects non-canonical forms instead.
+- Truncating legacy sub-millisecond validity during replay changes accepted
+  source semantics. Rejecting that history breaks the rebuild promise. Schema 3
+  preserves it exactly while keeping new admission millisecond-canonical.
 - Wall-clock, p95, and process-wide RSS thresholds are host- and scheduler-
   dependent correctness gates. CI instead exercises the maximum-size lazy
   generator against fixed checked work counters and exposes replay/delta/cache
@@ -139,10 +153,11 @@ committing `.omo` or `.surf` contents.
 
 Legacy context compilation and raw-string capability search remain unchanged.
 Task 003 event/replay behavior is unchanged. Capability manifests without a
-`lifecycle` field deserialize as active. Projection schema 1 is rebuildable and
-is replaced automatically by schema 2. Working-set construction gains typed
-scope and typed work-budget failures; this Task 004 API has no stable external
-wire route.
+`lifecycle` field deserialize as active. Projection schema 1 or 2 is rebuildable
+and is replaced automatically by schema 3. Working-set construction gains typed
+scope and typed work-budget failures; new trusted durable context admission
+gains a typed millisecond-precision failure. This Task 004 API has no stable
+external wire route.
 
 ## Measurable consequences and rollback
 
@@ -155,6 +170,10 @@ wire route.
   manifests must not stop an otherwise bounded active namespace.
 - Invalid scope/SearchContext must fail before provider calls.
 - Derived snapshots must fail to compile as a kernel candidate source.
+- A cache-repair retry must charge both snapshot attempts to one cumulative
+  budget and return no snapshot when their combined work exceeds a dimension.
+- New sub-millisecond validity must fail before append; exact millisecond
+  boundaries and legacy fine-precision replay must agree between SQL and Rust.
 - The canonical gate includes canaries, focused resource tests, and a tracked
   evidence manifest.
 

@@ -19,14 +19,15 @@
   V2 retrieval-work budget, and a standalone rebuildable SQLite projection of
   canonical `context.node.recorded` events. A typed source-verified snapshot is
   distinct from a derived cache snapshot; open/recovery performs full replay
-  and normal retrieval verifies checkpoint deltas. Pinning and policy-required
-  inclusion remain trusted ephemeral directives; token cost is derived locally.
-  A compact model-facing capsule projects ordered selected nodes without
-  exposing the compiler receipt, lens, or supersession metadata; its exact
-  serialized fields are charged locally and revalidated for trust, time, and
-  the absolute budget at the model boundary. V2 embedded ordering is carried
-  only by an opaque, non-serializable context-owned ranking and is revalidated
-  after compilation.
+  and normal retrieval verifies checkpoint deltas. New durable validity is
+  millisecond-canonical; schema 3 preserves exact fine-precision semantics for
+  legacy version-1 source events. Pinning and policy-required inclusion remain
+  trusted ephemeral directives; token cost is derived locally. A compact
+  model-facing capsule projects ordered selected nodes without exposing the
+  compiler receipt, lens, or supersession metadata; its exact serialized fields
+  are charged locally and revalidated for trust, time, and the absolute budget
+  at the model boundary. V2 embedded ordering is carried only by an opaque,
+  non-serializable context-owned ranking and is revalidated after compilation.
 - Policy state: leases authorize canonical invocations against orthogonal effect
   dimensions. No effectful executor is connected yet; the sole executable
   builtin is the structurally bounded, lease-free `artifact.read` exception from
@@ -51,6 +52,26 @@
 
 ## Latest verified slice
 
+- Task 004.2 is complete under the ADR 0011 amendment. The tracked
+  [verification evidence](tasks/004-2-evidence.md) maps both post-review
+  correctness findings to implementation and adversarial tests.
+- A verified-snapshot cache repair no longer resets candidate work to the
+  caller's pre-attempt budget. The repaired capture continues from the first
+  capture's charged budget, so combined N+1 work returns a typed dimension error
+  without a partial `VerifiedContextSnapshot`.
+- New trusted durable `valid_from` and `valid_until` values must be exact
+  milliseconds and fail with a field-specific typed error before append or
+  publication. Projection schema 3 stores both the millisecond value and exact
+  sub-millisecond nanosecond remainder. Legacy version-1 events with finer
+  precision therefore retain Rust's inclusive-start/exclusive-end behavior in
+  SQL; schema 1 and 2 caches rebuild automatically without changing events.
+- Focused Task 004.2 runs passed 38 projection tests across two suites and all 15
+  durable-kernel projection/working-set tests. The canonical
+  `rtk ./scripts/agent-check.sh` gate passed the tracked canary, formatting,
+  strict all-target/all-feature Clippy, and 328 tests across 35 suites.
+  `rtk cargo +1.88.0 check --locked --workspace --all-targets` and
+  `rtk git diff --check` passed. No network, model, credential, provider, or
+  billable embedding operation ran.
 - Task 004.1 is complete under ADR 0011. The tracked
   [verification evidence](tasks/004-1-evidence.md) maps every exit criterion to
   implementation and regression tests. The reviewed implementation is commit
@@ -61,18 +82,20 @@
   cumulative candidate, document, and lexical work at 64 MiB each, provider
   input at 32 MiB, and provider calls at 513 including the query. Checked
   N/N+1 failures occur before the over-budget allocation, tokenization, or
-  provider call. Context and capability documents are processed one at a time
-  and only requested top-K values remain retained.
+  provider call. Context uses bounded candidate materialization followed by
+  one-at-a-time document processing and top-K ranked retention plus bounded
+  exclusion metadata. Capability streams documents while retaining top-K roots.
 - V2 capacity now counts lifecycle-active values. Context scope, supersession,
   disputed status, validity start, and expiry are applied in SQLite before the
   10,000-row guard. Capability manifests default to active and retired or
   quarantined manifests neither count nor page into roots, complements, or
   execution cards. Hard runtime and positive lexical filters still precede
   embedding work.
-- Projection schema 2 stores active-filter fields. Kernel open/recovery performs
-  one canonical rebuild and records a non-durable process-local verification
-  generation. Unchanged reads validate the checkpoint anchor and SQLite data
-  version without full replay; later events are canonical delta-validated.
+- Projection schema 3 stores active-filter fields and exact timestamp remainder.
+  Kernel open/recovery performs one canonical rebuild and records a non-durable
+  process-local verification generation. Unchanged reads validate the checkpoint
+  anchor and SQLite data version without full replay; later events are canonical
+  delta-validated.
   External cache drift causes at most one source rebuild/recheck and never
   authorizes a result. Only `VerifiedContextSnapshot`, not
   `DerivedContextSnapshot`, can enter the kernel ranking path. Verification
@@ -237,6 +260,17 @@
   checkpoint semantics.
 - V2 retrieval supports one injected provider, but production remains lexical
   until the embedding worker slice.
+- Context delta dependency seeding and live admission still scan the affected
+  session's source history from sequence zero. Replace this with a compact
+  source-verified session index before production memory admission or
+  self-improvement workloads can make writes frequent.
+- Capability lifecycle is cold only at retrieval: catalogue loading still
+  recursively discovers, reads, deserializes, retains, and cross-validates every
+  manifest. Add bounded symlink-safe package headers and cold full-manifest
+  paging before a large or partially quarantined capability ecosystem.
+- The injected embedding interface is synchronous and may make up to 513 serial
+  calls within its fixed envelope. A production worker needs compact rerank
+  pools, batching, and descriptor/hash caching.
 - Version-1 replay recognizes several closed validator failures through stable
   display-message grammar; introduce typed subcodes before changing those
   messages.

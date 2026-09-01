@@ -16,8 +16,9 @@ removing full session replay from its steady-state path.
 
 1. Add one cumulative `RetrievalWorkBudget` shared across query, context, and
    capability work, with typed exact-dimension failures before work occurs.
-2. Rank context and capability roots as streaming top-K values; never retain a
-   maximum-sized document per eligible candidate.
+2. Bound context candidate materialization, process context/capability
+   retrieval documents one at a time, and retain only top-K ranked values;
+   never retain a maximum-sized document per eligible candidate.
 3. Count lifecycle-active context/capability candidates rather than immutable
    retired/superseded history.
 4. Rebuild from source at open/recovery, then validate only checkpoint deltas on
