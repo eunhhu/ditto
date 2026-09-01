@@ -11,3 +11,7 @@ chrono.workspace = true
 ditto-capability = { path = "../capability" }
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+ditto-artifact-read = { path = "../artifact-read" }
+serde_json.workspace = true

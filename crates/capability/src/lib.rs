@@ -16,6 +16,22 @@ use serde_json::Value;
 use thiserror::Error;
 use ulid::Ulid;
 
+mod invocation;
+mod schema_instance;
+
+pub use invocation::{
+    ArgumentStage, ArtifactResourceId, CanonicalInvocation, CanonicalPathResource,
+    CanonicalPathRoot, CanonicalResource, CanonicalResourceError, CapabilityDeriver,
+    CapabilityRevision, CapabilityRevisionError, DerivationBudget, DeriverError, DeriverRevision,
+    IdempotencyKey, InvocationCompiler, InvocationDigest, InvocationError, InvocationId,
+    ManifestDigest, ResolvedPlacement, SchemaDigest, ToolCallId, UntrustedToolCall,
+    UntrustedToolCallError, canonical_manifest_digest, canonical_schema_digest,
+};
+pub use schema_instance::{
+    JsonSchemaInstanceError, MAX_INVOCATION_ARGUMENT_BYTES, MAX_INVOCATION_SCHEMA_BYTES,
+    MAX_SCHEMA_INSTANCE_DEPTH, MAX_SCHEMA_INSTANCE_WORK, validate_json_schema_instance,
+};
+
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -824,6 +840,8 @@ pub struct ExecutionEpoch {
     pub id: String,
     max_working_set: usize,
     capabilities: Vec<CapabilityCard>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    invocation_revisions: Vec<CapabilityRevision>,
 }
 
 impl ExecutionEpoch {
@@ -832,6 +850,7 @@ impl ExecutionEpoch {
             id: Ulid::new().to_string(),
             max_working_set,
             capabilities: Vec::new(),
+            invocation_revisions: Vec::new(),
         }
     }
 
@@ -857,6 +876,42 @@ impl ExecutionEpoch {
         &self.capabilities
     }
 
+    /// Page in one capability with the exact contract required for live
+    /// invocation. Discovery-only cards added through [`Self::page_in`] remain
+    /// non-invocable.
+    pub fn page_in_invocable(
+        &mut self,
+        manifest: &CapabilityManifest,
+        schema: &CapabilitySchema,
+        deriver_revision: DeriverRevision,
+    ) -> Result<usize, CapabilityRevisionError> {
+        let revision = CapabilityRevision::from_contract(manifest, schema, deriver_revision)?;
+        if self.capabilities.iter().any(|card| card.id == manifest.id) {
+            return match self.invocation_revision(&manifest.id) {
+                Some(existing) if existing == &revision => Ok(0),
+                Some(_) | None => Err(CapabilityRevisionError::EpochRevisionConflict {
+                    capability_id: manifest.id.clone(),
+                }),
+            };
+        }
+        if self.capabilities.len() >= self.max_working_set {
+            return Ok(0);
+        }
+        self.capabilities.push(CapabilityCard::from(manifest));
+        self.invocation_revisions.push(revision);
+        Ok(1)
+    }
+
+    pub fn invocation_revisions(&self) -> &[CapabilityRevision] {
+        &self.invocation_revisions
+    }
+
+    pub fn invocation_revision(&self, capability_id: &str) -> Option<&CapabilityRevision> {
+        self.invocation_revisions
+            .iter()
+            .find(|revision| revision.capability_id() == capability_id)
+    }
+
     pub fn max_working_set(&self) -> usize {
         self.max_working_set
     }
@@ -876,6 +931,8 @@ impl<'de> Deserialize<'de> for ExecutionEpoch {
             id: String,
             max_working_set: usize,
             capabilities: Vec<CapabilityCard>,
+            #[serde(default)]
+            invocation_revisions: Vec<CapabilityRevision>,
         }
 
         let wire = EpochWire::deserialize(deserializer)?;
@@ -897,10 +954,29 @@ impl<'de> Deserialize<'de> for ExecutionEpoch {
                 "execution epoch contains duplicate capabilities",
             ));
         }
+        if wire.invocation_revisions.len() > wire.capabilities.len() {
+            return Err(serde::de::Error::custom(
+                "execution epoch contains more revisions than capabilities",
+            ));
+        }
+        let mut revision_ids = HashSet::new();
+        for revision in &wire.invocation_revisions {
+            if !revision_ids.insert(revision.capability_id()) {
+                return Err(serde::de::Error::custom(
+                    "execution epoch contains duplicate capability revisions",
+                ));
+            }
+            if !ids.contains(revision.capability_id()) {
+                return Err(serde::de::Error::custom(
+                    "execution epoch revision has no matching capability card",
+                ));
+            }
+        }
         Ok(Self {
             id: wire.id,
             max_working_set: wire.max_working_set,
             capabilities: wire.capabilities,
+            invocation_revisions: wire.invocation_revisions,
         })
     }
 }
