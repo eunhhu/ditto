@@ -6,8 +6,11 @@ use std::{
 
 use async_stream::stream;
 use chrono::{Duration as ChronoDuration, Utc};
-use ditto_artifact_read::{ARTIFACT_READ_ID, MAX_READ_BYTES, capability_schema};
+use ditto_artifact_read::{
+    ARTIFACT_READ_ID, ArtifactReadDeriver, MAX_READ_BYTES, capability_schema,
+};
 use ditto_artifact_store::ArtifactStore;
+use ditto_capability::{CapabilityDeriver, CapabilityRevision};
 use ditto_context::{
     ContextCandidate, ContextCapsule, ContextLens, ContextNode, ContextNodeKind, ContextOrigin,
     ContextScope, EpistemicStatus,
@@ -579,6 +582,14 @@ async fn successful_two_request_continuation_persists_exact_epoch_schema_history
     assert_eq!(replay.outputs.len(), 7);
     assert_eq!(replay.calls.len(), 1);
     assert!(replay.calls[0].output.is_some());
+    let selected = replay.capabilities.as_ref().expect("selected capability");
+    let expected_revision = CapabilityRevision::from_contract(
+        &selected.manifest,
+        &selected.schemas[0],
+        ArtifactReadDeriver::default().revision().clone(),
+    )
+    .expect("exact artifact revision");
+    assert_eq!(selected.epoch.invocation_revisions(), [expected_revision]);
     assert_eq!(replay.sequence_span.first_seq, events[1].seq);
     assert_eq!(
         replay.sequence_span.last_seq,
@@ -3005,6 +3016,15 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
         .expect("capabilities selected")
         .payload["epoch"]["capabilities"][0]["namespace"] = json!("forged");
     assert!(replay_artifact_read_turn(&corrupted_epoch_card, &outcome.turn_id).is_err());
+
+    let mut corrupted_invocation_revision = events.clone();
+    corrupted_invocation_revision
+        .iter_mut()
+        .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
+        .expect("capabilities selected")
+        .payload["epoch"]["invocation_revisions"][0]["deriver_revision"] =
+        json!("artifact.read/v999");
+    assert!(replay_artifact_read_turn(&corrupted_invocation_revision, &outcome.turn_id).is_err());
 
     let mut corrupted_generation = events.clone();
     corrupted_generation

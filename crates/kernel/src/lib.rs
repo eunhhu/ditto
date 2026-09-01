@@ -9,6 +9,7 @@ use ditto_capability::{CapabilityCard, CapabilityCatalog, CapabilityError};
 pub use ditto_capability::{ExecutionEpoch, SearchContext};
 use ditto_context_projection::{ContextProjection, ContextProjectionError};
 use ditto_event_store::{EventStore, EventStoreError};
+use ditto_policy::InvocationAuthorizer;
 use ditto_protocol::{
     EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
 };
@@ -118,6 +119,7 @@ struct KernelInner {
     capabilities: CapabilityCatalog,
     context_projection: ContextProjection,
     context_admission_gate: Mutex<()>,
+    invocation_authorizer: InvocationAuthorizer,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     event_sender: broadcast::Sender<EventRecord>,
 }
@@ -175,6 +177,7 @@ impl DittoKernel {
                 capabilities,
                 context_projection,
                 context_admission_gate: Mutex::new(()),
+                invocation_authorizer: InvocationAuthorizer::new(),
                 embedding_provider,
                 event_sender,
             }),

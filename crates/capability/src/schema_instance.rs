@@ -147,7 +147,7 @@ impl Evaluator<'_> {
             self.evaluate_array(schema, values, path, depth)?;
         }
         if let Some(object) = instance.as_object() {
-            self.evaluate_instance_object(schema, object, path, depth)?;
+            self.evaluate_instance_object(schema, instance, object, path, depth)?;
         }
 
         self.evaluate_combiners(schema, instance, path, depth)
@@ -312,6 +312,7 @@ impl Evaluator<'_> {
     fn evaluate_instance_object(
         &mut self,
         schema: &Map<String, Value>,
+        instance: &Value,
         object: &Map<String, Value>,
         path: &str,
         depth: usize,
@@ -382,12 +383,7 @@ impl Evaluator<'_> {
         if let Some(Value::Object(dependencies)) = schema.get("dependentSchemas") {
             for (trigger, dependent_schema) in dependencies {
                 if object.contains_key(trigger) {
-                    self.evaluate(
-                        dependent_schema,
-                        &Value::Object(object.clone()),
-                        path,
-                        depth + 1,
-                    )?;
+                    self.evaluate(dependent_schema, instance, path, depth + 1)?;
                 }
             }
         }
@@ -496,9 +492,11 @@ fn matches_type_name(name: &str, instance: &Value) -> bool {
         "array" => instance.is_array(),
         "number" => instance.is_number(),
         "string" => instance.is_string(),
-        "integer" => instance
-            .as_number()
-            .is_some_and(|number| number.as_i64().is_some() || number.as_u64().is_some()),
+        "integer" => instance.as_number().is_some_and(|number| {
+            number.as_i64().is_some()
+                || number.as_u64().is_some()
+                || number.as_f64().is_some_and(|value| value.fract() == 0.0)
+        }),
         _ => false,
     }
 }
@@ -640,6 +638,13 @@ mod tests {
         });
         validate_json_schema_instance(&schema, &json!(3)).expect("matches all branches");
         assert!(validate_json_schema_instance(&schema, &json!(2)).is_err());
+    }
+
+    #[test]
+    fn mathematically_integral_json_numbers_match_integer_type() {
+        let schema = json!({"type": "integer"});
+        validate_json_schema_instance(&schema, &json!(1.0)).expect("1.0 is an integer");
+        assert!(validate_json_schema_instance(&schema, &json!(1.5)).is_err());
     }
 
     #[test]
