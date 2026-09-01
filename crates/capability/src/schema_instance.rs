@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, collections::BTreeSet};
 
 use regex::Regex;
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 pub const MAX_INVOCATION_SCHEMA_BYTES: usize = 1024 * 1024;
@@ -138,14 +138,22 @@ pub fn validate_invocation_instance(
     instance: &Value,
 ) -> Result<(), InvocationSchemaError> {
     validate_invocation_schema_profile(schema)?;
-    map_instance_envelope(validate_value_envelope(
-        instance,
-        MAX_INVOCATION_ARGUMENT_BYTES,
-    ))?;
+    validate_invocation_argument_envelope(instance)?;
     Evaluator {
         remaining_work: MAX_INVOCATION_VALUE_WORK,
     }
     .evaluate(schema, instance, "$", 0)
+}
+
+/// Iteratively establish the complete argument envelope before any recursive
+/// canonical projection or profile evaluation.
+pub(crate) fn validate_invocation_argument_envelope(
+    instance: &Value,
+) -> Result<usize, InvocationSchemaError> {
+    map_instance_envelope(validate_value_envelope(
+        instance,
+        MAX_INVOCATION_ARGUMENT_BYTES,
+    ))
 }
 
 fn map_schema_envelope(
@@ -436,16 +444,21 @@ impl Evaluator {
             return Err(invalid_instance(path, "type"));
         }
         if let Some(expected) = schema.get("const")
-            && !profile_instance_equal(expected, instance)
+            && !self.instance_equal(expected, instance)?
         {
             return Err(invalid_instance(path, "const"));
         }
-        if let Some(values) = schema.get("enum").and_then(Value::as_array)
-            && !values
-                .iter()
-                .any(|expected| profile_instance_equal(expected, instance))
-        {
-            return Err(invalid_instance(path, "enum"));
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+            let mut matched = false;
+            for expected in values {
+                if self.instance_equal(expected, instance)? {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Err(invalid_instance(path, "enum"));
+            }
         }
         if exact_integer(instance).is_some() {
             self.evaluate_integer(schema, instance, path)?;
@@ -568,8 +581,7 @@ impl Evaluator {
         if schema.get("uniqueItems") == Some(&Value::Bool(true)) {
             for left in 0..values.len() {
                 for right in left + 1..values.len() {
-                    self.charge(1)?;
-                    if profile_instance_equal(&values[left], &values[right]) {
+                    if self.instance_equal(&values[left], &values[right])? {
                         return Err(invalid_instance(path, "uniqueItems"));
                     }
                 }
@@ -586,6 +598,46 @@ impl Evaluator {
             }
         }
         Ok(())
+    }
+
+    fn instance_equal(
+        &mut self,
+        left: &Value,
+        right: &Value,
+    ) -> Result<bool, InvocationSchemaError> {
+        self.charge(1)?;
+        match (left, right) {
+            (Value::Null, Value::Null) => Ok(true),
+            (Value::Bool(left), Value::Bool(right)) => Ok(left == right),
+            (Value::Number(left), Value::Number(right)) => Ok(left == right),
+            (Value::String(left), Value::String(right)) => Ok(left == right),
+            (Value::Array(left), Value::Array(right)) => {
+                if left.len() != right.len() {
+                    return Ok(false);
+                }
+                for (left, right) in left.iter().zip(right) {
+                    if !self.instance_equal(left, right)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            (Value::Object(left), Value::Object(right)) => {
+                if left.len() != right.len() {
+                    return Ok(false);
+                }
+                for (key, left) in left {
+                    let Some(right) = right.get(key) else {
+                        return Ok(false);
+                    };
+                    if !self.instance_equal(left, right)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn evaluate_instance_object(
@@ -697,37 +749,6 @@ fn matches_type_name(name: &str, instance: &Value) -> bool {
     }
 }
 
-fn profile_instance_equal(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Null, Value::Null) => true,
-        (Value::Bool(left), Value::Bool(right)) => left == right,
-        (Value::Number(left), Value::Number(right)) => {
-            number_representation(left) == number_representation(right)
-        }
-        (Value::String(left), Value::String(right)) => left == right,
-        (Value::Array(left), Value::Array(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(left, right)| profile_instance_equal(left, right))
-        }
-        (Value::Object(left), Value::Object(right)) => {
-            left.len() == right.len()
-                && left.iter().all(|(key, left)| {
-                    right
-                        .get(key)
-                        .is_some_and(|right| profile_instance_equal(left, right))
-                })
-        }
-        _ => false,
-    }
-}
-
-fn number_representation(number: &Number) -> String {
-    number.to_string()
-}
-
 fn invalid_profile(reason: &str) -> InvocationSchemaError {
     InvocationSchemaError::InvalidProfileSchema {
         reason: bounded(reason),
@@ -819,6 +840,30 @@ mod tests {
                 &json!([1, 1])
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn nested_unique_items_charge_recursive_comparison_work() {
+        let values = (0_u64..400)
+            .map(|suffix| {
+                let mut value = vec![json!(0); 199];
+                value.push(json!(suffix));
+                Value::Array(value)
+            })
+            .collect::<Vec<_>>();
+        assert!(values.len() * (values.len() - 1) / 2 < super::MAX_INVOCATION_VALUE_WORK);
+        assert!(
+            super::validate_invocation_argument_envelope(&Value::Array(values.clone())).is_ok()
+        );
+        assert_eq!(
+            validate_invocation_instance(
+                &json!({"type": "array", "uniqueItems": true}),
+                &Value::Array(values)
+            ),
+            Err(InvocationSchemaError::EvaluationWorkExceeded {
+                maximum: super::MAX_INVOCATION_VALUE_WORK
+            })
         );
     }
 

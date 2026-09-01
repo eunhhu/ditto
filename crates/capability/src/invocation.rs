@@ -13,6 +13,7 @@ use super::{
     CapabilityCard, CapabilityLifecycle, CapabilityManifest, CapabilitySchema, EffectProfile,
     ExecutionEpochEvidence, RuntimeType, valid_capability_id, valid_semver,
 };
+use crate::schema_instance::validate_invocation_argument_envelope;
 use crate::{
     InvocationSchemaError, validate_invocation_instance, validate_invocation_schema_profile,
 };
@@ -49,11 +50,18 @@ impl UntrustedToolCall {
         if !valid_capability_id(&capability_id) {
             return Err(UntrustedToolCallError::InvalidCapabilityId { capability_id });
         }
-        let actual = canonical_json_bytes(&arguments).len();
-        if actual > crate::MAX_INVOCATION_ARGUMENT_BYTES {
-            return Err(UntrustedToolCallError::ArgumentsTooLarge {
-                actual,
-                maximum: crate::MAX_INVOCATION_ARGUMENT_BYTES,
+        if let Err(error) = validate_invocation_argument_envelope(&arguments) {
+            return Err(match error {
+                InvocationSchemaError::InstanceTooLarge { actual, maximum } => {
+                    UntrustedToolCallError::ArgumentsTooLarge { actual, maximum }
+                }
+                InvocationSchemaError::InstanceDepthExceeded { maximum } => {
+                    UntrustedToolCallError::ArgumentsTooDeep { maximum }
+                }
+                InvocationSchemaError::InstanceWorkExceeded { maximum } => {
+                    UntrustedToolCallError::ArgumentsTooComplex { maximum }
+                }
+                _ => unreachable!("argument envelope returns only envelope failures"),
             });
         }
         Ok(Self {
@@ -103,6 +111,10 @@ pub enum UntrustedToolCallError {
     InvalidCapabilityId { capability_id: String },
     #[error("tool call arguments are {actual} bytes, exceeding {maximum}")]
     ArgumentsTooLarge { actual: usize, maximum: usize },
+    #[error("tool call arguments exceed JSON depth {maximum}")]
+    ArgumentsTooDeep { maximum: usize },
+    #[error("tool call arguments exceed {maximum} structural work units")]
+    ArgumentsTooComplex { maximum: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -327,6 +339,10 @@ pub enum CapabilityRevisionError {
     BindingCardMismatch,
     #[error("capability input schema is outside the Ditto invocation profile: {reason}")]
     InvocationSchemaProfile { reason: String },
+    #[error("live execution epoch is sealed for authorization")]
+    EpochAlreadySealed,
+    #[error("live execution epoch has no invocable capability binding")]
+    EpochHasNoInvocableBinding,
 }
 
 /// One process-local execution epoch that alone can issue live invocation
@@ -355,6 +371,13 @@ pub enum CapabilityRevisionError {
 pub struct LiveExecutionEpoch {
     evidence: ExecutionEpochEvidence,
     bindings: BTreeMap<String, InvocableCapabilityBinding>,
+    state: LiveEpochState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveEpochState {
+    Paging,
+    AuthorizationSealed,
 }
 
 impl LiveExecutionEpoch {
@@ -362,6 +385,7 @@ impl LiveExecutionEpoch {
         Self {
             evidence: ExecutionEpochEvidence::new(max_working_set),
             bindings: BTreeMap::new(),
+            state: LiveEpochState::Paging,
         }
     }
 
@@ -377,8 +401,12 @@ impl LiveExecutionEpoch {
         self.evidence
     }
 
-    pub fn page_in(&mut self, cards: impl IntoIterator<Item = CapabilityCard>) -> usize {
-        self.evidence.page_in(cards)
+    pub fn page_in(
+        &mut self,
+        cards: impl IntoIterator<Item = CapabilityCard>,
+    ) -> Result<usize, CapabilityRevisionError> {
+        self.ensure_paging()?;
+        Ok(self.evidence.page_in(cards))
     }
 
     /// Bind one complete live capability contract into this epoch. Discovery-
@@ -389,6 +417,7 @@ impl LiveExecutionEpoch {
         schema: &CapabilitySchema,
         deriver_revision: DeriverRevision,
     ) -> Result<usize, CapabilityRevisionError> {
+        self.ensure_paging()?;
         validate_invocation_schema_profile(&schema.input_schema).map_err(|error| {
             CapabilityRevisionError::InvocationSchemaProfile {
                 reason: error.to_string(),
@@ -425,6 +454,63 @@ impl LiveExecutionEpoch {
 
     pub fn invocable_binding(&self, capability_id: &str) -> Option<&InvocableCapabilityBinding> {
         self.bindings.get(capability_id)
+    }
+
+    /// Permanently seal paging and issue this epoch's sole authorization
+    /// ticket. Dropping the returned ticket never rearms the epoch.
+    pub fn seal_for_authorization(
+        &mut self,
+    ) -> Result<EpochAuthorizationTicket, CapabilityRevisionError> {
+        self.ensure_paging()?;
+        if self.bindings.is_empty() {
+            return Err(CapabilityRevisionError::EpochHasNoInvocableBinding);
+        }
+        self.state = LiveEpochState::AuthorizationSealed;
+        Ok(EpochAuthorizationTicket {
+            epoch_id: self.evidence.id().to_owned(),
+        })
+    }
+
+    fn ensure_paging(&self) -> Result<(), CapabilityRevisionError> {
+        if self.state == LiveEpochState::AuthorizationSealed {
+            return Err(CapabilityRevisionError::EpochAlreadySealed);
+        }
+        Ok(())
+    }
+}
+
+/// Sole non-wire authority to construct one ledger for a live epoch.
+///
+/// ```compile_fail
+/// use ditto_capability::EpochAuthorizationTicket;
+/// let _ = EpochAuthorizationTicket { epoch_id: String::new() };
+/// ```
+///
+/// ```compile_fail
+/// use ditto_capability::EpochAuthorizationTicket;
+/// fn requires_clone<T: Clone>() {}
+/// requires_clone::<EpochAuthorizationTicket>();
+/// ```
+///
+/// ```compile_fail
+/// use ditto_capability::EpochAuthorizationTicket;
+/// fn requires_serialize<T: serde::Serialize>() {}
+/// requires_serialize::<EpochAuthorizationTicket>();
+/// ```
+///
+/// ```compile_fail
+/// use ditto_capability::EpochAuthorizationTicket;
+/// fn requires_deserialize<T: serde::de::DeserializeOwned>() {}
+/// requires_deserialize::<EpochAuthorizationTicket>();
+/// ```
+#[derive(Debug)]
+pub struct EpochAuthorizationTicket {
+    epoch_id: String,
+}
+
+impl EpochAuthorizationTicket {
+    pub fn epoch_id(&self) -> &str {
+        &self.epoch_id
     }
 }
 
@@ -890,13 +976,6 @@ impl InvocationCompiler {
         let normalized = deriver
             .normalize(&call.arguments, &mut budget)
             .map_err(InvocationError::Deriver)?;
-        let normalized_bytes = canonical_json_bytes(&normalized).len();
-        if normalized_bytes > crate::MAX_INVOCATION_ARGUMENT_BYTES {
-            return Err(InvocationError::NormalizedArgumentsTooLarge {
-                actual: normalized_bytes,
-                maximum: crate::MAX_INVOCATION_ARGUMENT_BYTES,
-            });
-        }
         validate_invocation_instance(&schema.input_schema, &normalized).map_err(|source| {
             InvocationError::ArgumentsSchema {
                 stage: ArgumentStage::Normalized,
@@ -1013,8 +1092,6 @@ pub enum InvocationError {
     },
     #[error("capability deriver failed: {0}")]
     Deriver(#[source] DeriverError),
-    #[error("normalized arguments are {actual} bytes, exceeding {maximum}")]
-    NormalizedArgumentsTooLarge { actual: usize, maximum: usize },
     #[error("capability deriver returned {actual} resources, exceeding {maximum}")]
     TooManyResources { actual: usize, maximum: usize },
     #[error("capability deriver revision changed during derivation")]
@@ -1230,7 +1307,10 @@ fn hex_value(value: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use serde_json::{Value, json};
 
@@ -1249,6 +1329,7 @@ mod tests {
         normalized: Value,
         effect: EffectProfile,
         resource: CanonicalResource,
+        normalize_calls: AtomicUsize,
     }
 
     impl CapabilityDeriver for FixtureDeriver {
@@ -1265,6 +1346,7 @@ mod tests {
             _arguments: &Value,
             budget: &mut DerivationBudget,
         ) -> Result<Value, DeriverError> {
+            self.normalize_calls.fetch_add(1, Ordering::SeqCst);
             budget.charge(1)?;
             Ok(self.normalized.clone())
         }
@@ -1344,6 +1426,7 @@ mod tests {
                     "a".repeat(64)
                 ))
                 .expect("resource"),
+                normalize_calls: AtomicUsize::new(0),
             },
         )
     }
@@ -1393,6 +1476,7 @@ mod tests {
             InvocationCompiler::compile(binding, call, &deriver).expect("canonical invocation");
         assert_eq!(invocation.effect(), EffectProfile::read_content());
         assert_eq!(invocation.resources().len(), 1);
+        assert_eq!(deriver.normalize_calls.load(Ordering::SeqCst), 1);
 
         let mut bad_deriver = deriver;
         bad_deriver.normalized = json!({"reference": "invalid", "offset": 0, "length": 1});
@@ -1407,6 +1491,53 @@ mod tests {
             Err(InvocationError::ArgumentsSchema {
                 stage: super::ArgumentStage::Normalized,
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn untrusted_and_normalized_arguments_are_preflighted_before_canonical_projection() {
+        let mut too_deep = Value::Null;
+        for _ in 0..=crate::MAX_INVOCATION_VALUE_DEPTH {
+            too_deep = Value::Array(vec![too_deep]);
+        }
+        assert_eq!(
+            UntrustedToolCall::new("deep-raw", "artifact.read", too_deep.clone()),
+            Err(super::UntrustedToolCallError::ArgumentsTooDeep {
+                maximum: crate::MAX_INVOCATION_VALUE_DEPTH
+            })
+        );
+        assert_eq!(
+            UntrustedToolCall::new(
+                "wide-raw",
+                "artifact.read",
+                Value::Array(vec![Value::Null; crate::MAX_INVOCATION_VALUE_WORK])
+            ),
+            Err(super::UntrustedToolCallError::ArgumentsTooComplex {
+                maximum: crate::MAX_INVOCATION_VALUE_WORK
+            })
+        );
+
+        let (manifest, schema, mut deriver) = fixture();
+        let raw = deriver.normalized.clone();
+        deriver.normalized = too_deep;
+        let mut epoch = LiveExecutionEpoch::new(1);
+        epoch
+            .page_in_invocable(&manifest, &schema, deriver.revision.clone())
+            .expect("page revision");
+        let call =
+            UntrustedToolCall::new("deep-normalized", "artifact.read", raw).expect("raw call");
+        assert!(matches!(
+            InvocationCompiler::compile(
+                epoch.invocable_binding("artifact.read").expect("binding"),
+                call,
+                &deriver
+            ),
+            Err(InvocationError::ArgumentsSchema {
+                stage: super::ArgumentStage::Normalized,
+                source: crate::InvocationSchemaError::InstanceDepthExceeded {
+                    maximum: crate::MAX_INVOCATION_VALUE_DEPTH
+                }
             })
         ));
     }
@@ -1451,7 +1582,12 @@ mod tests {
         let mut mismatched_card = crate::CapabilityCard::from(&manifest);
         mismatched_card.summary = "Different model disclosure".into();
         let mut discovery_epoch = LiveExecutionEpoch::new(1);
-        assert_eq!(discovery_epoch.page_in([mismatched_card]), 1);
+        assert_eq!(
+            discovery_epoch
+                .page_in([mismatched_card])
+                .expect("page discovery card"),
+            1
+        );
         assert!(matches!(
             discovery_epoch.page_in_invocable(&manifest, &schema, deriver.revision.clone()),
             Err(super::CapabilityRevisionError::EpochRevisionConflict { .. })
@@ -1564,6 +1700,54 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&legacy).expect("serialize legacy epoch"))
                 .expect("deserialize legacy epoch");
         assert!(decoded.invocation_revisions().is_empty());
+    }
+
+    #[test]
+    fn live_epoch_issues_one_ticket_and_never_rearms_paging() {
+        let (manifest, schema, deriver) = fixture();
+        let mut epoch = LiveExecutionEpoch::new(1);
+        epoch
+            .page_in_invocable(&manifest, &schema, deriver.revision.clone())
+            .expect("page revision");
+
+        let ticket = epoch
+            .seal_for_authorization()
+            .expect("sole authorization ticket");
+        assert_eq!(ticket.epoch_id(), epoch.id());
+        assert!(matches!(
+            epoch.seal_for_authorization(),
+            Err(super::CapabilityRevisionError::EpochAlreadySealed)
+        ));
+        assert!(matches!(
+            epoch.page_in([crate::CapabilityCard::from(&manifest)]),
+            Err(super::CapabilityRevisionError::EpochAlreadySealed)
+        ));
+        assert!(matches!(
+            epoch.page_in_invocable(&manifest, &schema, deriver.revision.clone()),
+            Err(super::CapabilityRevisionError::EpochAlreadySealed)
+        ));
+
+        drop(ticket);
+        assert!(matches!(
+            epoch.seal_for_authorization(),
+            Err(super::CapabilityRevisionError::EpochAlreadySealed)
+        ));
+    }
+
+    #[test]
+    fn failed_empty_epoch_seal_leaves_paging_available() {
+        let (manifest, _, _) = fixture();
+        let mut epoch = LiveExecutionEpoch::new(1);
+        assert!(matches!(
+            epoch.seal_for_authorization(),
+            Err(super::CapabilityRevisionError::EpochHasNoInvocableBinding)
+        ));
+        assert_eq!(
+            epoch
+                .page_in([crate::CapabilityCard::from(&manifest)])
+                .expect("failed seal does not consume paging authority"),
+            1
+        );
     }
 
     #[test]
