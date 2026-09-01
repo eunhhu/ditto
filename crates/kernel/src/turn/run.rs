@@ -7,7 +7,7 @@ use ditto_artifact_read::{
     validate_artifact_read_manifest,
 };
 use ditto_capability::{
-    CapabilityDeriver, CapabilitySchema, ExecutionEpoch, InvocationCompiler, InvocationError,
+    CapabilityDeriver, CapabilitySchema, InvocationCompiler, InvocationError, LiveExecutionEpoch,
     UntrustedToolCall,
 };
 use ditto_context::{
@@ -19,7 +19,7 @@ use ditto_model::{
     ModelFeature, ModelRequest, ModelRequestId, ModelTurn, OutputConstraint, ParallelToolCalls,
     ProviderCallId, RequestControl, ToolCallBuffer, ToolChoice, ToolUsePolicy,
 };
-use ditto_policy::{AuthorizationOutcome, PolicyError, StaticPolicy};
+use ditto_policy::{AuthorizationOutcome, InvocationAuthorizer, PolicyError, StaticPolicy};
 use ditto_protocol::{
     EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
 };
@@ -234,8 +234,8 @@ impl DittoKernel {
 
         let manifest = manifest.clone();
         let deriver = ArtifactReadDeriver::default();
-        let mut epoch = ExecutionEpoch::new(1);
-        if epoch
+        let mut live_epoch = LiveExecutionEpoch::new(1);
+        if live_epoch
             .page_in_invocable(&manifest, &schema, deriver.revision().clone())
             .map_err(|error| {
                 self.persist_turn_failure(
@@ -248,8 +248,8 @@ impl DittoKernel {
                 )
             })?
             != 1
-            || epoch.capabilities().len() != 1
-            || epoch.capabilities()[0].id != ARTIFACT_READ_ID
+            || live_epoch.evidence().capabilities().len() != 1
+            || live_epoch.evidence().capabilities()[0].id != ARTIFACT_READ_ID
         {
             return Err(self.persist_turn_failure(
                 &scope,
@@ -260,7 +260,13 @@ impl DittoKernel {
                 None,
             ));
         }
-        let execution_epoch_id = match ExecutionEpochId::new(epoch.id.clone()) {
+        let binding =
+            live_epoch
+                .invocable_binding(ARTIFACT_READ_ID)
+                .ok_or(TurnRunError::Internal(
+                    "artifact.read live epoch issued no invocation binding",
+                ))?;
+        let execution_epoch_id = match ExecutionEpochId::new(live_epoch.id()) {
             Ok(id) => id,
             Err(error) => {
                 return Err(self.persist_turn_failure(
@@ -273,7 +279,8 @@ impl DittoKernel {
                 ));
             }
         };
-        let schemas = vec![schema.clone()];
+        let manifest = binding.manifest().clone();
+        let schemas = vec![binding.schema().clone()];
         let selected_event = self.append_turn_payload(
             &scope,
             EventActor::System,
@@ -282,13 +289,16 @@ impl DittoKernel {
                 event_version: TURN_PAYLOAD_VERSION,
                 turn_id: scope.turn_id.clone(),
                 manifest: manifest.clone(),
-                epoch: epoch.clone(),
+                epoch: live_epoch.evidence().clone(),
                 schemas: schemas.clone(),
             },
             Some(cause),
             None,
         )?;
         cause = selected_event.event_id;
+
+        let invocation_authorizer = InvocationAuthorizer::for_epoch(&live_epoch, deadline)
+            .map_err(|_| TurnRunError::Internal("live epoch authorization setup failed"))?;
 
         let authority = ArtifactReadAuthority::new(self.inner.artifacts.clone());
         let mut conversation = vec![ConversationItem::Message {
@@ -870,13 +880,8 @@ impl DittoKernel {
                         ));
                     }
                 };
-                let canonical = match InvocationCompiler::compile(
-                    &epoch,
-                    &manifest,
-                    &schema,
-                    untrusted_call,
-                    &deriver,
-                ) {
+                let canonical = match InvocationCompiler::compile(binding, untrusted_call, &deriver)
+                {
                     Ok(invocation) => Some(invocation),
                     Err(InvocationError::ArgumentsSchema {
                         stage: ditto_capability::ArgumentStage::Raw,
@@ -946,11 +951,7 @@ impl DittoKernel {
                                 "artifact.read static policy construction failed",
                             )
                         })?;
-                    match self.inner.invocation_authorizer.authorize_static(
-                        invocation,
-                        &policy,
-                        Utc::now(),
-                    ) {
+                    match invocation_authorizer.authorize_static(invocation, &policy, Utc::now()) {
                         Ok(AuthorizationOutcome::Permitted(permit)) if authorized => Some(permit),
                         Err(PolicyError::MissingResourceScope) if !authorized => None,
                         Ok(AuthorizationOutcome::ApprovalRequired(_))

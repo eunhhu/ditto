@@ -363,7 +363,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 ));
             }
         }
-        let selected_epoch_id = ExecutionEpochId::new(selected.epoch.id.clone())
+        let selected_epoch_id = ExecutionEpochId::new(selected.epoch.id().to_owned())
             .map_err(|error| replay_invalid(error.to_string()))?;
         let expected_card = CapabilityCard::from(&selected.manifest);
         let selected_cards = selected.epoch.capabilities();

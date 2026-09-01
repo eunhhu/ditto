@@ -23,13 +23,15 @@ pub use invocation::{
     ArgumentStage, ArtifactResourceId, CanonicalInvocation, CanonicalPathResource,
     CanonicalPathRoot, CanonicalResource, CanonicalResourceError, CapabilityDeriver,
     CapabilityRevision, CapabilityRevisionError, DerivationBudget, DeriverError, DeriverRevision,
-    IdempotencyKey, InvocationCompiler, InvocationDigest, InvocationError, InvocationId,
-    ManifestDigest, ResolvedPlacement, SchemaDigest, ToolCallId, UntrustedToolCall,
-    UntrustedToolCallError, canonical_manifest_digest, canonical_schema_digest,
+    IdempotencyKey, InvocableCapabilityBinding, InvocationCompiler, InvocationDigest,
+    InvocationError, InvocationId, LiveExecutionEpoch, ManifestDigest, ResolvedPlacement,
+    SchemaDigest, ToolCallId, UntrustedToolCall, UntrustedToolCallError, canonical_manifest_digest,
+    canonical_schema_digest,
 };
 pub use schema_instance::{
-    JsonSchemaInstanceError, MAX_INVOCATION_ARGUMENT_BYTES, MAX_INVOCATION_SCHEMA_BYTES,
-    MAX_SCHEMA_INSTANCE_DEPTH, MAX_SCHEMA_INSTANCE_WORK, validate_json_schema_instance,
+    InvocationSchemaError, MAX_INVOCATION_ARGUMENT_BYTES, MAX_INVOCATION_SCHEMA_BYTES,
+    MAX_INVOCATION_VALUE_DEPTH, MAX_INVOCATION_VALUE_WORK, validate_invocation_instance,
+    validate_invocation_schema_profile,
 };
 
 #[derive(
@@ -361,6 +363,8 @@ pub enum JsonSchemaValidationError {
 /// intentionally opaque extension data; this function does not evaluate
 /// instances or certify compatibility with a provider's tool API.
 pub fn validate_json_schema(value: &Value) -> Result<(), JsonSchemaValidationError> {
+    schema_instance::validate_value_envelope(value, MAX_INVOCATION_SCHEMA_BYTES)
+        .map_err(|_| JsonSchemaValidationError::Invalid)?;
     validate_schema(value)
 }
 
@@ -835,16 +839,21 @@ fn validate_search_value(
     }
 }
 
+/// Replayable/model-visible execution-epoch evidence.
+///
+/// This value is deliberately deserializable and therefore carries no live
+/// invocation authority. Only [`LiveExecutionEpoch`] can issue an
+/// [`InvocableCapabilityBinding`].
 #[derive(Debug, Clone, Serialize)]
-pub struct ExecutionEpoch {
-    pub id: String,
+pub struct ExecutionEpochEvidence {
+    id: String,
     max_working_set: usize,
     capabilities: Vec<CapabilityCard>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     invocation_revisions: Vec<CapabilityRevision>,
 }
 
-impl ExecutionEpoch {
+impl ExecutionEpochEvidence {
     pub fn new(max_working_set: usize) -> Self {
         Self {
             id: Ulid::new().to_string(),
@@ -876,28 +885,30 @@ impl ExecutionEpoch {
         &self.capabilities
     }
 
-    /// Page in one capability with the exact contract required for live
-    /// invocation. Discovery-only cards added through [`Self::page_in`] remain
-    /// non-invocable.
-    pub fn page_in_invocable(
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn page_in_bound(
         &mut self,
-        manifest: &CapabilityManifest,
-        schema: &CapabilitySchema,
-        deriver_revision: DeriverRevision,
+        card: CapabilityCard,
+        revision: CapabilityRevision,
     ) -> Result<usize, CapabilityRevisionError> {
-        let revision = CapabilityRevision::from_contract(manifest, schema, deriver_revision)?;
-        if self.capabilities.iter().any(|card| card.id == manifest.id) {
-            return match self.invocation_revision(&manifest.id) {
+        if card.id != revision.capability_id() {
+            return Err(CapabilityRevisionError::BindingCardMismatch);
+        }
+        if self.capabilities.iter().any(|entry| entry.id == card.id) {
+            return match self.invocation_revision(&card.id) {
                 Some(existing) if existing == &revision => Ok(0),
                 Some(_) | None => Err(CapabilityRevisionError::EpochRevisionConflict {
-                    capability_id: manifest.id.clone(),
+                    capability_id: card.id,
                 }),
             };
         }
         if self.capabilities.len() >= self.max_working_set {
             return Ok(0);
         }
-        self.capabilities.push(CapabilityCard::from(manifest));
+        self.capabilities.push(card);
         self.invocation_revisions.push(revision);
         Ok(1)
     }
@@ -921,7 +932,7 @@ impl ExecutionEpoch {
     }
 }
 
-impl<'de> Deserialize<'de> for ExecutionEpoch {
+impl<'de> Deserialize<'de> for ExecutionEpochEvidence {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -1688,7 +1699,7 @@ mod tests {
     use super::{
         CapabilityCard, CapabilityCatalog, CapabilityError, CapabilityKind, CapabilityLifecycle,
         CapabilityManifest, CapabilityRootLimit, CapabilitySchema, CapabilitySchemaError,
-        DataAccess, EffectProfile, EffectSpec, EmbeddingProvider, ExecutionEpoch,
+        DataAccess, EffectProfile, EffectSpec, EmbeddingProvider, ExecutionEpochEvidence,
         ExecutionEpochLimit, Externality, JSON_SCHEMA_DRAFT_2020_12_URI, JsonSchemaValidationError,
         Mutation, PlacementSpec, PolicySpec, Privilege, RetrievalSpec, RuntimeSpec, RuntimeType,
         SearchContext, SearchContextError, SearchMode, TaskQuery, VerificationSpec,
@@ -1971,7 +1982,7 @@ default = "exit-code-and-expected-output"
             ))
             .expect("insert relevant capability");
 
-        let mut epoch = ExecutionEpoch::new(6);
+        let mut epoch = ExecutionEpochEvidence::new(6);
         let first_page = catalog.search("database backup", 6);
         assert_eq!(first_page.len(), 1);
         assert_eq!(epoch.page_in(first_page), 1);

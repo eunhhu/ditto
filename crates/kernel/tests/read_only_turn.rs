@@ -667,6 +667,11 @@ async fn malformed_negative_and_excessive_arguments_are_error_results_and_contin
             "invalid_arguments",
         ),
         (
+            "fractional-integer-spelling",
+            json!({"reference": format!("artifact:sha256:{}", "a".repeat(64)), "offset": 0, "length": 1.0}),
+            "invalid_arguments",
+        ),
+        (
             "excessive",
             json!({"reference": format!("artifact:sha256:{}", "a".repeat(64)), "offset": 0, "length": MAX_READ_BYTES + 1}),
             "invalid_arguments",

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ditto_capability::{CapabilitySearchError, ExecutionEpoch, SearchContext};
+use ditto_capability::{CapabilitySearchError, ExecutionEpochEvidence, SearchContext};
 use ditto_context::{
     CompiledContext, CompiledContextValidationError, ContextCapsule, ContextCompileError,
     ContextCompiler, ContextQueryRanking, ContextQueryRankingError,
@@ -65,7 +65,7 @@ pub struct WorkingSet {
     evaluated_at: DateTime<Utc>,
     compiled_context: CompiledContext,
     context_capsule: ContextCapsule,
-    execution_epoch: ExecutionEpoch,
+    execution_epoch: ExecutionEpochEvidence,
 }
 
 impl WorkingSet {
@@ -89,7 +89,7 @@ impl WorkingSet {
         &self.context_capsule
     }
 
-    pub fn execution_epoch(&self) -> &ExecutionEpoch {
+    pub fn execution_epoch(&self) -> &ExecutionEpochEvidence {
         &self.execution_epoch
     }
 }
@@ -201,7 +201,7 @@ impl DittoKernel {
             provider,
             &mut work_budget,
         )?;
-        let mut execution_epoch = ExecutionEpoch::new(execution_epoch_limit.get());
+        let mut execution_epoch = ExecutionEpochEvidence::new(execution_epoch_limit.get());
         execution_epoch.page_in(cards);
 
         Ok(WorkingSet {
