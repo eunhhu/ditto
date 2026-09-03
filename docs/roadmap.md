@@ -75,8 +75,10 @@ fully replayed without process or SSH authority.
 ## E. Effectful execution
 
 - device registry
-- canonical invocation envelope
-- capability-specific argument normalization and effect derivation
+- canonical invocation envelope — completed for the bounded `artifact.read`
+  reference in Task 005
+- capability-specific argument normalization and effect derivation — completed
+  for `artifact.read`; additional effectful capabilities remain deferred
 - structured local process worker
 - SSH transport with host-key pinning
 - secret handles

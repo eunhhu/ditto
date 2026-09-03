@@ -2,7 +2,7 @@
 
 ## Canonical state
 
-- Branch: `main`.
+- Branch: `feat/task-005-canonical-invocation`.
 - Runtime: Rust daemon and CLI.
 - Durable stores: SQLite event spine plus local SHA-256 artifact objects.
 - Public mutation ingress: typed user-input command only; arbitrary event append
@@ -12,9 +12,16 @@
 - Capability state: file-backed manifests with default-active
   active/retired/quarantined lifecycle, active-only bounded retrieval,
   validated complements, strict runtime hard filters, append-only bounded
-  execution epochs, and validated provider-neutral level-2 input/output schema
-  records. Recognized schema keywords are checked recursively against JSON
-  Schema Draft 2020-12 while unknown extension keywords remain opaque.
+  execution-epoch evidence, and validated provider-neutral level-2 input/output
+  schema records. Provider-neutral disclosure remains structurally checked
+  Draft 2020-12 data, while live invocation accepts only the explicitly closed,
+  byte/depth/work-preflighted Ditto Invocation Schema Profile V1.
+  `ExecutionEpochEvidence` is replayable and has no invocation authority.
+  A sealed process-local `LiveExecutionEpoch` alone issues an
+  `InvocableCapabilityBinding` that owns the exact epoch ID, model-visible card,
+  manifest, schema, capability ID/version and their digests, and deriver
+  revision. Legacy card-only entries remain discoverable and replayable but
+  cannot authorize a new live invocation.
 - Context state: typed provenance graph, deterministic compiler, one cumulative
   V2 retrieval-work budget, and a standalone rebuildable SQLite projection of
   canonical `context.node.recorded` events. A typed source-verified snapshot is
@@ -28,10 +35,19 @@
   are charged locally and revalidated for trust, time, and the absolute budget
   at the model boundary. V2 embedded ordering is carried only by an opaque,
   non-serializable context-owned ranking and is revalidated after compilation.
-- Policy state: leases authorize canonical invocations against orthogonal effect
-  dimensions. No effectful executor is connected yet; the sole executable
-  builtin is the structurally bounded, lease-free `artifact.read` exception from
-  ADR 0009.
+- Policy state: sealed canonical invocations carry only harness-derived effect,
+  typed resource, and local-builtin placement authority. A live epoch moves
+  monotonically from paging to authorization-sealed and issues exactly one
+  non-wire, non-cloneable authorization ticket. Policy consumes that ticket
+  into one expiring ledger whose cloned handles share one mutex; dropping any
+  ticket or handle never rearms paging or creates another ledger. The daemon
+  owns no authorizer. The mutex atomically binds invocation IDs to digests,
+  evaluates a trusted static policy or harness-selected lease, consumes a
+  successful lease at most once, and issues a sealed epoch- and invocation-
+  bound permit or approval-required outcome. Any future effectful worker must
+  consume a sealed non-cloneable one-shot `ExecutionClaim`; no such worker is
+  connected. The existing bounded `artifact.read` executor still requires a
+  matching no-approval static-policy permit.
 - Model state: `ditto-model` owns version 1 of the provider-neutral request,
   driver, and backpressured stream-event contract. It preserves ordered stable
   prefix/volatile turn data, structured tool-call lifecycles, final structured
@@ -52,6 +68,63 @@
 
 ## Latest verified slice
 
+- Task 005.1 has a verified final review-closure implementation under
+  [ADR 0012](../adr/0012-canonical-capability-invocation.md). The tracked
+  [verification evidence](tasks/005-1-evidence.md) maps every amended exit
+  criterion to implementation and adversarial, concurrency, integration, and
+  compile-fail tests. The original contract, implementation, and adversarial
+  closure are commits `ad18b33`,
+  `85fde0ad862220435f28a1effdc52bb7f2136183`,
+  and `cb4c71ecfb64bc69445fc91ed49263d896131676`. The final review contract and
+  implementation are `ddf9a6cccaefd016b1f0775b6292fc9d4cb0ea28` and
+  `98e8f676fc325bf4400aae324c2447e56098bcdb`; normalized-output work
+  preflight is pinned by `7b5e4b9528c17d08953d2de1d1bb8ca6bf824f90`. The tested code tree is
+  `d3ba3e14e136921106a5d5431f1abc3530ecf64a`.
+- Replayable `ExecutionEpochEvidence` is now distinct from sealed,
+  non-wire `LiveExecutionEpoch`. Only the latter issues a sealed
+  `InvocableCapabilityBinding`; it owns one epoch's exact model card, manifest,
+  schema, revision, and digests. The compiler cannot accept deserialized
+  evidence and rederives the whole relationship before normalization.
+- Live invocation uses closed Ditto Invocation Schema Profile V1 rather than a
+  Draft 2020-12 evaluator claim. Iterative byte/depth/work preflight precedes
+  recursion. Exact `i64`/`u64` integer semantics cover values beyond 2^53 and
+  integer `multipleOf`; equality keywords distinguish `1` from `1.0`, and
+  `artifact.read` `length = 1.0` preserves the Task 003 `invalid_arguments`
+  result and continuation behavior.
+- A live epoch now seals paging exactly once and moves its sole affine
+  `EpochAuthorizationTicket` into policy. Every cloned authorizer handle shares
+  that ticket's one `Arc`-owned ledger, while second ticket issuance, post-seal
+  paging, and reissue after ticket or authorizer drop fail closed. The ledger is
+  constructed inside the turn rather than `KernelInner`; permit and approval
+  expiry remains capped at the epoch boundary. Its mutex transaction preserves
+  failed-without-consumption, consume-once, idempotent retry, digest-conflict,
+  and one-call concurrency guarantees.
+- `ExecutionClaim` is a sealed, non-cloneable, non-deserializable one-shot token
+  bound to the epoch, permit, and invocation digest. Atomic claim issuance
+  succeeds at most once. It defines the mandatory ingress for a future
+  effectful worker but no worker or dispatch path was added. The existing
+  bounded `artifact.read` path still requires its sealed static-policy permit,
+  and Task 003 durable execution and no-I/O replay semantics are unchanged.
+- Recursive profile equality now charges each compared JSON node, including
+  nested `uniqueItems`, and direct number comparison allocates no representation
+  strings. Raw and normalized values pass iterative byte/depth/work preflight
+  before recursive canonical projection. The compiler is the only raw
+  `artifact.read` normalizer; the kernel decodes its sealed normalized value,
+  while Task 003 invalid-reference/invalid-arguments codes and no-read
+  continuation behavior remain unchanged.
+- Focused capability, policy, and kernel runs passed 57, 14, and 60 tests
+  respectively, including compile-fail doctests. The canonical
+  `rtk ./scripts/agent-check.sh` gate passed its tracked canary, formatting,
+  strict workspace/all-target/all-feature Clippy, workspace tests, and
+  doctests. `rtk cargo +1.88.0 check --locked
+  --workspace --all-targets` and `rtk git diff --check` passed. PR #6 Actions
+  run `33522132273` independently passed `msrv` and `rust` on final code commit
+  `7b5e4b9528c17d08953d2de1d1bb8ca6bf824f90`. No compact session-index
+  work, capability worker, subprocess, network, model, credential, provider,
+  SSH, approval fulfillment, file mutation, or billable operation ran.
+- The original Task 005 evidence remains at
+  [tasks/005-evidence.md](tasks/005-evidence.md); its initial dual-purpose epoch,
+  evaluator, and daemon-ledger descriptions are superseded by Task 005.1 above.
 - Task 004.2 is complete under the ADR 0011 amendment. The tracked
   [verification evidence](tasks/004-2-evidence.md) maps both post-review
   correctness findings to implementation and adversarial tests.
@@ -242,7 +315,8 @@
   continuation;
 - additional providers, OpenAI model profiles, reasoning replay, remote cancel,
   and explicit prompt-cache breakpoints;
-- capability worker protocol and canonical invocation lifecycle;
+- additional capability derivers, durable/cross-process authorization,
+  approval fulfillment, and the capability worker protocol;
 - device registry, local process runner, SSH transport, and secrets;
 - a production embedding worker/provider and persisted embedding cache;
 - completion verifiers and improvement compiler;

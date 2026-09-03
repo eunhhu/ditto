@@ -626,8 +626,8 @@ fn lexical_working_set_rebuilds_context_and_pages_capabilities_without_model_io(
         .expect("reopened lexical working set");
     assert_eq!(stable_working_set_content(&reopened_result), stable_live);
     assert_ne!(
-        reopened_result.execution_epoch().id,
-        final_live.execution_epoch().id,
+        reopened_result.execution_epoch().id(),
+        final_live.execution_epoch().id(),
         "epoch ULIDs are issuance identities"
     );
     assert_eq!(
@@ -917,7 +917,7 @@ fn legacy_search_clamp_and_execution_epoch_behavior_remain_unchanged() {
     );
 
     let cards = fixture.kernel.search_capabilities("legacy", 3);
-    let mut direct = ditto_capability::ExecutionEpoch::new(2);
+    let mut direct = ditto_capability::ExecutionEpochEvidence::new(2);
     assert_eq!(
         direct.page_in([
             cards[0].clone(),

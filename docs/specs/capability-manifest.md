@@ -108,14 +108,20 @@ ADR 0010.
 ## Runtime contract
 
 Runtime types are `builtin`, `process`, `wasi`, `mcp`, and `remote`. Non-builtin
-implementations run outside the daemon. The canonical invocation will include a
-run ID, capability ID and version, normalized arguments, resolved placement,
-derived effect profile, lease handle, timeout, resource limits, idempotency key,
-and expected evidence.
+implementations run outside the daemon. An invocable execution-epoch entry
+binds the exact capability ID/version, canonical manifest digest, complete
+schema digest, and capability-specific deriver revision. An authority-free
+model call is instance-validated against that schema, normalized and
+revalidated, then deterministic harness code derives the exact effect, typed
+resources, and placement. The resulting sealed canonical invocation contains
+no model-selected lease handle. Policy selects trusted static policy or a
+harness-side lease and may issue only a sealed, expiring permit bound to that
+invocation digest. Worker execution remains a separate boundary.
 
 ### Bounded builtin artifact read
 
-`artifact.read` is the sole narrow lease-free exception. The
+`artifact.read` is the first canonical derivation and static-policy reference.
+The
 `ditto-artifact-read` crate owns its exact installed manifest and level-2 schema.
 Arguments are exactly `reference`, `offset`, and `length`: the reference must be
 canonical SHA-256 form, offsets are non-negative, and one read is limited to
@@ -125,10 +131,13 @@ availability, and integrity failures are stable structured error results.
 
 The builtin can inspect local artifact metadata and return bytes verified through
 the same storage read. It has no path, process, network, credential, mutation,
-approval, or secret-handle surface. Authorization requires an actor=`system`
+approval, or secret-handle surface. It derives the exact local content-read
+effect and typed artifact resource. Authorization requires an actor=`system`
 `artifact.created` event for the exact reference in compatible session/task
-scope at or before the execution-start cutoff. Selection and replay validate the
-complete manifest/card/schema relationship, not only capability ID and version.
+scope at or before the execution-start cutoff, then issues a sealed no-approval
+static-policy permit bound to the canonical invocation. Selection and replay
+validate the complete manifest/card/schema relationship, not only capability ID
+and version.
 
 ## Disclosure levels
 

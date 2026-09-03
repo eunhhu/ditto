@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use ditto_artifact_read::{ArtifactReadResource, ArtifactReadResult};
-use ditto_capability::{CapabilityManifest, CapabilitySchema, ExecutionEpoch};
+use ditto_capability::{CapabilityManifest, CapabilitySchema, ExecutionEpochEvidence};
 use ditto_context::{CompiledContext, ContextCapsule};
 use ditto_model::{
     ExecutionEpochId, ModelRequest, ModelRequestId, ModelStreamEvent, ProviderCallId,
@@ -34,7 +34,7 @@ pub struct CapabilitiesSelectedPayload {
     pub event_version: u16,
     pub turn_id: String,
     pub manifest: CapabilityManifest,
-    pub epoch: ExecutionEpoch,
+    pub epoch: ExecutionEpochEvidence,
     pub schemas: Vec<CapabilitySchema>,
 }
 

@@ -5,13 +5,22 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-No implementation slice is active. The next priority is canonical capability
-invocation and capability-derived effect profiles. Define its task contract and
-amend the governing ADR before changing public invocation, effect, or lease
-semantics.
+- None. Task 005.1 review closure is complete, and this run stops before the
+  compact session-index task.
 
 ## Completed
 
+- [`005.1 Live epoch, closed schema profile, and bounded authority lifetime`](tasks/005-1-live-epoch-schema-authority.md):
+  replayable evidence is separate from sealed live invocation bindings; one
+  affine epoch ticket owns one shared expiring authorization ledger; recursive
+  equality and canonical projection are preflight-bounded; and
+  `artifact.read` has one compiler-owned normalization without Task 003 drift.
+- [`005 Canonical capability invocation and effect/resource authority`](tasks/005-canonical-capability-invocation.md):
+  authority-free model calls, exact epoch/revision binding, bounded raw and
+  normalized schema validation, typed effect/resource derivation, sealed
+  canonical invocations, atomic idempotent authorization, sealed invocation-
+  bound permits, and the existing `artifact.read` migration through a static
+  no-approval permit without Task 003 execution or replay drift.
 - [`004.2 Repair budget and validity precision`](tasks/004-2-repair-budget-validity-precision.md):
   monotonic work charging across cache repair, millisecond-canonical new
   validity admission, and schema-3 exact replay of legacy fine-precision
@@ -49,7 +58,6 @@ semantics.
 
 ## Later
 
-- canonical capability invocation and effect derivation;
 - compact source-verified session indexes that remove session-history rescans
   from context delta verification and admission;
 - a bounded capability package-header index with symlink-safe discovery and
