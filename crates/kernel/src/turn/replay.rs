@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ditto_artifact_read::{
-    ARTIFACT_READ_ID, ARTIFACT_READ_VERSION, ArtifactReadError, ArtifactReadResource,
-    ArtifactReadResult, capability_schema, validate_artifact_read_manifest,
+    ARTIFACT_READ_ID, ARTIFACT_READ_VERSION, ArtifactReadDeriver, ArtifactReadError,
+    ArtifactReadResource, ArtifactReadResult, capability_schema, validate_artifact_read_manifest,
 };
-use ditto_capability::{CapabilityCard, CapabilitySchema};
+use ditto_capability::{CapabilityCard, CapabilityDeriver, CapabilityRevision, CapabilitySchema};
 use ditto_context::{CompiledContext, ContextCapsule, ContextCompiler, TaskSignature};
 use ditto_model::{
     CancellationId, ContentPart, ConversationItem, ExecutionEpochId, FinishReason,
@@ -341,7 +341,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         validate_artifact_read_manifest(&selected.manifest)
             .map_err(|error| replay_invalid(error.to_string()))?;
         let expected_schema = capability_schema();
-        if selected.schemas != vec![expected_schema]
+        if selected.schemas != vec![expected_schema.clone()]
             || selected.schemas[0].id != selected.manifest.id
             || selected.schemas[0].version != selected.manifest.version
         {
@@ -349,7 +349,21 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 "selected schemas do not equal the exact artifact.read contract",
             ));
         }
-        let selected_epoch_id = ExecutionEpochId::new(selected.epoch.id.clone())
+        if !selected.epoch.invocation_revisions().is_empty() {
+            let deriver = ArtifactReadDeriver::default();
+            let expected_revision = CapabilityRevision::from_contract(
+                &selected.manifest,
+                &expected_schema,
+                deriver.revision().clone(),
+            )
+            .map_err(|error| replay_invalid(error.to_string()))?;
+            if selected.epoch.invocation_revisions() != [expected_revision] {
+                return Err(replay_invalid(
+                    "selected invocation revision does not equal the exact artifact.read contract",
+                ));
+            }
+        }
+        let selected_epoch_id = ExecutionEpochId::new(selected.epoch.id().to_owned())
             .map_err(|error| replay_invalid(error.to_string()))?;
         let expected_card = CapabilityCard::from(&selected.manifest);
         let selected_cards = selected.epoch.capabilities();

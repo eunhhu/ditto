@@ -6,7 +6,7 @@ use std::{
 pub use ditto_artifact_store::{ArtifactMetadata, ArtifactRef};
 use ditto_artifact_store::{ArtifactStore, ArtifactStoreError, DEFAULT_MAX_OBJECT_BYTES};
 use ditto_capability::{CapabilityCard, CapabilityCatalog, CapabilityError};
-pub use ditto_capability::{ExecutionEpoch, SearchContext};
+pub use ditto_capability::{ExecutionEpochEvidence, SearchContext};
 use ditto_context_projection::{ContextProjection, ContextProjectionError};
 use ditto_event_store::{EventStore, EventStoreError};
 use ditto_protocol::{
@@ -252,8 +252,8 @@ impl DittoKernel {
         query: &str,
         context: &SearchContext,
         max_working_set: usize,
-    ) -> ExecutionEpoch {
-        let mut epoch = ExecutionEpoch::new(max_working_set);
+    ) -> ExecutionEpochEvidence {
+        let mut epoch = ExecutionEpochEvidence::new(max_working_set);
         let cards = self
             .inner
             .capabilities
@@ -264,7 +264,7 @@ impl DittoKernel {
 
     pub fn page_execution_epoch(
         &self,
-        epoch: &mut ExecutionEpoch,
+        epoch: &mut ExecutionEpochEvidence,
         query: &str,
         context: &SearchContext,
     ) -> usize {

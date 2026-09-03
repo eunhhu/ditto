@@ -16,6 +16,24 @@ use serde_json::Value;
 use thiserror::Error;
 use ulid::Ulid;
 
+mod invocation;
+mod schema_instance;
+
+pub use invocation::{
+    ArgumentStage, ArtifactResourceId, CanonicalInvocation, CanonicalPathResource,
+    CanonicalPathRoot, CanonicalResource, CanonicalResourceError, CapabilityDeriver,
+    CapabilityRevision, CapabilityRevisionError, DerivationBudget, DeriverError, DeriverRevision,
+    EpochAuthorizationTicket, IdempotencyKey, InvocableCapabilityBinding, InvocationCompiler,
+    InvocationDigest, InvocationError, InvocationId, LiveExecutionEpoch, ManifestDigest,
+    ResolvedPlacement, SchemaDigest, ToolCallId, UntrustedToolCall, UntrustedToolCallError,
+    canonical_manifest_digest, canonical_schema_digest,
+};
+pub use schema_instance::{
+    InvocationSchemaError, MAX_INVOCATION_ARGUMENT_BYTES, MAX_INVOCATION_SCHEMA_BYTES,
+    MAX_INVOCATION_VALUE_DEPTH, MAX_INVOCATION_VALUE_WORK, validate_invocation_instance,
+    validate_invocation_schema_profile,
+};
+
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -345,6 +363,8 @@ pub enum JsonSchemaValidationError {
 /// intentionally opaque extension data; this function does not evaluate
 /// instances or certify compatibility with a provider's tool API.
 pub fn validate_json_schema(value: &Value) -> Result<(), JsonSchemaValidationError> {
+    schema_instance::validate_value_envelope(value, MAX_INVOCATION_SCHEMA_BYTES)
+        .map_err(|_| JsonSchemaValidationError::Invalid)?;
     validate_schema(value)
 }
 
@@ -819,19 +839,27 @@ fn validate_search_value(
     }
 }
 
+/// Replayable/model-visible execution-epoch evidence.
+///
+/// This value is deliberately deserializable and therefore carries no live
+/// invocation authority. Only [`LiveExecutionEpoch`] can issue an
+/// [`InvocableCapabilityBinding`].
 #[derive(Debug, Clone, Serialize)]
-pub struct ExecutionEpoch {
-    pub id: String,
+pub struct ExecutionEpochEvidence {
+    id: String,
     max_working_set: usize,
     capabilities: Vec<CapabilityCard>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    invocation_revisions: Vec<CapabilityRevision>,
 }
 
-impl ExecutionEpoch {
+impl ExecutionEpochEvidence {
     pub fn new(max_working_set: usize) -> Self {
         Self {
             id: Ulid::new().to_string(),
             max_working_set,
             capabilities: Vec::new(),
+            invocation_revisions: Vec::new(),
         }
     }
 
@@ -857,6 +885,44 @@ impl ExecutionEpoch {
         &self.capabilities
     }
 
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn page_in_bound(
+        &mut self,
+        card: CapabilityCard,
+        revision: CapabilityRevision,
+    ) -> Result<usize, CapabilityRevisionError> {
+        if card.id != revision.capability_id() {
+            return Err(CapabilityRevisionError::BindingCardMismatch);
+        }
+        if self.capabilities.iter().any(|entry| entry.id == card.id) {
+            return match self.invocation_revision(&card.id) {
+                Some(existing) if existing == &revision => Ok(0),
+                Some(_) | None => Err(CapabilityRevisionError::EpochRevisionConflict {
+                    capability_id: card.id,
+                }),
+            };
+        }
+        if self.capabilities.len() >= self.max_working_set {
+            return Ok(0);
+        }
+        self.capabilities.push(card);
+        self.invocation_revisions.push(revision);
+        Ok(1)
+    }
+
+    pub fn invocation_revisions(&self) -> &[CapabilityRevision] {
+        &self.invocation_revisions
+    }
+
+    pub fn invocation_revision(&self, capability_id: &str) -> Option<&CapabilityRevision> {
+        self.invocation_revisions
+            .iter()
+            .find(|revision| revision.capability_id() == capability_id)
+    }
+
     pub fn max_working_set(&self) -> usize {
         self.max_working_set
     }
@@ -866,7 +932,7 @@ impl ExecutionEpoch {
     }
 }
 
-impl<'de> Deserialize<'de> for ExecutionEpoch {
+impl<'de> Deserialize<'de> for ExecutionEpochEvidence {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -876,6 +942,8 @@ impl<'de> Deserialize<'de> for ExecutionEpoch {
             id: String,
             max_working_set: usize,
             capabilities: Vec<CapabilityCard>,
+            #[serde(default)]
+            invocation_revisions: Vec<CapabilityRevision>,
         }
 
         let wire = EpochWire::deserialize(deserializer)?;
@@ -897,10 +965,29 @@ impl<'de> Deserialize<'de> for ExecutionEpoch {
                 "execution epoch contains duplicate capabilities",
             ));
         }
+        if wire.invocation_revisions.len() > wire.capabilities.len() {
+            return Err(serde::de::Error::custom(
+                "execution epoch contains more revisions than capabilities",
+            ));
+        }
+        let mut revision_ids = HashSet::new();
+        for revision in &wire.invocation_revisions {
+            if !revision_ids.insert(revision.capability_id()) {
+                return Err(serde::de::Error::custom(
+                    "execution epoch contains duplicate capability revisions",
+                ));
+            }
+            if !ids.contains(revision.capability_id()) {
+                return Err(serde::de::Error::custom(
+                    "execution epoch revision has no matching capability card",
+                ));
+            }
+        }
         Ok(Self {
             id: wire.id,
             max_working_set: wire.max_working_set,
             capabilities: wire.capabilities,
+            invocation_revisions: wire.invocation_revisions,
         })
     }
 }
@@ -1612,11 +1699,11 @@ mod tests {
     use super::{
         CapabilityCard, CapabilityCatalog, CapabilityError, CapabilityKind, CapabilityLifecycle,
         CapabilityManifest, CapabilityRootLimit, CapabilitySchema, CapabilitySchemaError,
-        DataAccess, EffectProfile, EffectSpec, EmbeddingProvider, ExecutionEpoch,
+        DataAccess, EffectProfile, EffectSpec, EmbeddingProvider, ExecutionEpochEvidence,
         ExecutionEpochLimit, Externality, JSON_SCHEMA_DRAFT_2020_12_URI, JsonSchemaValidationError,
-        Mutation, PlacementSpec, PolicySpec, Privilege, RetrievalSpec, RuntimeSpec, RuntimeType,
-        SearchContext, SearchContextError, SearchMode, TaskQuery, VerificationSpec,
-        capability_retrieval_document, validate_json_schema,
+        MAX_INVOCATION_VALUE_DEPTH, Mutation, PlacementSpec, PolicySpec, Privilege, RetrievalSpec,
+        RuntimeSpec, RuntimeType, SearchContext, SearchContextError, SearchMode, TaskQuery,
+        VerificationSpec, capability_retrieval_document, validate_json_schema,
     };
 
     const MANIFEST: &str = r#"
@@ -1895,7 +1982,7 @@ default = "exit-code-and-expected-output"
             ))
             .expect("insert relevant capability");
 
-        let mut epoch = ExecutionEpoch::new(6);
+        let mut epoch = ExecutionEpochEvidence::new(6);
         let first_page = catalog.search("database backup", 6);
         assert_eq!(first_page.len(), 1);
         assert_eq!(epoch.page_in(first_page), 1);
@@ -2019,6 +2106,27 @@ default = "exit-code-and-expected-output"
                 })
             ));
         }
+    }
+
+    #[test]
+    fn capability_schema_preflights_complete_depth_before_recursive_structure_checks() {
+        let mut input_schema = serde_json::json!({"type": "string"});
+        for _ in 0..=MAX_INVOCATION_VALUE_DEPTH {
+            input_schema = serde_json::json!({"items": input_schema});
+        }
+        let schema = CapabilitySchema {
+            id: "artifact.read".into(),
+            version: "1.0.0".into(),
+            summary: "Read an artifact".into(),
+            input_schema,
+            output_schema: serde_json::json!(true),
+        };
+        assert!(matches!(
+            schema.validate(),
+            Err(CapabilitySchemaError::InvalidSchema {
+                field: "input_schema"
+            })
+        ));
     }
 
     #[test]

@@ -115,22 +115,28 @@ externality  local < network < human-communication
 privilege    user < elevated
 ```
 
-A lease must permit every dimension. Elevated access alone never grants deletion,
-credential access, or messaging. If a lease scopes devices, programs, or
-resources, omission of that field is a denial.
+Every selected authorization source must permit every dimension. Elevated
+access alone never grants deletion, credential access, or messaging. If a lease
+scopes devices, programs, or resources, omission of that derived field is a
+denial.
 
-The eventual execution path is:
+The canonical authority path is:
 
 ```text
-model tool call
-→ schema validation
-→ argument normalization
-→ resource canonicalization
-→ capability-specific effect derivation
-→ lease authorization
-→ canonical invocation
-→ isolated executor
+untrusted model tool call
+→ exact execution-epoch/capability-revision resolution
+→ JSON Schema instance validation
+→ bounded capability-specific normalization and effect/resource derivation
+→ sealed canonical invocation
+→ policy authorization or approval-required outcome
+→ sealed invocation-bound permit
+→ isolated executor (deferred except existing bounded artifact.read)
 ```
+
+The model call has no effect, resource, device, program, placement, lease,
+approval, verification, or idempotency authority. Policy selects static policy
+or a harness-side lease only after canonical derivation. Permits are sealed,
+expiring, and bound to one invocation digest.
 
 SSH is placement transport, not a model-facing raw shell.
 
