@@ -36,13 +36,17 @@ requires event provenance. Disputed or expired nodes are not injected.
 The durable version-1 `context.node.recorded` event is system-authored and is
 accepted only through the trusted kernel admission boundary. The append-only
 event spine is the sole durable authority; its separate SQLite projection is a
-deletable, rebuildable cache with a sequence/event-ID checkpoint. Session and
-task scope, provenance, validity, and supersession are rechecked from canonical
-events before a context snapshot is exposed. Node identity is session-wide
-`(session_id, node_id)`, supersession is exact-scope, origin claims require
-matching actor evidence, and envelope causation is derived from the cited source
-with the greatest durable sequence. Turn, project, device, and global nodes
-remain valid IR vocabulary but are rejected by this durable slice.
+deletable, rebuildable schema-4 cache with a sequence/event-ID checkpoint and
+canonical compact-index digest. Startup/recovery replay validates source
+history and issues a non-serialized process-local proof; normal retrieval and
+admission use its digest-bound per-session identity index, only the ordered
+checkpoint delta, and bounded exact source-event lookups. Session and task
+scope, provenance, validity, and supersession therefore remain source-derived
+without a steady-state sequence-zero session scan. Node identity is
+session-wide `(session_id, node_id)`, supersession is exact-scope, origin claims
+require matching actor evidence, and envelope causation is derived from the
+cited source with the greatest durable sequence. Turn, project, device, and
+global nodes remain valid IR vocabulary but are rejected by this durable slice.
 
 ## Trusted compiler directives
 

@@ -4,6 +4,11 @@
 
 Accepted.
 
+ADR 0013 supersedes this ADR's projection schema number and its normal
+delta/admission lookup algorithm. The retrieval work envelope, lifecycle
+filtering, exact legacy timestamp representation, and source-verification
+boundary remain in force under schema 4.
+
 ## Context
 
 ADR 0010 bounds each V2 candidate and caps a scan at 10,000, but those limits
