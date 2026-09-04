@@ -5,13 +5,16 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-- [`006 Compact source-verified session index`](tasks/006-compact-session-index.md):
-  replace normal context-admission and delta-verification sequence-zero session
-  rescans with a digest-bound, process-verified schema-4 index and fixed work
-  envelope while retaining event-spine authority and rebuild semantics.
+None. Task 006 is complete on its pull-request branch; do not start the bounded
+capability package-header slice in that branch.
 
 ## Completed
 
+- [`006 Compact source-verified session index`](tasks/006-compact-session-index.md):
+  schema-4 global and per-session digest chains bind a process-verified compact
+  identity/provenance/supersession index; normal admission and retrieval use
+  bounded exact lookups plus only the checkpoint delta, with fixed N/N+1 work
+  limits and one source rebuild/recheck on cache drift.
 - [`005.1 Live epoch, closed schema profile, and bounded authority lifetime`](tasks/005-1-live-epoch-schema-authority.md):
   replayable evidence is separate from sealed live invocation bindings; one
   affine epoch ticket owns one shared expiring authorization ledger; recursive

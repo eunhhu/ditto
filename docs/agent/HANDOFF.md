@@ -25,16 +25,20 @@
 - Context state: typed provenance graph, deterministic compiler, one cumulative
   V2 retrieval-work budget, and a standalone rebuildable SQLite projection of
   canonical `context.node.recorded` events. A typed source-verified snapshot is
-  distinct from a derived cache snapshot; open/recovery performs full replay
-  and normal retrieval verifies checkpoint deltas. New durable validity is
-  millisecond-canonical; schema 3 preserves exact fine-precision semantics for
-  legacy version-1 source events. Pinning and policy-required inclusion remain
-  trusted ephemeral directives; token cost is derived locally. A compact
-  model-facing capsule projects ordered selected nodes without exposing the
-  compiler receipt, lens, or supersession metadata; its exact serialized fields
-  are charged locally and revalidated for trust, time, and the absolute budget
-  at the model boundary. V2 embedded ordering is carried only by an opaque,
-  non-serializable context-owned ranking and is revalidated after compilation.
+  distinct from a derived cache snapshot. Schema 4 binds the exact event anchor
+  and a canonical global digest to compact per-session identity, provenance,
+  causation, scope, and supersession state. Open/recovery performs bounded-page
+  full replay; normal retrieval and admission use only the checkpoint delta,
+  bounded exact source lookups, and a process-verified compact index. New
+  durable validity is millisecond-canonical while legacy version-1 source
+  events retain exact fine-precision semantics. Pinning and policy-required
+  inclusion remain trusted ephemeral directives; token cost is derived locally.
+  A compact model-facing capsule projects ordered selected nodes without
+  exposing the compiler receipt, lens, or supersession metadata; its exact
+  serialized fields are charged locally and revalidated for trust, time, and
+  the absolute budget at the model boundary. V2 embedded ordering is carried
+  only by an opaque, non-serializable context-owned ranking and is revalidated
+  after compilation.
 - Policy state: sealed canonical invocations carry only harness-derived effect,
   typed resource, and local-builtin placement authority. A live epoch moves
   monotonically from paging to authorization-sealed and issues exactly one
@@ -68,13 +72,38 @@
 
 ## Latest verified slice
 
-- Task 006 is active under
-  [ADR 0013](../adr/0013-compact-source-verified-session-index.md). Its contract
-  confines full source replay to startup/audit/recovery, keeps the event spine
-  authoritative, and requires a schema-4 compact session index, canonical
-  digest/checkpoint binding, process-local proof, one repair/recheck, and fixed
-  entry/byte/delta/work bounds. No Task 006 implementation or completion claim
-  is recorded yet.
+- Task 006 is complete under
+  [ADR 0013](../adr/0013-compact-source-verified-session-index.md). The tracked
+  [verification evidence](tasks/006-evidence.md) maps every exit criterion to
+  schema-4 implementation, adversarial fixtures, deterministic work counters,
+  local gates, and independent PR checks. The contract and implementation are
+  commits `5a7402f46a4044022238f06cc32c7d1a2cee05f2` and
+  `71a41791dfbf3e5c7affca38d8a4fa1de90c045f`; the tested code tree is
+  `4f4a2fce9187439d3f7c81fa604fd6659ba21be3`.
+- Projection schema 4 stores a compact immutable identity/provenance index,
+  per-session ordered digest/count/byte state, and a global digest in the exact
+  sequence/event-ID checkpoint. Retrieval rows, supersession edges, index rows,
+  session state, and checkpoint advance atomically per 500-event page. Schema
+  1-3 caches reset and rebuild without rewriting the event spine.
+- A non-serialized process-local proof binds the checkpoint, event anchor,
+  digest, SQLite data version, and compact identities. Normal synchronization
+  visits only the ordered delta; admission uses proof-gated identity lookups and
+  at most 64 exact source-event lookups. External cache drift is internally
+  revalidated or gets one source replay/recheck and cannot return an identity or
+  snapshot on persistent mismatch.
+- Fixed checked limits are 65,536 identities and 256 MiB accounted bytes per
+  session, plus 65,536 events, 64 MiB context payload, and 2,000,000 work units
+  per normal delta. Exact N succeeds and N+1 fails before its operation or page
+  commit. The scale fixture replays 1,000,000 ordinary events plus 10,000
+  context identities once, then records exactly one delta event and one
+  admission index lookup for steady-state retrieval/admission.
+- Focused runs passed 45 context-projection tests and all 15 durable-kernel
+  projection/working-set tests. The canonical `rtk ./scripts/agent-check.sh`
+  gate passed its canary, formatting, strict workspace Clippy, 351
+  unit/integration tests, and 24 compile-fail doctests across 36 suites.
+  Rust 1.88 workspace/all-target checking and diff hygiene passed. PR #7 Actions
+  run `33868899639` independently passed both `rust` and `msrv` on the exact
+  implementation commit.
 
 - Task 005.1 has a verified final review-closure implementation under
   [ADR 0012](../adr/0012-canonical-capability-invocation.md). The tracked
@@ -142,10 +171,11 @@
   without a partial `VerifiedContextSnapshot`.
 - New trusted durable `valid_from` and `valid_until` values must be exact
   milliseconds and fail with a field-specific typed error before append or
-  publication. Projection schema 3 stores both the millisecond value and exact
-  sub-millisecond nanosecond remainder. Legacy version-1 events with finer
-  precision therefore retain Rust's inclusive-start/exclusive-end behavior in
-  SQL; schema 1 and 2 caches rebuild automatically without changing events.
+  publication. The schema-3 implementation introduced both the millisecond
+  value and exact sub-millisecond nanosecond remainder; schema 4 retains that
+  representation. Legacy version-1 events with finer precision therefore keep
+  Rust's inclusive-start/exclusive-end behavior in SQL, and older caches rebuild
+  automatically without changing events.
 - Focused Task 004.2 runs passed 38 projection tests across two suites and all 15
   durable-kernel projection/working-set tests. The canonical
   `rtk ./scripts/agent-check.sh` gate passed the tracked canary, formatting,
@@ -172,16 +202,17 @@
   quarantined manifests neither count nor page into roots, complements, or
   execution cards. Hard runtime and positive lexical filters still precede
   embedding work.
-- Projection schema 3 stores active-filter fields and exact timestamp remainder.
-  Kernel open/recovery performs one canonical rebuild and records a non-durable
-  process-local verification generation. Unchanged reads validate the checkpoint
-  anchor and SQLite data version without full replay; later events are canonical
+- Projection schema 4 retains the active-filter fields and exact timestamp
+  remainder introduced by schema 3. Kernel open/recovery performs one canonical
+  rebuild and records a non-durable process-local verification generation.
+  Unchanged reads validate the checkpoint anchor, digest, compact index, and
+  SQLite data version without full replay; later events are canonical
   delta-validated.
   External cache drift causes at most one source rebuild/recheck and never
   authorizes a result. Only `VerifiedContextSnapshot`, not
   `DerivedContextSnapshot`, can enter the kernel ranking path. Verification
-  metrics expose full replays, delta synchronizations, fast snapshots, and
-  cache repairs for regression evidence.
+  metrics expose full-replay events, delta events/bytes/work, admission index
+  lookups, fast snapshots, and cache repairs for regression evidence.
 - Working-set scope uses bounded canonical `SessionId`, `TaskId`, and
   `RetrievalScope` values. New durable context admission additionally requires a
   canonical exact `ContextNodeId`. `SearchContext` bounds and canonicalizes its
@@ -342,10 +373,6 @@
   checkpoint semantics.
 - V2 retrieval supports one injected provider, but production remains lexical
   until the embedding worker slice.
-- Context delta dependency seeding and live admission still scan the affected
-  session's source history from sequence zero. Replace this with a compact
-  source-verified session index before production memory admission or
-  self-improvement workloads can make writes frequent.
 - Capability lifecycle is cold only at retrieval: catalogue loading still
   recursively discovers, reads, deserializes, retains, and cross-validates every
   manifest. Add bounded symlink-safe package headers and cold full-manifest
