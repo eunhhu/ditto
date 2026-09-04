@@ -2,8 +2,9 @@
 
 ## Status
 
-Active under
-[ADR 0013](../../adr/0013-compact-source-verified-session-index.md).
+Completed under
+[ADR 0013](../../adr/0013-compact-source-verified-session-index.md). Reproducible
+verification is recorded in [Task 006 evidence](006-evidence.md).
 
 ## Objective
 

@@ -47,6 +47,18 @@ after the verified checkpoint. It must not scan an affected session before the
 checkpoint. Exact source-event lookup by the event store's unique event-ID
 index remains canonical source access; it is not a session-history scan.
 
+An out-of-band SQLite data-version change invalidates the fast proof. When the
+stored checkpoint is still byte-for-byte equal to the remembered source
+checkpoint, recovery may perform one complete compact-index consistency check
+bounded by the session-index envelope. That check must rederive both digest
+chains, compare every indexed row with its retrieval row and complete edge
+shape, verify all active-filter columns from canonical node JSON, and compare
+the resulting identities with the remembered source identities. Only a
+non-content change that leaves all of those values identical may refresh the
+process-local data-version binding without source replay. Any content mismatch
+must reset and replay from source. Canonical delta validation runs first so a
+malformed source event retains its established typed failure and checkpoint.
+
 ### Projection schema 4 and canonical digests
 
 Projection schema 4 keeps the existing retrieval rows and supersession edges
@@ -124,10 +136,11 @@ is a recovery/audit operation, not steady-state admission or retrieval.
 ### One rebuild and fail-closed recovery
 
 A missing proof, legacy schema, checkpoint-anchor mismatch, digest mismatch,
-external SQLite data-version change, or indexed row/state inconsistency causes
-one schema reset, full source replay, and recheck at the same captured
-high-water. If the recheck still disagrees, the operation returns a dedicated
-typed integrity failure and exposes no identity, snapshot, or partial result.
+failed external-data-version consistency check, or indexed row/state
+inconsistency causes one schema reset, full source replay, and recheck at the
+same captured high-water. If the recheck still disagrees, the operation returns
+a dedicated typed integrity failure and exposes no identity, snapshot, or
+partial result.
 Canonical event corruption and operational event-store failures remain direct
 typed failures; they are not relabeled as repairable cache drift.
 
