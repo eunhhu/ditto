@@ -11,10 +11,11 @@ use ditto_context::{
     ContextQueryRankingError, ContextScope, EpistemicStatus, TaskQuery, TaskSignatureV2,
 };
 use ditto_context_projection::{
-    CONTEXT_NODE_EVENT_VERSION, CONTEXT_PROJECTION_DATABASE_FILENAME, ContextNodeDraft,
-    ContextNodeRecordedPayloadV1, ContextProjection, ContextProjectionError,
-    DerivedContextSnapshot, MAX_CONTEXT_NODE_ID_BYTES, MAX_CONTEXT_SOURCE_EVENT_IDS,
-    MAX_CONTEXT_SUMMARY_BYTES, MAX_CONTEXT_SUPERSEDES, MAX_SERIALIZED_CONTEXT_NODE_BYTES,
+    CONTEXT_NODE_EVENT_VERSION, CONTEXT_PROJECTION_DATABASE_FILENAME,
+    CONTEXT_PROJECTION_SCHEMA_VERSION, ContextNodeDraft, ContextNodeRecordedPayloadV1,
+    ContextProjection, ContextProjectionError, DerivedContextSnapshot, MAX_CONTEXT_NODE_ID_BYTES,
+    MAX_CONTEXT_SOURCE_EVENT_IDS, MAX_CONTEXT_SUMMARY_BYTES, MAX_CONTEXT_SUPERSEDES,
+    MAX_NORMAL_DELTA_EVENTS, MAX_SERIALIZED_CONTEXT_NODE_BYTES,
     MAX_SERIALIZED_CONTEXT_PAYLOAD_BYTES, VerifiedContextSnapshot,
 };
 use ditto_event_store::EventStore;
@@ -85,6 +86,96 @@ fn noise(store: &EventStore, session_id: Option<&str>, task_id: Option<&str>) ->
             span_id: None,
         })
         .expect("append noise event")
+}
+
+fn bulk_insert_noise(path: &Path, session_id: &str, prefix: &str, count: u64) {
+    assert!(count > 0);
+    let connection = Connection::open(path).expect("open event store bulk fixture");
+    let inserted = connection
+        .execute(
+            r#"
+            WITH RECURSIVE sequence(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < ?1
+            )
+            INSERT INTO events (
+                event_id, recorded_at, session_id, task_id, actor, kind,
+                payload_json, causation_id, correlation_id, span_id
+            )
+            SELECT
+                printf('%s-%09d', ?2, value),
+                '2026-09-04T00:00:00.000Z',
+                ?3,
+                NULL,
+                'system',
+                'fixture.bulk-noise',
+                '{}',
+                NULL,
+                ?3,
+                NULL
+            FROM sequence
+            "#,
+            params![
+                i64::try_from(count).expect("fixture count fits i64"),
+                prefix,
+                session_id
+            ],
+        )
+        .expect("insert bulk fixture events");
+    assert_eq!(
+        u64::try_from(inserted).expect("insert count fits u64"),
+        count
+    );
+}
+
+fn bulk_insert_context_nodes(
+    path: &Path,
+    session_id: &str,
+    source_event_id: &str,
+    prefix: &str,
+    count: u64,
+) {
+    assert!(count > 0);
+    let mut connection = Connection::open(path).expect("open event store context fixture");
+    let transaction = connection.transaction().expect("begin context fixture");
+    {
+        let mut statement = transaction
+            .prepare(
+                r#"
+                INSERT INTO events (
+                    event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+                ) VALUES (?1, ?2, ?3, NULL, 'system', ?4, ?5, ?6, ?3, NULL)
+                "#,
+            )
+            .expect("prepare context fixture insert");
+        for index in 1..=count {
+            let node_id = format!("{prefix}-{index:05}");
+            let node = node(
+                node_id,
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source_event_id.to_owned()],
+                Vec::new(),
+                "scale fixture",
+            );
+            let payload_json =
+                serde_json::to_string(&payload(&node)).expect("context fixture JSON");
+            statement
+                .execute(params![
+                    format!("{prefix}-event-{index:05}"),
+                    "2026-09-04T00:00:00.000Z",
+                    session_id,
+                    event_kind::CONTEXT_NODE_RECORDED,
+                    payload_json,
+                    source_event_id,
+                ])
+                .expect("insert context fixture event");
+        }
+    }
+    transaction.commit().expect("commit context fixture");
 }
 
 fn node(
@@ -4243,6 +4334,8 @@ fn verified_snapshot_reuses_one_full_replay_and_advances_by_delta() {
         .verification_metrics()
         .expect("initial metrics");
     assert_eq!(initial.full_replays, 1);
+    assert_eq!(initial.full_replay_events, 2);
+    assert_eq!(initial.delta_events, 0);
 
     verified_snapshot(&fixture, SESSION, None).expect("first fast snapshot");
     verified_snapshot(&fixture, SESSION, None).expect("second fast snapshot");
@@ -4253,6 +4346,8 @@ fn verified_snapshot_reuses_one_full_replay_and_advances_by_delta() {
     assert_eq!(steady.full_replays, 1);
     assert_eq!(steady.delta_synchronizations, 0);
     assert_eq!(steady.fast_snapshots, 2);
+    assert_eq!(steady.full_replay_events, 2);
+    assert_eq!(steady.delta_events, 0);
 
     record_node(
         &fixture.store,
@@ -4280,6 +4375,370 @@ fn verified_snapshot_reuses_one_full_replay_and_advances_by_delta() {
     assert_eq!(delta.full_replays, 1);
     assert_eq!(delta.delta_synchronizations, 1);
     assert_eq!(delta.fast_snapshots, 3);
+    assert_eq!(delta.full_replay_events, 2);
+    assert_eq!(delta.delta_events, 1);
+    assert!(delta.delta_context_payload_bytes > 0);
+    assert!(delta.delta_verification_work >= 5);
+}
+
+#[test]
+fn schema_four_global_and_session_digests_are_rebuild_and_migration_stable() {
+    let fixture = fixture();
+    let source = append_source_event(
+        &fixture.store,
+        SESSION,
+        None,
+        EventActor::User,
+        "index.digest.source",
+    );
+    let first = record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "digest-first",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "first indexed identity",
+        ),
+    );
+    let second = record_node(
+        &fixture.store,
+        SESSION,
+        None,
+        node(
+            "digest-second",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id],
+            vec!["digest-first".into()],
+            "second indexed identity",
+        ),
+    );
+    let initial = fixture
+        .projection
+        .rebuild(&fixture.store)
+        .expect("schema-four source replay");
+    assert_eq!(
+        initial.checkpoint.schema_version,
+        CONTEXT_PROJECTION_SCHEMA_VERSION
+    );
+    assert_eq!(initial.checkpoint.through_seq, second.seq);
+    let initial_session = fixture
+        .projection
+        .session_index_checkpoint(SESSION)
+        .expect("session index checkpoint")
+        .expect("indexed session");
+    assert_eq!(initial_session.through_seq, second.seq);
+    assert_eq!(initial_session.through_event_id, second.event_id);
+    assert_eq!(initial_session.identity_count, 2);
+    assert!(initial_session.accounted_bytes > 0);
+
+    let rebuilt = fixture
+        .projection
+        .rebuild(&fixture.store)
+        .expect("repeat full replay");
+    let rebuilt_session = fixture
+        .projection
+        .session_index_checkpoint(SESSION)
+        .expect("rebuilt session index")
+        .expect("rebuilt indexed session");
+    assert_eq!(rebuilt.checkpoint, initial.checkpoint);
+    assert_eq!(rebuilt_session, initial_session);
+
+    let Fixture {
+        _dir: dir_guard,
+        store,
+        projection,
+        projection_path,
+    } = fixture;
+    let source_count = store.count().expect("canonical event count");
+    drop(projection);
+    let connection = Connection::open(&projection_path).expect("open legacy schema fixture");
+    connection
+        .execute_batch("PRAGMA user_version = 3;")
+        .expect("mark schema three cache");
+    drop(connection);
+    let reopened = ContextProjection::open(&projection_path).expect("replace schema three cache");
+    assert_eq!(
+        reopened.checkpoint().expect("reset checkpoint").through_seq,
+        0
+    );
+    let migrated = reopened.rebuild(&store).expect("rebuild schema four cache");
+    let migrated_session = reopened
+        .session_index_checkpoint(SESSION)
+        .expect("migrated session index")
+        .expect("migrated indexed session");
+    assert_eq!(migrated.checkpoint, initial.checkpoint);
+    assert_eq!(migrated_session, initial_session);
+    assert_eq!(
+        store.count().expect("source remains immutable"),
+        source_count
+    );
+    assert!(first.seq < second.seq);
+    drop(dir_guard);
+}
+
+#[test]
+fn compact_index_row_state_and_checkpoint_tampering_rebuild_once_without_authority() {
+    let mutations = [
+        "DELETE FROM session_index_nodes WHERE node_id = 'tamper-indexed'",
+        "UPDATE session_index_nodes SET node_digest = randomblob(32) WHERE node_id = 'tamper-indexed'",
+        "UPDATE session_index_state SET state_digest = randomblob(32) WHERE session_id = 'session-a'",
+        "UPDATE projection_checkpoint SET canonical_state_digest = randomblob(32) WHERE singleton = 1",
+    ];
+    for mutation in mutations {
+        let fixture = fixture();
+        let source = append_source_event(
+            &fixture.store,
+            SESSION,
+            None,
+            EventActor::User,
+            "index.tamper.source",
+        );
+        record_node(
+            &fixture.store,
+            SESSION,
+            None,
+            node(
+                "tamper-indexed",
+                ContextScope::Session,
+                ContextOrigin::User,
+                EpistemicStatus::Verified,
+                vec![source.event_id],
+                Vec::new(),
+                "canonical indexed value",
+            ),
+        );
+        fixture
+            .projection
+            .rebuild(&fixture.store)
+            .expect("source-verified prefix");
+        let before = fixture
+            .projection
+            .verification_metrics()
+            .expect("metrics before tamper");
+        let connection =
+            Connection::open(&fixture.projection_path).expect("open cache mutation connection");
+        connection
+            .execute_batch(mutation)
+            .expect("mutate derived cache");
+        drop(connection);
+
+        let snapshot = verified_snapshot(&fixture, SESSION, None)
+            .expect("one source rebuild repairs compact index mutation");
+        assert_eq!(snapshot_ids(&snapshot), vec!["tamper-indexed"]);
+        let after = fixture
+            .projection
+            .verification_metrics()
+            .expect("metrics after repair");
+        assert_eq!(after.full_replays, before.full_replays + 1);
+        assert_eq!(after.cache_repairs, before.cache_repairs + 1);
+        assert_eq!(
+            fixture
+                .projection
+                .session_index_checkpoint(SESSION)
+                .expect("repaired session checkpoint")
+                .expect("repaired session")
+                .identity_count,
+            1
+        );
+        let connection =
+            Connection::open(&fixture.projection_path).expect("inspect repaired index");
+        let indexed_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_index_nodes WHERE session_id = ?1 AND node_id = 'tamper-indexed'",
+                [SESSION],
+                |row| row.get(0),
+            )
+            .expect("count repaired index rows");
+        assert_eq!(indexed_rows, 1);
+    }
+}
+
+#[test]
+fn normal_delta_accepts_n_events_and_rejects_before_committing_n_plus_one() {
+    let at_limit = fixture();
+    at_limit
+        .projection
+        .rebuild(&at_limit.store)
+        .expect("verify empty source prefix");
+    let at_limit_path = at_limit._dir.path().join("state.db");
+    bulk_insert_noise(
+        &at_limit_path,
+        SESSION,
+        "delta-at-limit",
+        MAX_NORMAL_DELTA_EVENTS,
+    );
+    let high_water = at_limit.store.latest_seq().expect("delta high-water");
+    assert_eq!(
+        u64::try_from(high_water).expect("positive high-water"),
+        MAX_NORMAL_DELTA_EVENTS
+    );
+    let synchronized = at_limit
+        .projection
+        .synchronize_through(&at_limit.store, high_water)
+        .expect("exactly N delta events are accepted");
+    assert_eq!(synchronized.checkpoint.through_seq, high_water);
+    let metrics = at_limit
+        .projection
+        .verification_metrics()
+        .expect("at-limit metrics");
+    assert_eq!(metrics.full_replay_events, 0);
+    assert_eq!(metrics.delta_events, MAX_NORMAL_DELTA_EVENTS);
+    assert_eq!(metrics.delta_verification_work, MAX_NORMAL_DELTA_EVENTS);
+
+    let over_limit = fixture();
+    over_limit
+        .projection
+        .rebuild(&over_limit.store)
+        .expect("verify second empty source prefix");
+    let over_limit_path = over_limit._dir.path().join("state.db");
+    bulk_insert_noise(
+        &over_limit_path,
+        SESSION,
+        "delta-over-limit",
+        MAX_NORMAL_DELTA_EVENTS + 1,
+    );
+    let over_high_water = over_limit
+        .store
+        .latest_seq()
+        .expect("over-limit high-water");
+    let error = over_limit
+        .projection
+        .synchronize_through(&over_limit.store, over_high_water)
+        .expect_err("delta event N+1 is rejected");
+    assert!(matches!(
+        error,
+        ContextProjectionError::SessionIndexLimitExceeded {
+            dimension: "normal delta events",
+            attempted,
+            maximum: MAX_NORMAL_DELTA_EVENTS,
+        } if attempted == MAX_NORMAL_DELTA_EVENTS + 1
+    ));
+    let checkpoint = over_limit
+        .projection
+        .checkpoint()
+        .expect("checkpoint after bounded failure");
+    assert_eq!(
+        u64::try_from(checkpoint.through_seq).expect("positive checkpoint"),
+        MAX_NORMAL_DELTA_EVENTS,
+        "the over-limit event must not be read into or committed by a projection page"
+    );
+    assert_eq!(
+        over_limit.store.count().expect("canonical source count"),
+        MAX_NORMAL_DELTA_EVENTS + 1,
+        "projection rejection must not modify the event spine"
+    );
+}
+
+#[test]
+fn million_event_prefix_steady_state_visits_only_delta_and_compact_index() {
+    const ORDINARY_EVENTS: u64 = 1_000_000;
+    const CONTEXT_IDENTITIES: u64 = 10_000;
+
+    let fixture = fixture();
+    let source = append_source_event(
+        &fixture.store,
+        SESSION,
+        None,
+        EventActor::User,
+        "scale.source",
+    );
+    let event_store_path = fixture._dir.path().join("state.db");
+    bulk_insert_noise(
+        &event_store_path,
+        SESSION,
+        "scale-noise",
+        ORDINARY_EVENTS - 1,
+    );
+    bulk_insert_context_nodes(
+        &event_store_path,
+        SESSION,
+        &source.event_id,
+        "scale-node",
+        CONTEXT_IDENTITIES,
+    );
+    let prefix_events = ORDINARY_EVENTS + CONTEXT_IDENTITIES;
+    assert_eq!(
+        fixture.store.count().expect("scale prefix count"),
+        prefix_events
+    );
+
+    let rebuilt = fixture
+        .projection
+        .rebuild(&fixture.store)
+        .expect("source-verify scale prefix");
+    assert_eq!(
+        u64::try_from(rebuilt.checkpoint.through_seq).expect("positive scale checkpoint"),
+        prefix_events
+    );
+    let indexed = fixture
+        .projection
+        .session_index_checkpoint(SESSION)
+        .expect("scale index checkpoint")
+        .expect("indexed scale session");
+    assert_eq!(indexed.identity_count, CONTEXT_IDENTITIES);
+    let initial_metrics = fixture
+        .projection
+        .verification_metrics()
+        .expect("scale replay metrics");
+    assert_eq!(initial_metrics.full_replays, 1);
+    assert_eq!(initial_metrics.full_replay_events, prefix_events);
+    assert_eq!(initial_metrics.delta_events, 0);
+
+    let delta = noise(&fixture.store, Some(SESSION), None);
+    let snapshot =
+        verified_snapshot(&fixture, SESSION, None).expect("one-event scale steady-state snapshot");
+    assert_eq!(snapshot.checkpoint().through_seq, delta.seq);
+    assert_eq!(snapshot.scanned_rows(), CONTEXT_IDENTITIES as usize);
+    assert_eq!(snapshot.candidates().len(), CONTEXT_IDENTITIES as usize);
+    let steady_metrics = fixture
+        .projection
+        .verification_metrics()
+        .expect("scale steady-state metrics");
+    assert_eq!(steady_metrics.full_replays, 1);
+    assert_eq!(steady_metrics.full_replay_events, prefix_events);
+    assert_eq!(steady_metrics.delta_synchronizations, 1);
+    assert_eq!(steady_metrics.delta_events, 1);
+    assert_eq!(steady_metrics.delta_context_payload_bytes, 0);
+    assert_eq!(steady_metrics.delta_verification_work, 1);
+
+    let draft = ContextNodeDraft::session(
+        SESSION,
+        node(
+            "scale-admission",
+            ContextScope::Session,
+            ContextOrigin::User,
+            EpistemicStatus::Verified,
+            vec![source.event_id.clone()],
+            Vec::new(),
+            "bounded admission after scale prefix",
+        ),
+    );
+    let validated = validate_draft(&fixture, &draft).expect("compact-index admission");
+    assert_eq!(validated.causation_id(), source.event_id);
+    let admission_metrics = fixture
+        .projection
+        .verification_metrics()
+        .expect("scale admission metrics");
+    assert_eq!(
+        admission_metrics.admission_index_lookups - steady_metrics.admission_index_lookups,
+        1
+    );
+    assert_eq!(admission_metrics.full_replays, 1);
+    assert_eq!(admission_metrics.delta_events, 1);
+
+    eprintln!(
+        "task006_scale_evidence ordinary_events={ORDINARY_EVENTS} context_identities={CONTEXT_IDENTITIES} full_replay_events={} steady_delta_events={} admission_index_lookups={}",
+        admission_metrics.full_replay_events,
+        admission_metrics.delta_events,
+        admission_metrics.admission_index_lookups,
+    );
 }
 
 #[test]
