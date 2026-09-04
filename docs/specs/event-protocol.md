@@ -78,11 +78,18 @@ authority; nodes and source events are immutable, and replacements use a new
 node with `supersedes` rather than in-place mutation.
 
 The derived `context-projection.db` is a separate, deletable cache. Its
-checkpoint (`schema_version`, `through_seq`, `through_event_id`) is rebuilt from
-canonical events and never repairs or rewrites them. A durable append is the
-acceptance point. If post-append projection synchronization fails, the kernel
-still makes one live publication attempt and returns the committed event in a
-typed `committed_but_projection_unavailable` outcome; later open or retrieval
+schema-4 checkpoint binds `through_seq`, `through_event_id`, and the canonical
+compact-index digest. Bounded startup/recovery replay derives global and
+per-session digest chains plus immutable identity, provenance, causation,
+scope, and supersession metadata; only a process-local proof for that exact
+generation permits normal index use. Steady-state synchronization reads the
+checkpoint delta and exact cited source IDs instead of rescanning an affected
+session from sequence zero. The index and delta have fixed entry, byte, event,
+payload, and verification-work limits and never repair or rewrite canonical
+events. A durable append is the acceptance point. If post-append projection
+synchronization fails, the kernel still makes one live publication attempt and
+returns the committed event in a typed
+`committed_but_projection_unavailable` outcome; later open or retrieval
 replays the event spine to recover the cache. Recovery publishes no substitute
 event, and a retry resolves the already committed identity without appending a
 duplicate.

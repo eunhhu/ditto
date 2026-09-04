@@ -42,8 +42,15 @@ Durable context uses the same authority boundary: the kernel admits only a
 trusted, non-deserializable session/task draft and emits the fixed
 system-authored `context.node.recorded` event. The event spine remains the sole
 durable source of truth. The separately stored `context-projection.db` is a
-checkpointed, WAL-backed cache that can be deleted and rebuilt from canonical
-events; it never authorizes admission or replaces event history.
+schema-4, checkpointed, WAL-backed cache that can be deleted and rebuilt from
+canonical events; it never replaces event history. Startup and recovery replay
+the source in bounded pages and issue a process-local verification proof for
+the exact event anchor, global digest, and compact per-session identity index.
+Normal retrieval and admission then use only a bounded event delta, exact
+source-event lookups, and proof-gated index lookups. Global and per-session
+digest chains cover canonical node, provenance, causation, scope, and
+supersession metadata, while fixed entry, byte, event, payload, and work limits
+reject rather than truncate an over-limit operation.
 
 The SSE adapter subscribes before capturing a high-water mark, replays the
 bounded snapshot in pages, deduplicates buffered live events, and recovers gaps
