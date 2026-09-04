@@ -2,7 +2,7 @@
 
 ## Canonical state
 
-- Branch: `feat/task-005-canonical-invocation`.
+- Branch: `dev/task-006-session-index`.
 - Runtime: Rust daemon and CLI.
 - Durable stores: SQLite event spine plus local SHA-256 artifact objects.
 - Public mutation ingress: typed user-input command only; arbitrary event append
@@ -67,6 +67,14 @@
   provider completion still is not task completion.
 
 ## Latest verified slice
+
+- Task 006 is active under
+  [ADR 0013](../adr/0013-compact-source-verified-session-index.md). Its contract
+  confines full source replay to startup/audit/recovery, keeps the event spine
+  authoritative, and requires a schema-4 compact session index, canonical
+  digest/checkpoint binding, process-local proof, one repair/recheck, and fixed
+  entry/byte/delta/work bounds. No Task 006 implementation or completion claim
+  is recorded yet.
 
 - Task 005.1 has a verified final review-closure implementation under
   [ADR 0012](../adr/0012-canonical-capability-invocation.md). The tracked
