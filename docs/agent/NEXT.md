@@ -5,8 +5,10 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-- None. Task 005.1 review closure is complete, and this run stops before the
-  compact session-index task.
+- [`006 Compact source-verified session index`](tasks/006-compact-session-index.md):
+  replace normal context-admission and delta-verification sequence-zero session
+  rescans with a digest-bound, process-verified schema-4 index and fixed work
+  envelope while retaining event-spine authority and rebuild semantics.
 
 ## Completed
 
@@ -58,8 +60,6 @@ file's exit criteria before moving the marker.
 
 ## Later
 
-- compact source-verified session indexes that remove session-history rescans
-  from context delta verification and admission;
 - a bounded capability package-header index with symlink-safe discovery and
   cold full-manifest paging before a large capability ecosystem;
 - batched, compact rerank pools and descriptor/hash caching before a production
