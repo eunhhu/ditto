@@ -101,7 +101,15 @@ impl DittoKernel {
             .context_projection
             .validate_draft(&self.inner.events, high_water, &draft)
             .map_err(map_context_admission_error)?;
-        let committed = self.append_without_publish(context_node_event(&validated)?)?;
+        self.commit_context_node(&validated)
+    }
+
+    // Callers must hold context_admission_gate across validation and commit.
+    pub(super) fn commit_context_node(
+        &self,
+        validated: &ValidatedContextNodeDraft,
+    ) -> Result<EventRecord, KernelError> {
+        let committed = self.append_without_publish(context_node_event(validated)?)?;
         let projection_result = self
             .inner
             .context_projection

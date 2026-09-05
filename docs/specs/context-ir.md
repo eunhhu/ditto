@@ -118,9 +118,10 @@ that were never persisted.
 The receipt explains source events, epistemic status, inclusion directive,
 score, derived token cost, and exclusion reason. Pinning and policy-required
 inclusion remain trusted ephemeral directives. Durable version-1 node admission
-has no public client context-mutation route, arbitrary event-append path,
-serialized trusted draft, or daemon/CLI command; trusted kernel code assigns the
-event authority and clients never mutate history or compiler authority directly.
+has no arbitrary event-append path or serialized trusted draft. The explicit
+user-memory command promotes exact existing user input through kernel-owned
+construction and the same admission boundary; clients cannot supply node fields
+or mutate history or compiler authority. See ADR 0015.
 
 When a turn persists compiled context, it captures a provenance high-water
 sequence. The kernel resolves every included source within the same trusted

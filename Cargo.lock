@@ -453,6 +453,8 @@ dependencies = [
  "ditto-protocol",
  "futures-core",
  "futures-util",
+ "reqwest",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",

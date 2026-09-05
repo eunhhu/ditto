@@ -37,6 +37,8 @@ The executable foundation includes:
 - kernel-only trusted admission of session/task context nodes as fixed
   `context.node.recorded` events in the canonical event spine, plus a separate,
   checkpointed and rebuildable `context-projection.db` cache;
+- explicit session memory through CLI/HTTP: save exact user text, inspect current
+  memories, and correct an active memory with idempotent input promotion;
 - one bounded V2 `TaskQuery` shared by read-only joint context/capability
   working-set retrieval, with production lexical ranking and an explicit
   injected embedding seam for tests and explicit local composition;
@@ -68,6 +70,12 @@ cargo run -p ditto-cli -- input "hello from ditto" --session local
 cargo run -p ditto-cli -- events --session local
 cargo run -p ditto-cli -- capabilities "run a command on another computer"
 
+# Explicit memories default to the persistent personal session.
+cargo run -p ditto-cli -- memory save "I prefer afternoon meetings"
+cargo run -p ditto-cli -- memory list
+# Use an ID returned above to correct that memory:
+# cargo run -p ditto-cli -- memory save "I prefer morning meetings" --replaces MEMORY_ID
+
 curl -N 'http://127.0.0.1:8787/v1/stream?after_seq=0'
 ```
 
@@ -81,11 +89,21 @@ authentication; use loopback until an authenticated gateway exists.
 | --- | --- | --- |
 | `GET` | `/health` | Liveness, durable count, and latest sequence |
 | `POST` | `/v1/commands/input` | Submit user input; kernel assigns event authority |
+| `POST` | `/v1/commands/memory` | Save an existing same-session user input, optionally replacing an active memory |
+| `GET` | `/v1/memories` | Inspect current session memories with an ID cursor |
 | `GET` | `/v1/events` | Query one durable event page |
 | `GET` | `/v1/stream` | Replay all pages through a high-water mark, then follow |
 | `GET` | `/v1/capabilities` | Catalogue-level capability card search |
 
 There is intentionally no public arbitrary event-append endpoint.
+
+Memory saving uses the existing input event and context admission. Text is
+bounded to 4 KiB, preserved exactly as recorded, and never inferred by a model.
+Use `--session NAME` for an isolated set and `memory list --after-id ID` to
+continue a page. If input capture succeeds but memory saving fails, the CLI
+reports the input ID for `memory from-input INPUT_ID` recovery. A pending
+projection is reported separately from the accepted durable write. See the
+[memory contract](docs/specs/event-protocol.md#explicit-user-memory).
 
 ## Architecture
 
@@ -117,6 +135,10 @@ See [`docs/architecture.md`](docs/architecture.md).
 
 ```bash
 ./scripts/agent-check.sh
+
+# End-to-end memory verification with disposable local data:
+cargo build -p ditto-daemon -p ditto-cli --locked
+python3 scripts/smoke-user-memory.py
 ```
 
 Long-running Codex or other coding-agent work starts at [`AGENTS.md`](AGENTS.md)
