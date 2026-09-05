@@ -5,13 +5,18 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-No active implementation task. Task 008 is complete on
-`dev/task-008-user-memory`, based on the main merge of Tasks 006 and 007.
-Its [evidence](tasks/008-evidence.md) records the tested code identities and
-replayable CLI workflow.
+No active implementation task. Task 009 is complete on
+`dev/task-009-agent-run`, based on main `4f5d2ff` (Task 008, PR #13).
+Its [evidence](tasks/009-evidence.md) records the tested code and CLI workflow.
 
 ## Completed
 
+- [`009 Explicit personal-agent request path`](tasks/009-agent-run.md): typed
+  CLI/HTTP run, status, and cancellation; durable request identity and bounded
+  single-run ownership; source-verified current context, direct answers or
+  artifact-read continuation, and explicit interrupted state after owner loss.
+  Default startup is model-free; the enabled path has deterministic fixture
+  evidence, not a live paid-model quality claim.
 - [`008 Explicit user memory`](tasks/008-user-memory.md): CLI/HTTP save, list,
   and correction of exact user input through existing session context; identical
   retries return the original event, concurrent stale corrections conflict,
@@ -74,11 +79,15 @@ replayable CLI workflow.
 
 ## Later
 
+- next delivery priority: structured local process execution with bounded
+  authority, cancellation, and task-specific evidence; specify its vertical
+  task contract before implementation;
 - event-driven scheduled-work state and restart recovery before recurring
   autonomous execution;
+- minimum task-status/approval experience and reproducible RAM, latency, cost,
+  and repeated-use baselines before claiming the first personal-agent milestone;
 - batched, compact rerank pools and descriptor/hash caching before a production
   embedding worker;
-- device registry and local process worker;
-- SSH as placement transport;
-- gateway inspector and approval UX;
+- device registry, SSH placement, and expanded gateway integrations after the
+  local workflow is useful;
 - evidence-gated improvement compiler.

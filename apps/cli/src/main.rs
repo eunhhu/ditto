@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
 mod memory;
+mod runs;
 
 #[derive(Debug, Parser)]
 #[command(name = "ditto", version, about = "Operate the local Ditto daemon")]
@@ -15,6 +16,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Ask the configured model; wait for its answer unless detached.
+    Run(runs::RunArgs),
+    /// Inspect a run using its original request ID.
+    RunStatus(runs::RunIdentity),
+    /// Request cancellation of an active run.
+    RunCancel(runs::RunIdentity),
     /// Save, inspect, or correct explicit user memory.
     Memory {
         #[command(subcommand)]
@@ -52,10 +59,15 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let api = cli.api.trim_end_matches('/');
 
     match cli.command {
+        Command::Run(args) => runs::start(&client, api, args).await?,
+        Command::RunStatus(identity) => runs::inspect(&client, api, identity).await?,
+        Command::RunCancel(identity) => runs::cancel(&client, api, identity).await?,
         Command::Memory { command } => memory::run(&client, api, command).await?,
         Command::Ping => {
             let value = client

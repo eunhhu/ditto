@@ -21,3 +21,5 @@ done
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
+cargo build --locked -p ditto-cli
+cargo test --locked -p ditto-daemon runs::tests::built_cli_run_wait_retry_status_and_cancel -- --exact --ignored

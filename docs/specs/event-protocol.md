@@ -153,8 +153,59 @@ in that session. Listing adds no event and invokes no model/embedding provider.
 
 `personal` is the CLI's default session name, not a new global scope. Other
 sessions remain isolated. Deletion, automatic extraction, cross-session recall,
-and daemon model scheduling remain deferred. [ADR 0015](../adr/0015-explicit-user-memory.md)
+and recurring model scheduling remain deferred. [ADR 0015](../adr/0015-explicit-user-memory.md)
 owns this command and retry contract.
+
+## Explicit agent runs
+
+`POST /v1/commands/run` accepts only `request_id`, `session_id`, and `text`.
+The request ID is a canonical uppercase ULID; session IDs are canonical and
+text is at most 16 KiB UTF-8 before existing whitespace normalization. The
+kernel derives task ID `run_<request_id>` and creates a fresh turn correlation.
+The durable input carries additive `agent_run: {version: 1, request_id: ...}`
+metadata fixed by the kernel, never copied from client event fields.
+
+Acceptance precedes dispatch and returns HTTP 202 with `running`. Identical
+normalized text with the same session/request ID returns the existing run,
+including terminal or interrupted runs; changed text is HTTP 409. One active
+run is allowed per kernel, and additional identities get HTTP 429 without
+acceptance or a queue. Disabled execution and shutdown return HTTP 503 for new
+work. The daemon's default is disabled; input and memory routes remain free of
+model calls. POST is not automatically retried by the CLI.
+
+`GET /v1/runs?session_id=personal&request_id=...` and
+`POST /v1/commands/run/cancel` (the same two identity fields as JSON) inspect or
+cancel that exact run. Unknown identities return 404. Cancellation is a live
+signal, not a durable promise of a terminal; `cancellation_requested` is true
+while the matching live token is signalled. A durable cancellation becomes
+`failed` with `failure_code: cancelled`. A finished run is `unverified` with a
+response. If the original input exists without a terminal or live owner, state
+is `interrupted`, not success or pending automatic restart. Status inspection
+projects indexed trusted journal boundaries; complete trace verification is the
+separate existing replay API.
+
+Only explicit operator provider selection enables dispatch. The installed
+OpenAI profile uses transport-only environment credentials and ephemeral remote
+storage. It is not free inference. The public run command has no provider,
+credential, timing, effect, lease, or trusted-context fields; unknown fields are
+rejected. Live provider execution is loopback-only. A client disconnect does not
+cancel accepted work. Graceful shutdown closes admission, cancels the one run,
+drains it, and closes event followers. Crashes/storage failure can leave an
+interrupted identity. The supported writer remains one kernel and its clones.
+
+Current session/task context comes from a bounded source-verified projection
+snapshot, with supersession and scope filtering before lexical compilation.
+The recorded capsule is stable for the turn; subsequent corrections affect
+later turns. Retrieval failure blocks provider I/O. No transcript injection,
+memory inference, semantic embedding worker, or housekeeping call is added.
+
+The CLI prints identity before POST. It waits on SSE terminal notifications by
+default, retaining only an event-name line of at most 128 bytes, and reads
+canonical status when notified. `--detach` returns after admission, Ctrl+C
+signals cancellation, and connection failure reports recovery with the same ID.
+A six-minute client follow ceiling does not restart or cancel server work;
+the server's existing five-minute turn ceiling remains authoritative.
+See [ADR 0016](../adr/0016-explicit-agent-runs.md).
 
 ## Kernel artifact-read turns
 
@@ -188,6 +239,11 @@ cancellation/deadline failure stage and typed effective-deadline evidence,
 terminal state, and absence of a `task.completed` claim. It reconstructs the complete transcript without calling
 the provider or reading an artifact again. A pre-existing completion for the
 target task rejects live turn admission without creating new events.
+
+Version-1 agent-run input metadata enables Auto tool choice from request zero
+and a direct final answer with zero tool calls. Legacy inputs retain Required
+first-tool semantics. Replay validates metadata and the matching generation
+controls; no capability authority, effect, or completion rule changes.
 
 ## Streaming
 

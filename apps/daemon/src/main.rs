@@ -27,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 
 const DEFAULT_REPLAY_PAGE_SIZE: usize = 500;
 mod memory;
+mod runs;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,6 +36,9 @@ mod memory;
     about = "Ditto semantic agent microkernel"
 )]
 struct Args {
+    /// Enable explicit model runs. Default startup makes no model request.
+    #[arg(long, env = "DITTO_PROVIDER", value_enum, default_value = "disabled")]
+    provider: runs::Provider,
     #[arg(long, env = "DITTO_DATA_DIR", default_value = ".ditto")]
     data_dir: PathBuf,
     #[arg(long, env = "DITTO_CAPABILITIES_DIR", default_value = "capabilities")]
@@ -49,6 +53,8 @@ struct Args {
 #[derive(Clone)]
 struct AppState {
     kernel: DittoKernel,
+    driver: Option<std::sync::Arc<dyn ditto_model::ModelDriver>>,
+    shutdown: ditto_model::CancellationToken,
 }
 
 #[tokio::main]
@@ -63,15 +69,22 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     validate_bind(args.bind, args.allow_unauthenticated_remote)?;
+    let driver = runs::configured_driver(args.provider, args.bind)?;
     let kernel = DittoKernel::open(KernelConfig::new(args.data_dir, args.capabilities_dir))
         .context("failed to initialize Ditto kernel")?;
     kernel
         .record_runtime_started(&args.bind.to_string())
         .context("failed to record runtime start")?;
 
-    let state = AppState { kernel };
+    let shutdown = ditto_model::CancellationToken::new();
+    let state = AppState {
+        kernel: kernel.clone(),
+        driver,
+        shutdown: shutdown.clone(),
+    };
     let app = Router::new()
         .merge(memory::routes())
+        .merge(runs::routes())
         .route("/health", get(health))
         .route("/v1/commands/input", post(submit_input))
         .route("/v1/events", get(list_events))
@@ -86,7 +99,13 @@ async fn main() -> anyhow::Result<()> {
     info!(address = %args.bind, "Ditto daemon listening");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown.cancel();
+            if kernel.shutdown_agent_runs().await.is_err() {
+                error!("failed to drain agent runtime");
+            }
+        })
         .await
         .context("Ditto daemon stopped unexpectedly")?;
     Ok(())
@@ -156,6 +175,7 @@ async fn stream_events(
         .unwrap_or(DEFAULT_REPLAY_PAGE_SIZE)
         .clamp(1, 1_000);
     let filter = query;
+    let shutdown = state.shutdown;
 
     let output = stream! {
         let mut cursor = filter.after_seq.unwrap_or(0).max(0);
@@ -169,6 +189,7 @@ async fn stream_events(
         );
         futures_util::pin_mut!(initial);
         while let Some(result) = initial.next().await {
+            if shutdown.is_cancelled() { return; }
             match result {
                 Ok(event) => yield Ok(encode_sse(&event)),
                 Err(error) => {
@@ -180,7 +201,12 @@ async fn stream_events(
         cursor = initial_high_water;
 
         'live: loop {
-            match receiver.recv().await {
+            let received = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => break,
+                received = receiver.recv() => received,
+            };
+            match received {
                 Ok(event) => {
                     if event.seq <= cursor {
                         continue;
@@ -197,6 +223,7 @@ async fn stream_events(
                         );
                         futures_util::pin_mut!(gap);
                         while let Some(result) = gap.next().await {
+                            if shutdown.is_cancelled() { return; }
                             match result {
                                 Ok(replayed) => yield Ok(encode_sse(&replayed)),
                                 Err(error) => {
@@ -233,6 +260,7 @@ async fn stream_events(
                     );
                     futures_util::pin_mut!(catch_up);
                     while let Some(result) = catch_up.next().await {
+                        if shutdown.is_cancelled() { return; }
                         match result {
                             Ok(event) => yield Ok(encode_sse(&event)),
                             Err(error) => {

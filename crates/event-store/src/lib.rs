@@ -10,7 +10,13 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 use ulid::Ulid;
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
+
+const MIGRATION_V3: &str = r#"
+CREATE INDEX IF NOT EXISTS events_session_task_seq ON events(session_id, task_id, seq);
+CREATE INDEX IF NOT EXISTS events_session_task_correlation_seq
+    ON events(session_id, task_id, correlation_id, seq);
+"#;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
@@ -184,6 +190,49 @@ impl EventStore {
             events.push(row?.try_into()?);
         }
         Ok(events)
+    }
+
+    /// Two indexed boundary reads, independent of transcript length. The latest
+    /// event is restricted to the first event's kernel-assigned correlation.
+    pub fn task_turn_boundary(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<Option<(EventRecord, EventRecord)>, EventStoreError> {
+        let connection = self.connection()?;
+        let first = connection
+            .query_row(
+                "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+             FROM events WHERE session_id = ?1 AND task_id = ?2 ORDER BY seq LIMIT 1",
+                params![session_id, task_id],
+                raw_event_record_from_row,
+            )
+            .optional()?;
+        let Some(first) = first else { return Ok(None) };
+        let first: EventRecord = first.try_into()?;
+        let last = connection.query_row(
+            "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+             FROM events WHERE session_id = ?1 AND task_id = ?2 AND correlation_id IS ?3
+             ORDER BY seq DESC LIMIT 1",
+            params![session_id, task_id, first.correlation_id],
+            raw_event_record_from_row,
+        )?;
+        Ok(Some((first, last.try_into()?)))
+    }
+
+    pub fn task_has_event_kind(
+        &self,
+        session: &str,
+        task: &str,
+        kind: &str,
+    ) -> Result<bool, EventStoreError> {
+        let connection = self.connection()?;
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE session_id = ?1 AND task_id = ?2 AND kind = ?3)",
+            params![session, task, kind], |row| row.get(0),
+        )?)
     }
 
     /// Returns the event with the exact globally unique event ID, if present.
@@ -400,6 +449,9 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> 
     if version < 2 {
         transaction.execute_batch(MIGRATION_V2)?;
     }
+    if version < 3 {
+        transaction.execute_batch(MIGRATION_V3)?;
+    }
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -469,6 +521,88 @@ mod tests {
     use tempfile::tempdir;
 
     use super::EventStore;
+
+    #[test]
+    fn schema_three_boundary_indexes_preserve_scope_and_correlation_after_migration() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        let mut connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(super::MIGRATION_V1).unwrap();
+        connection.execute_batch(super::MIGRATION_V2).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        super::apply_migrations(&mut connection).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        for (sql, index) in [
+            (
+                "SELECT seq FROM events WHERE session_id='s' AND task_id='t' ORDER BY seq LIMIT 1",
+                "events_session_task_seq",
+            ),
+            (
+                "SELECT seq FROM events WHERE session_id='s' AND task_id='t' AND correlation_id IS 'c' ORDER BY seq DESC LIMIT 1",
+                "events_session_task_correlation_seq",
+            ),
+        ] {
+            let plan = connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join(" ");
+            assert!(plan.contains(index), "{plan}");
+            assert!(
+                !plan.contains("SCAN events") && !plan.contains("TEMP B-TREE"),
+                "{plan}"
+            );
+        }
+        drop(connection);
+        let store = EventStore::open(&path).unwrap();
+        assert!(store.task_turn_boundary("s", "t").unwrap().is_none());
+        let mut draft = NewEvent::user_input("s", Some("t".into()), "first");
+        draft.correlation_id = Some("c".into());
+        let first = store.append(draft.clone()).unwrap();
+        draft.kind = event_kind::TURN_FINISHED.into();
+        draft.actor = EventActor::System;
+        let last = store.append(draft.clone()).unwrap();
+        draft.correlation_id = Some("another".into());
+        store.append(draft.clone()).unwrap();
+        draft.session_id = Some("other".into());
+        store.append(draft).unwrap();
+        assert!(
+            !store
+                .task_has_event_kind("s", "t", event_kind::TASK_COMPLETED)
+                .unwrap()
+        );
+        assert!(
+            store
+                .task_has_event_kind("s", "t", event_kind::TURN_FINISHED)
+                .unwrap()
+        );
+        drop(store);
+        let reopened = EventStore::open(&path).unwrap();
+        let boundary = reopened.task_turn_boundary("s", "t").unwrap().unwrap();
+        assert_eq!(boundary.0.event_id, first.event_id);
+        assert_eq!(boundary.1.event_id, last.event_id);
+        assert!(
+            reopened
+                .task_turn_boundary("missing", "t")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            reopened
+                .connection()
+                .unwrap()
+                .execute("DELETE FROM events", [])
+                .is_err()
+        );
+    }
 
     #[test]
     fn appends_and_filters_events() {

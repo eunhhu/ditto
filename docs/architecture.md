@@ -197,6 +197,15 @@ replay the complete turn without provider or artifact I/O. A final assistant
 response remains explicitly `unverified`, and the loop never emits
 `task.completed`.
 
+Explicit personal-agent runs connect that loop to CLI/HTTP under ADR 0016. The
+kernel durably records one client retry identity before dispatch, owns one
+bounded active execution independent of the HTTP connection, and derives
+terminal/interrupted state from indexed event boundaries. A verified context
+snapshot supplies current scoped memory; model inference is never housekeeping.
+The daemon defaults to disabled execution and only an explicit operator provider
+selection enables requests. Cancellation and graceful shutdown use the same
+loop token and deadline. No durable queue or automatic restart is implied.
+
 ## Improvement compiler
 
 Most experience remains trace data. Deterministic detectors identify repeated
