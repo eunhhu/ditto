@@ -29,7 +29,7 @@ repository = "https://github.com/eunhhu/ditto"
 anyhow = "1.0"
 async-stream = "0.3"
 axum = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 futures-core = "0.3"
