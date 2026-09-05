@@ -25,16 +25,20 @@
 
 ## Canonical state
 
-- Branch: `dev/task-008-user-memory`, based on main merge
-  `32bb4d16893403db6dd4b108d51ec7832980a934`. The user authorized merge and
+- Branch: `dev/task-009-agent-run`, based on main merge
+  `4f5d2ff8a0d7831c3a0e441fbda18264e0e18bdf` (Task 008, PR #13). The user authorized merge and
   continuation: PR #7 merged as `bc990a9e2e003ef04999867dc49d7843f3824847`, then
-  PR #12 was retargeted to main and merged as the base above. Existing tested
+  PR #12 was retargeted to main and merged as `32bb4d1`, followed by PR #13.
+  Existing tested
   commit ancestry was retained with merge commits.
 - Runtime: Rust daemon and CLI.
-- Durable stores: SQLite event spine plus local SHA-256 artifact objects.
+- Durable stores: SQLite event spine (schema 3 adds task/turn lookup indexes)
+  plus local SHA-256 artifact objects. Context projection remains schema 4.
 - Public mutation ingress: typed user-input and explicit input-to-memory
   promotion commands; arbitrary event append and trusted drafts are not public
   routes. The memory command derives node metadata and exact user provenance.
+  Explicit run commands separately admit a bounded model turn, inspect a durable
+  request identity, or signal cancellation; ordinary input remains record-only.
 - Streaming design: subscribe-first, high-water-bounded, paginated durable
   replay with sequence-gap and lag recovery.
 - Capability state: generated file-backed package headers with selected-only
@@ -104,6 +108,45 @@
   provider completion still is not task completion.
 
 ## Latest verified slice
+
+- Task 009 is complete under [ADR 0016](../adr/0016-explicit-agent-runs.md).
+  [Evidence](tasks/009-evidence.md) maps domain, HTTP, real CLI, migration, and
+  replay checks to the implementation. The roadmap now places the local personal
+  workflow before ecosystem expansion and explicitly includes scheduled-work
+  reliability and repeated-use cost/RAM/latency baselines.
+- CLI `run`, `run-status`, and `run-cancel` connect explicit requests to the
+  existing model/artifact loop. The kernel derives task identity from a canonical
+  session/request ID, appends input before dispatch, owns at most one public
+  run, and keeps no growing terminal-result cache. Identical retries never
+  restart the loop; changed text conflicts, and excess work is rejected without
+  a queue. Indexed event boundaries provide terminal or interrupted status.
+  Partial indexes cover `turn_*` correlations and the lookup explicitly selects
+  them; prior record-only input in the same task cannot occupy run identity or
+  turn a boundary lookup into a transcript sort.
+- Current scoped context comes from the existing verified projection with
+  supersession filtering and V1 lexical compilation. Selected provenance now
+  uses exact event-ID lookups rather than scanning session history. A direct
+  answer uses Auto tool choice; the legacy injected API retains Required first
+  tool behavior, including cancellation before lazy context materialization.
+  Both modes replay and retain explicitly unverified answers.
+- Request lifetime survives HTTP disconnect. Scoped cancellation and concurrent
+  shutdown drains share the loop token; guard cleanup on panic or dropped work
+  leaves a visible interrupted identity. No crash recovery reissues a provider
+  request. The CLI waits on SSE, retaining at most 128 bytes of event-name line,
+  and prints a recoverable ID before POST. SIGTERM closes event followers.
+- Final macOS canonical gate passed canaries, formatting, strict Clippy, 388
+  unit/integration tests and 24 compile-fail doctests, then the built-CLI smoke
+  test (413 total, 39 suites). That CLI test is now part of the canonical gate.
+  Rust 1.88 workspace/all-target checking passed. The rebuilt CLI/daemon Python
+  smoke passed six scenarios, including disabled execution without admission,
+  record-only input, open-SSE shutdown, and restart with memory retained.
+- The daemon defaults to a disabled provider. Explicit OpenAI selection uses
+  the existing closed profile and transport-only environment key with ephemeral
+  remote storage; enabled execution requires loopback. No paid/live model call
+  or provider credential access was performed during verification. Existing workspace
+  dependencies are reused; no new package, database, service, or runtime was
+  introduced. Linux results are recorded by the associated PR checks. Review
+  was local; no separate model-review approval is claimed.
 
 - Task 008 is complete under [ADR 0015](../adr/0015-explicit-user-memory.md).
   [Verification evidence](tasks/008-evidence.md) identifies the exact tested
@@ -443,8 +486,7 @@
 
 ## Intentionally deferred
 
-- daemon provider selection, paid-request scheduling, and general/effectful tool
-  continuation;
+- durable scheduled execution and general/effectful tool continuation;
 - additional providers, OpenAI model profiles, reasoning replay, remote cancel,
   and explicit prompt-cache breakpoints;
 - additional capability derivers, durable/cross-process authorization,
@@ -456,6 +498,14 @@
 
 ## Known engineering debt
 
+- Explicit runs compile the existing bounded active context snapshot using V1
+  lexical semantics; the separate V2 joint working-set contract is not silently
+  substituted into live epochs. There is no automatic transcript injection,
+  cross-session memory, or production semantic model-context retrieval.
+- Artifact-root authorization still searches paginated session history and
+  artifact reads verify the whole object. Measure the actual user workflow
+  before adding derived indexes/caches; the new run path is not evidence of
+  constant end-to-end latency or zero overhead.
 - Explicit memory listing materializes the existing bounded active session
   snapshot before forming an ID page. Its 10,000-candidate and cumulative byte
   limits also include other active context in that session; measure large-set

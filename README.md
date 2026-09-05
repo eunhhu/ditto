@@ -45,9 +45,11 @@ The executable foundation includes:
 - orthogonal effect profiles and fail-closed lease primitives;
 - versioned provider-neutral model IR, a closed OpenAI Responses adapter, and an
   injected-driver read-only artifact continuation loop;
+- explicit CLI/HTTP model runs with current session context, durable retry
+  identity, cancellation, and restart inspection;
 - repository-native instructions for long-running coding agents.
 
-Daemon provider selection and paid-request scheduling, additional model
+Scheduled execution, additional model
 providers, effectful capability execution, SSH, a production embedding
 worker/cache, authenticated remote gateways, completion verifiers, and the
 improvement compiler are still deferred. They are not represented by fake
@@ -83,6 +85,28 @@ The daemon refuses non-loopback binding without the explicitly unsafe
 `--allow-unauthenticated-remote` escape hatch. That flag does not add
 authentication; use loopback until an authenticated gateway exists.
 
+To answer requests, explicitly start the daemon with `--provider openai` and
+provide `OPENAI_API_KEY` through its environment. This selects the existing
+closed `gpt-5.6` adapter and may incur provider charges. The default is
+`--provider disabled`; startup, input recording, memory operations, and recovery
+make no model calls. Enabled model execution requires loopback even with the
+remote escape hatch.
+
+```bash
+cargo run -p ditto-cli -- run "What is my meeting preference?"
+# run prints the request ID before submission, then waits on durable events.
+# Use --detach to return after acceptance, or --request-id ID for an exact retry.
+cargo run -p ditto-cli -- run-status REQUEST_ID
+cargo run -p ditto-cli -- run-cancel REQUEST_ID
+```
+
+Runs default to the `personal` session. Relevant current session memory is
+compiled into context; prior conversation text is not automatically reinserted.
+The model can answer directly or read an already-rooted, same-scope artifact.
+General file/process tools are not connected yet. One run executes at a time;
+other work is rejected without queuing. An interrupted run is inspectable and
+never automatically restarted. A model answer remains `unverified`.
+
 ## HTTP surface
 
 | Method | Path | Purpose |
@@ -91,6 +115,9 @@ authentication; use loopback until an authenticated gateway exists.
 | `POST` | `/v1/commands/input` | Submit user input; kernel assigns event authority |
 | `POST` | `/v1/commands/memory` | Save an existing same-session user input, optionally replacing an active memory |
 | `GET` | `/v1/memories` | Inspect current session memories with an ID cursor |
+| `POST` | `/v1/commands/run` | Explicitly admit one model run using a stable request ID |
+| `GET` | `/v1/runs` | Inspect a run by session and request ID |
+| `POST` | `/v1/commands/run/cancel` | Signal cancellation of the matching live run |
 | `GET` | `/v1/events` | Query one durable event page |
 | `GET` | `/v1/stream` | Replay all pages through a high-water mark, then follow |
 | `GET` | `/v1/capabilities` | Catalogue-level capability card search |
@@ -139,6 +166,9 @@ See [`docs/architecture.md`](docs/architecture.md).
 # End-to-end memory verification with disposable local data:
 cargo build -p ditto-daemon -p ditto-cli --locked
 python3 scripts/smoke-user-memory.py
+python3 scripts/smoke-agent-run.py
+# Actual CLI + daemon router + deterministic model fixture, without API calls:
+cargo test -p ditto-daemon built_cli_run_wait_retry_status_and_cancel -- --ignored
 ```
 
 Long-running Codex or other coding-agent work starts at [`AGENTS.md`](AGENTS.md)
