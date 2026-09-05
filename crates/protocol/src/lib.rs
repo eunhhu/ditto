@@ -4,6 +4,46 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const MAX_AGENT_RUN_TEXT_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartAgentRunCommand {
+    pub request_id: String,
+    pub session_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRunQuery {
+    pub request_id: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunStatus {
+    Running,
+    Unverified,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunResponse {
+    pub request_id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub turn_id: String,
+    pub status: AgentRunStatus,
+    pub cancellation_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+}
+
 pub mod event_kind {
     pub const INPUT_RECEIVED: &str = "input.received";
     pub const RUNTIME_STARTED: &str = "runtime.started";

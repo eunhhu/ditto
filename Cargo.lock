@@ -406,9 +406,11 @@ dependencies = [
  "anyhow",
  "clap",
  "ditto-protocol",
+ "futures-util",
  "reqwest",
  "serde_json",
  "tokio",
+ "ulid",
 ]
 
 [[package]]
@@ -450,6 +452,8 @@ dependencies = [
  "clap",
  "ditto-capability",
  "ditto-kernel",
+ "ditto-model",
+ "ditto-model-openai",
  "ditto-protocol",
  "futures-core",
  "futures-util",
