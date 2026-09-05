@@ -8,6 +8,40 @@ pub const MAX_AGENT_RUN_TEXT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct StartSortCommand {
+    pub request_id: String,
+    pub session_id: String,
+    pub text: String,
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortRunStatus {
+    Running,
+    Verified,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortRunResponse {
+    pub request_id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub turn_id: String,
+    pub status: SortRunStatus,
+    pub cancellation_requested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StartAgentRunCommand {
     pub request_id: String,
     pub session_id: String,
@@ -45,6 +79,9 @@ pub struct AgentRunResponse {
 }
 
 pub mod event_kind {
+    pub const SORT_REQUESTED: &str = "sort.requested";
+    pub const SORT_STARTED: &str = "sort.started";
+    pub const SORT_FAILED: &str = "sort.failed";
     pub const INPUT_RECEIVED: &str = "input.received";
     pub const RUNTIME_STARTED: &str = "runtime.started";
     pub const CONTEXT_COMPILED: &str = "context.compiled";

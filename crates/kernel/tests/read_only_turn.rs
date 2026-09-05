@@ -520,7 +520,7 @@ async fn run_success(
 async fn successful_two_request_continuation_persists_exact_epoch_schema_history_and_replays() {
     let fixture = Fixture::new();
     let loaded = fixture.kernel.capability_load_metrics();
-    assert_eq!(loaded.headers_read, 2);
+    assert_eq!(loaded.headers_read, 3);
     assert_eq!(loaded.legacy_manifests_read, 0);
     assert_eq!(loaded.manifests_paged, 0);
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));

@@ -239,6 +239,22 @@ impl ArtifactStore {
         self.read_verified_range_internal(reference, offset, length, |_| {})
     }
 
+    /// Verify through the same descriptor with a tighter operation-specific
+    /// whole-object limit. Oversized objects stop hashing at that bound.
+    pub fn read_verified_range_with_object_limit(
+        &self,
+        reference: &ArtifactRef,
+        offset: u64,
+        length: usize,
+        max_object_bytes: u64,
+    ) -> Result<VerifiedArtifactRange, ArtifactStoreError> {
+        let bounded = Self {
+            max_object_bytes: self.max_object_bytes.min(max_object_bytes),
+            ..self.clone()
+        };
+        bounded.read_verified_range(reference, offset, length)
+    }
+
     fn read_verified_range_internal<F>(
         &self,
         reference: &ArtifactRef,

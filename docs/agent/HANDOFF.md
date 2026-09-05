@@ -25,8 +25,8 @@
 
 ## Canonical state
 
-- Branch: `dev/task-009-agent-run`, based on main merge
-  `4f5d2ff8a0d7831c3a0e441fbda18264e0e18bdf` (Task 008, PR #13). The user authorized merge and
+- Branch: `dev/task-010-local-process`, based on main merge
+  `aefe9d28be564db7a9fe1205fe0c9f996b2e2ec9` (Task 009, PR #14). The user authorized merge and
   continuation: PR #7 merged as `bc990a9e2e003ef04999867dc49d7843f3824847`, then
   PR #12 was retargeted to main and merged as `32bb4d1`, followed by PR #13.
   Existing tested
@@ -39,6 +39,8 @@
   routes. The memory command derives node metadata and exact user provenance.
   Explicit run commands separately admit a bounded model turn, inspect a durable
   request identity, or signal cancellation; ordinary input remains record-only.
+  A separate explicit sort command accepts bounded file content and unique mode,
+  with typed status/cancel and kernel-owned authority. Sort routes are loopback-only.
 - Streaming design: subscribe-first, high-water-bounded, paginated durable
   replay with sequence-gap and lag recovery.
 - Capability state: generated file-backed package headers with selected-only
@@ -77,7 +79,7 @@
   only by an opaque, non-serializable context-owned ranking and is revalidated
   after compilation.
 - Policy state: sealed canonical invocations carry only harness-derived effect,
-  typed resource, and local-builtin placement authority. A live epoch moves
+  typed resource, and local builtin/process placement authority. A live epoch moves
   monotonically from paging to authorization-sealed and issues exactly one
   non-wire, non-cloneable authorization ticket. Policy consumes that ticket
   into one expiring ledger whose cloned handles share one mutex; dropping any
@@ -85,9 +87,9 @@
   owns no authorizer. The mutex atomically binds invocation IDs to digests,
   evaluates a trusted static policy or harness-selected lease, consumes a
   successful lease at most once, and issues a sealed epoch- and invocation-
-  bound permit or approval-required outcome. Any future effectful worker must
-  consume a sealed non-cloneable one-shot `ExecutionClaim`; no such worker is
-  connected. The existing bounded `artifact.read` executor still requires a
+  bound permit or approval-required outcome. The closed `artifact.sort` process
+  worker consumes a sealed non-cloneable one-shot `ExecutionClaim` by value.
+  The existing bounded `artifact.read` executor still requires a
   matching no-approval static-policy permit.
 - Model state: `ditto-model` owns version 1 of the provider-neutral request,
   driver, and backpressured stream-event contract. It preserves ordered stable
@@ -108,6 +110,41 @@
   provider completion still is not task completion.
 
 ## Latest verified slice
+
+- Task 010 is complete under [ADR 0017](../adr/0017-bounded-local-sort.md).
+  [Evidence](tasks/010-evidence.md) maps authority, real-process, verifier,
+  recovery and CLI/HTTP checks to the implementation.
+- CLI `sort FILE [--unique]`, `sort-status` and `sort-cancel` perform a closed
+  local operation with no provider. Canonical identity binds exact input bytes
+  and unique mode. Input artifacts and versioned request/dispatch/result events
+  use the existing spine and task indexes; schema versions are unchanged.
+  Model and sort requests share the existing one-active-run slot, including
+  cancellation, shutdown and guard cleanup. Same-ID retry/restart never reruns
+  accepted work, and there is no growing terminal-result map.
+- `ditto-artifact-sort` is the new capability-owned execution/verification crate.
+  It validates exact manifest/schema/deriver revision, canonical input hash and
+  one-shot claim before starting `/usr/bin/sort` with fixed arguments, cleared
+  environment, C locale, private scratch and piped bounded I/O. Input is at most
+  64 KiB / 4096 lines, output at most 65537 bytes, lease at most 30 seconds and
+  owned process execution at most five seconds. CPU/file/core limits apply;
+  cancellation/error/drop terminate the process group and the direct child is
+  reaped. No shell, arbitrary program, PATH lookup, inherited credentials,
+  background process or new service is enabled. OS sort is trusted code; this
+  does not claim an OS sandbox or wall-clock containment after daemon SIGKILL.
+- The independent verifier checks byte order, LF termination and line
+  multiplicities or unique set equality. Only its sealed result reaches the
+  new sort-specific `task.completed` producer. Status verifies exact causal
+  artifact roots, bounded content hashes and line evidence before returning
+  `verified`; exit code alone is insufficient. Broader model answers remain
+  unverified and automatic model-to-process dispatch is deferred.
+- The macOS canonical gate passed canary, format, strict Clippy, 403
+  unit/integration tests, 25 compile-fail doctests, and both required built-CLI
+  tests: 430 total across 44 suites. The new CLI test is part of the gate.
+  Rust 1.88 workspace/all-target checking also passed.
+  Production binary smoke passed sort/unique, retry/conflict, status/cancel,
+  FIFO rejection and restart without execution. It recorded exactly one
+  process dispatch, one verified completion and zero model requests. New code
+  received local review; no separate model-review approval is claimed.
 
 - Task 009 is complete under [ADR 0016](../adr/0016-explicit-agent-runs.md).
   [Evidence](tasks/009-evidence.md) maps domain, HTTP, real CLI, migration, and
@@ -491,9 +528,9 @@
   and explicit prompt-cache breakpoints;
 - additional capability derivers, durable/cross-process authorization,
   approval fulfillment, and the capability worker protocol;
-- device registry, local process runner, SSH transport, and secrets;
+- device registry, general process profiles/model dispatch, SSH transport, and secrets;
 - a production embedding worker/provider and persisted embedding cache;
-- completion verifiers and improvement compiler;
+- additional completion verifiers and improvement compiler;
 - authenticated remote gateway and web inspector.
 
 ## Known engineering debt
@@ -532,7 +569,12 @@
 - Legacy excluded context receipts are trusted but do not yet have an
   independent encoded payload ceiling; address that before making them a new
   durable wire input.
-- Task-completion admission is a high-water check followed by append rather than
-  an atomic verifier/admission transaction; no verifier producer exists yet.
+- Generic model-task completion admission remains a high-water check followed
+  by append rather than an atomic verifier/admission transaction. The new sort
+  producer uses dedicated `sort_*` tasks and the shared slot gate; it does not
+  add a completion producer for model `run_*` tasks.
+- The first process profile is explicit sort only. Model-driven process grants,
+  broader programs, host-crash containment and additional task verifiers need
+  separate contracts; do not widen the current resource claim to arbitrary code.
 
 Update this file only after code and checks establish a new fact.

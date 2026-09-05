@@ -180,6 +180,29 @@ static-policy permit bound to the canonical invocation. Selection and replay
 validate the complete manifest/card/schema relationship, not only capability ID
 and version.
 
+### Closed local artifact sort
+
+`artifact.sort` is the first executable process profile. Its exact versioned
+schema accepts only an artifact reference and required unique boolean. The
+registered deriver returns content/reversible/local/user and the exact input
+artifact resource. Reversible mutation covers the new immutable result artifact
+and disposable implementation-owned scratch; it grants no caller-selected path.
+
+The worker consumes a matching unexpired ExecutionClaim, rechecks the exact
+registered manifest/schema/deriver revision and input hash, and spawns only
+`/usr/bin/sort` with optional `-u`. Installed OS sort is trusted code; the
+working directory is not a sandbox for arbitrary programs. LocalProcess
+placement alone cannot select an executable or invoke this worker with another
+capability. No general device/process/SSH tool is enabled.
+
+Input is capped at 64 KiB / 4096 UTF-8 lines; output at 65537 bytes. Cleared
+environment, fixed C locale, private scratch, closed stdin, null stderr,
+CPU/file/core limits, a five-second owned lifetime and process-group cancellation
+bound execution. The independent `sorted-line-multiplicity-v1` verifier checks
+byte order, LF termination, and exact line counts or unique set equality.
+Only an explicitly requested sort currently receives the one-call lease;
+model dispatch and approval fulfillment remain deferred.
+
 ## Disclosure levels
 
 - L0 namespace map: stable and tiny.
