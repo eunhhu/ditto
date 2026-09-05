@@ -7,6 +7,8 @@ resource-efficient as memories, capabilities, schedules, and experience grow.
 Its product goals are lower memory overhead, focused context, reliable memory
 and scheduled work, and improvements that earn their ongoing cost. These are
 goals to measure, not performance claims already established by the foundation.
+**Zero cost, zero overhead** is a primary design premise, including development
+effort and future technical debt converging toward zero.
 
 > Context is compiled. Capabilities are paged. Effects are leased. Improvements
 > are promoted.
