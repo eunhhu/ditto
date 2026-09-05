@@ -28,7 +28,7 @@ use thiserror::Error;
 /// Version of the durable context-node event payload.
 pub const CONTEXT_NODE_EVENT_VERSION: u16 = 1;
 /// Version of the independently rebuildable projection schema.
-pub const CONTEXT_PROJECTION_SCHEMA_VERSION: i64 = 3;
+pub const CONTEXT_PROJECTION_SCHEMA_VERSION: i64 = 4;
 /// Fixed filename of the separate derived context cache.
 pub const CONTEXT_PROJECTION_DATABASE_FILENAME: &str = "context-projection.db";
 /// Maximum UTF-8 byte length of a durable node ID.
@@ -45,17 +45,32 @@ pub const MAX_CONTEXT_SUPERSEDES: usize = 64;
 pub const MAX_SERIALIZED_CONTEXT_NODE_BYTES: usize = 131_072;
 /// Maximum serialized JSON byte length of a version-1 node payload.
 pub const MAX_SERIALIZED_CONTEXT_PAYLOAD_BYTES: usize = 131_072;
+/// Maximum immutable context identities retained for one session index.
+pub const MAX_SESSION_INDEX_IDENTITIES: u64 = 65_536;
+/// Maximum accounted bytes retained for one session index.
+pub const MAX_SESSION_INDEX_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum canonical events inspected by one normal delta synchronization.
+pub const MAX_NORMAL_DELTA_EVENTS: u64 = 65_536;
+/// Maximum serialized context payload bytes inspected by one normal delta.
+pub const MAX_NORMAL_DELTA_CONTEXT_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum deterministic verification work charged by one normal delta.
+pub const MAX_NORMAL_DELTA_VERIFICATION_WORK: u64 = 2_000_000;
 
 const SYNC_PAGE_SIZE: usize = 500;
 const ZERO_TASK_KEY: &str = "";
 const EVENT_STORE_DATABASE_FILENAME: &str = "state.db";
+const INDEX_ENTRY_FIXED_BYTES: u64 = 8 * 5 + 32 * 3;
+const GLOBAL_INDEX_DIGEST_DOMAIN: &[u8] = b"ditto.context-index.global.v1";
+const SESSION_INDEX_DIGEST_DOMAIN: &[u8] = b"ditto.context-index.session.v1";
+const PROVENANCE_DIGEST_DOMAIN: &[u8] = b"ditto.context-index.provenance.v1";
 
-const SCHEMA_V3: &str = r#"
+const SCHEMA_V4: &str = r#"
 CREATE TABLE projection_checkpoint (
     singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_version  INTEGER NOT NULL,
     through_seq     INTEGER NOT NULL CHECK (through_seq >= 0),
     through_event_id TEXT,
+    canonical_state_digest BLOB NOT NULL CHECK (length(canonical_state_digest) = 32),
     CHECK (
         (through_seq = 0 AND through_event_id IS NULL)
         OR (through_seq > 0 AND through_event_id IS NOT NULL)
@@ -63,8 +78,9 @@ CREATE TABLE projection_checkpoint (
 );
 
 INSERT INTO projection_checkpoint (
-    singleton, schema_version, through_seq, through_event_id
-) VALUES (1, 3, 0, NULL);
+    singleton, schema_version, through_seq, through_event_id,
+    canonical_state_digest
+) VALUES (1, 4, 0, NULL, zeroblob(32));
 
 CREATE TABLE projected_nodes (
     session_id   TEXT NOT NULL,
@@ -120,6 +136,37 @@ CREATE TABLE supersession_edges (
 
 CREATE INDEX supersession_edges_target
     ON supersession_edges(session_id, task_key, superseded_node_id);
+
+CREATE TABLE session_index_nodes (
+    session_id          TEXT NOT NULL,
+    node_id             TEXT NOT NULL,
+    task_id             TEXT,
+    event_seq           INTEGER NOT NULL UNIQUE,
+    event_id            TEXT NOT NULL UNIQUE,
+    node_digest         BLOB NOT NULL CHECK (length(node_digest) = 32),
+    provenance_digest   BLOB NOT NULL CHECK (length(provenance_digest) = 32),
+    source_count        INTEGER NOT NULL CHECK (source_count BETWEEN 1 AND 64),
+    causation_seq       INTEGER NOT NULL CHECK (causation_seq > 0),
+    causation_event_id  TEXT NOT NULL,
+    supersession_digest BLOB NOT NULL CHECK (length(supersession_digest) = 32),
+    supersession_count  INTEGER NOT NULL CHECK (supersession_count BETWEEN 0 AND 64),
+    accounted_bytes     INTEGER NOT NULL CHECK (accounted_bytes > 0),
+    PRIMARY KEY (session_id, node_id)
+);
+
+CREATE INDEX session_index_nodes_scope
+    ON session_index_nodes(session_id, task_id, node_id);
+
+CREATE TABLE session_index_state (
+    session_id       TEXT PRIMARY KEY,
+    through_seq      INTEGER NOT NULL CHECK (through_seq > 0),
+    through_event_id TEXT NOT NULL,
+    state_digest     BLOB NOT NULL CHECK (length(state_digest) = 32),
+    entry_count      INTEGER NOT NULL CHECK (entry_count BETWEEN 1 AND 65536),
+    accounted_bytes  INTEGER NOT NULL CHECK (
+        accounted_bytes > 0 AND accounted_bytes <= 268435456
+    )
+);
 "#;
 
 /// Version-1 payload for `context.node.recorded`.
@@ -233,6 +280,7 @@ pub struct ProjectionCheckpoint {
     pub schema_version: i64,
     pub through_seq: i64,
     pub through_event_id: Option<String>,
+    pub canonical_state_digest: [u8; 32],
 }
 
 impl ProjectionCheckpoint {
@@ -241,6 +289,7 @@ impl ProjectionCheckpoint {
             schema_version: CONTEXT_PROJECTION_SCHEMA_VERSION,
             through_seq: 0,
             through_event_id: None,
+            canonical_state_digest: empty_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN),
         }
     }
 }
@@ -251,12 +300,14 @@ pub struct ProjectionSync {
     pub captured_high_water: i64,
     pub checkpoint: ProjectionCheckpoint,
     pub rebuilt: bool,
+    source_index_recovery: bool,
 }
 
 /// Canonical recording identity for one session-wide node ID.
 ///
-/// Admission retries obtain this from bounded event-spine history, never from
-/// a projection row, and never compare or rewrite the committed payload.
+/// Admission retries obtain this only from the process-local source-verified
+/// compact index, never from an unverified projection row, and never compare or
+/// rewrite the committed payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedContextIdentity {
     pub session_id: String,
@@ -334,6 +385,24 @@ pub struct ProjectionVerificationMetrics {
     pub delta_synchronizations: u64,
     pub fast_snapshots: u64,
     pub cache_repairs: u64,
+    pub full_replay_events: u64,
+    pub delta_events: u64,
+    pub delta_context_payload_bytes: u64,
+    pub delta_verification_work: u64,
+    pub admission_index_lookups: u64,
+}
+
+/// Inspectable derived checkpoint for one compact session index.
+///
+/// This value carries no admission authority; only the process-local source
+/// verification proof can authorize index lookups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIndexCheckpoint {
+    pub through_seq: i64,
+    pub through_event_id: String,
+    pub canonical_state_digest: [u8; 32],
+    pub identity_count: u64,
+    pub accounted_bytes: u64,
 }
 
 /// Typed projection, durable-admission, and V2 scan failures.
@@ -468,6 +537,18 @@ pub enum ContextProjectionError {
         "context projection snapshot remains inconsistent with canonical history through sequence {high_water} after one rebuild"
     )]
     ProjectionSnapshotIntegrityMismatch { high_water: i64 },
+    #[error(
+        "compact session index remains inconsistent with canonical history through sequence {high_water} after one rebuild"
+    )]
+    SessionIndexIntegrityMismatch { high_water: i64 },
+    #[error(
+        "{dimension} attempted {attempted}, exceeding the compact session-index limit {maximum}"
+    )]
+    SessionIndexLimitExceeded {
+        dimension: &'static str,
+        attempted: u64,
+        maximum: u64,
+    },
     #[error("projection singleton checkpoint disappeared during page application")]
     MissingCheckpointDuringPage,
 }
@@ -489,12 +570,77 @@ pub struct ContextProjection {
 struct SourceVerification {
     checkpoint: ProjectionCheckpoint,
     sqlite_data_version: i64,
+    sessions: HashMap<String, HashMap<String, SessionIndexIdentity>>,
 }
 
 #[derive(Debug, Default)]
 struct ProjectionVerificationState {
     source: Option<SourceVerification>,
     metrics: ProjectionVerificationMetrics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchUpMode {
+    FullReplay,
+    VerifiedDelta,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CatchUpWork {
+    events: u64,
+    context_payload_bytes: u64,
+    verification_work: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DeltaVerificationBudget {
+    work: CatchUpWork,
+}
+
+impl DeltaVerificationBudget {
+    fn charge_event(&mut self) -> Result<(), ContextProjectionError> {
+        charge_bounded_counter(
+            &mut self.work.events,
+            1,
+            "normal delta events",
+            MAX_NORMAL_DELTA_EVENTS,
+        )?;
+        self.charge_work(1)
+    }
+
+    fn charge_context_payload(&mut self, bytes: usize) -> Result<(), ContextProjectionError> {
+        let bytes = u64::try_from(bytes).map_err(|_| {
+            ContextProjectionError::SessionIndexLimitExceeded {
+                dimension: "normal delta context payload bytes",
+                attempted: u64::MAX,
+                maximum: MAX_NORMAL_DELTA_CONTEXT_BYTES,
+            }
+        })?;
+        charge_bounded_counter(
+            &mut self.work.context_payload_bytes,
+            bytes,
+            "normal delta context payload bytes",
+            MAX_NORMAL_DELTA_CONTEXT_BYTES,
+        )?;
+        self.charge_work(1)
+    }
+
+    fn charge_lookup(&mut self) -> Result<(), ContextProjectionError> {
+        self.charge_work(1)
+    }
+
+    fn charge_work(&mut self, amount: u64) -> Result<(), ContextProjectionError> {
+        charge_bounded_counter(
+            &mut self.work.verification_work,
+            amount,
+            "normal delta verification work",
+            MAX_NORMAL_DELTA_VERIFICATION_WORK,
+        )
+    }
+
+    fn remaining_events(&self) -> u64 {
+        MAX_NORMAL_DELTA_EVENTS.saturating_sub(self.work.events)
+    }
 }
 
 #[cfg(test)]
@@ -574,6 +720,26 @@ impl ContextProjection {
         Ok(self.verification_state()?.metrics)
     }
 
+    pub fn session_index_checkpoint(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionIndexCheckpoint>, ContextProjectionError> {
+        SessionId::new(session_id)?;
+        let _gate = self.sync_gate()?;
+        let connection = self.connection()?;
+        Ok(
+            read_session_index_state(&connection, session_id)?.map(|state| {
+                SessionIndexCheckpoint {
+                    through_seq: state.through_seq,
+                    through_event_id: state.through_event_id,
+                    canonical_state_digest: state.state_digest,
+                    identity_count: state.entry_count,
+                    accounted_bytes: state.accounted_bytes,
+                }
+            }),
+        )
+    }
+
     fn has_source_verification(&self) -> Result<bool, ContextProjectionError> {
         Ok(self.verification_state()?.source.is_some())
     }
@@ -586,12 +752,6 @@ impl ContextProjection {
             .source
             .as_ref()
             .map(|verified| verified.checkpoint.clone()))
-    }
-
-    fn sqlite_data_version(&self) -> Result<i64, ContextProjectionError> {
-        self.connection()?
-            .pragma_query_value(None, "data_version", |row| row.get(0))
-            .map_err(Into::into)
     }
 
     fn source_verification_matches_cache(&self) -> Result<bool, ContextProjectionError> {
@@ -617,11 +777,18 @@ impl ContextProjection {
         full_replay: bool,
         cache_repair: bool,
     ) -> Result<(), ContextProjectionError> {
-        let sqlite_data_version = self.sqlite_data_version()?;
+        let (sqlite_data_version, sessions) = {
+            let connection = self.connection()?;
+            let sqlite_data_version =
+                connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
+            let sessions = load_verified_session_identities(&connection, checkpoint)?;
+            (sqlite_data_version, sessions)
+        };
         let mut state = self.verification_state()?;
         state.source = Some(SourceVerification {
             checkpoint: checkpoint.clone(),
             sqlite_data_version,
+            sessions,
         });
         if full_replay {
             state.metrics.full_replays = state.metrics.full_replays.saturating_add(1);
@@ -637,12 +804,43 @@ impl ContextProjection {
         checkpoint: &ProjectionCheckpoint,
         advanced: bool,
     ) -> Result<(), ContextProjectionError> {
-        let sqlite_data_version = self.sqlite_data_version()?;
+        let after_seq = self
+            .source_verification_checkpoint()?
+            .map_or(0, |checkpoint| checkpoint.through_seq);
+        let (sqlite_data_version, updates) = {
+            let connection = self.connection()?;
+            let sqlite_data_version =
+                connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
+            let updates =
+                load_session_identity_updates(&connection, after_seq, checkpoint.through_seq)?;
+            (sqlite_data_version, updates)
+        };
         let mut state = self.verification_state()?;
-        state.source = Some(SourceVerification {
-            checkpoint: checkpoint.clone(),
-            sqlite_data_version,
-        });
+        let source =
+            state
+                .source
+                .as_mut()
+                .ok_or(ContextProjectionError::SessionIndexIntegrityMismatch {
+                    high_water: checkpoint.through_seq,
+                })?;
+        for (session_id, node_id, identity) in updates {
+            if source
+                .sessions
+                .entry(session_id.clone())
+                .or_default()
+                .insert(node_id.clone(), identity)
+                .is_some()
+            {
+                return Err(ContextProjectionError::CorruptProjectionRow {
+                    seq: checkpoint.through_seq,
+                    reason: format!(
+                        "session index delta repeats identity ({session_id}, {node_id})"
+                    ),
+                });
+            }
+        }
+        source.checkpoint = checkpoint.clone();
+        source.sqlite_data_version = sqlite_data_version;
         if advanced {
             state.metrics.delta_synchronizations =
                 state.metrics.delta_synchronizations.saturating_add(1);
@@ -653,6 +851,41 @@ impl ContextProjection {
     fn increment_fast_snapshot(&self) -> Result<(), ContextProjectionError> {
         let mut state = self.verification_state()?;
         state.metrics.fast_snapshots = state.metrics.fast_snapshots.saturating_add(1);
+        Ok(())
+    }
+
+    fn record_catch_up_work(
+        &self,
+        mode: CatchUpMode,
+        work: CatchUpWork,
+    ) -> Result<(), ContextProjectionError> {
+        let mut state = self.verification_state()?;
+        match mode {
+            CatchUpMode::FullReplay => {
+                state.metrics.full_replay_events =
+                    state.metrics.full_replay_events.saturating_add(work.events);
+            }
+            CatchUpMode::VerifiedDelta => {
+                state.metrics.delta_events = state.metrics.delta_events.saturating_add(work.events);
+                state.metrics.delta_context_payload_bytes = state
+                    .metrics
+                    .delta_context_payload_bytes
+                    .saturating_add(work.context_payload_bytes);
+                state.metrics.delta_verification_work = state
+                    .metrics
+                    .delta_verification_work
+                    .saturating_add(work.verification_work);
+            }
+        }
+        Ok(())
+    }
+
+    fn record_admission_index_lookups(&self, lookups: u64) -> Result<(), ContextProjectionError> {
+        let mut state = self.verification_state()?;
+        state.metrics.admission_index_lookups = state
+            .metrics
+            .admission_index_lookups
+            .saturating_add(lookups);
         Ok(())
     }
 
@@ -678,8 +911,63 @@ impl ContextProjection {
                 checkpoint.through_seq < synchronized.checkpoint.through_seq
             });
             self.record_delta_verification(&synchronized.checkpoint, advanced)?;
+        } else if synchronized.source_index_recovery
+            && self.recover_source_verification_from_cache(&synchronized.checkpoint)?
+        {
+            let mut state = self.verification_state()?;
+            state.metrics.delta_synchronizations =
+                state.metrics.delta_synchronizations.saturating_add(1);
         }
         Ok(())
+    }
+
+    fn recover_source_verification_from_cache(
+        &self,
+        checkpoint: &ProjectionCheckpoint,
+    ) -> Result<bool, ContextProjectionError> {
+        let Some(prior) = self.verification_state()?.source.clone() else {
+            return Ok(false);
+        };
+        let (sqlite_data_version, actual, updates) = {
+            let connection = self.connection()?;
+            let actual = match load_verified_session_identities(&connection, checkpoint) {
+                Ok(actual) => actual,
+                Err(
+                    ContextProjectionError::SessionIndexIntegrityMismatch { .. }
+                    | ContextProjectionError::CorruptProjectionRow { .. }
+                    | ContextProjectionError::SessionIndexLimitExceeded { .. },
+                ) => return Ok(false),
+                Err(error) => return Err(error),
+            };
+            let updates = load_session_identity_updates(
+                &connection,
+                prior.checkpoint.through_seq,
+                checkpoint.through_seq,
+            )?;
+            let sqlite_data_version =
+                connection.pragma_query_value(None, "data_version", |row| row.get(0))?;
+            (sqlite_data_version, actual, updates)
+        };
+        let mut expected = prior.sessions;
+        for (session_id, node_id, identity) in updates {
+            if expected
+                .entry(session_id)
+                .or_default()
+                .insert(node_id, identity)
+                .is_some()
+            {
+                return Ok(false);
+            }
+        }
+        if expected != actual {
+            return Ok(false);
+        }
+        self.verification_state()?.source = Some(SourceVerification {
+            checkpoint: checkpoint.clone(),
+            sqlite_data_version,
+            sessions: actual,
+        });
+        Ok(true)
     }
 
     fn snapshot_sync_locked(
@@ -891,10 +1179,20 @@ impl ContextProjection {
             let synchronized = self.snapshot_sync_locked(event_store, high_water)?;
             if synchronized.rebuilt {
                 self.record_source_verification(&synchronized.checkpoint, true, true)?;
+                rebuilt = true;
+            } else if self.recover_source_verification_from_cache(&synchronized.checkpoint)? {
+                if source_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.through_seq < high_water)
+                {
+                    let mut state = self.verification_state()?;
+                    state.metrics.delta_synchronizations =
+                        state.metrics.delta_synchronizations.saturating_add(1);
+                }
             } else {
                 self.rebuild_verified_through_locked(event_store, high_water, true)?;
+                rebuilt = true;
             }
-            rebuilt = true;
         } else {
             self.rebuild_verified_through_locked(event_store, high_water, had_source_verification)?;
             rebuilt = true;
@@ -1019,10 +1317,8 @@ impl ContextProjection {
         self.capture_snapshot_locked(session_id, task_id)
     }
 
-    /// Look up one committed identity in canonical session history through an
-    /// explicit captured high-water.
-    ///
-    /// The projection database is deliberately not consulted for authority.
+    /// Look up one committed identity through the source-verified compact
+    /// session index at an explicit captured high-water.
     pub fn lookup_committed_identity(
         &self,
         event_store: &EventStore,
@@ -1045,14 +1341,15 @@ impl ContextProjection {
                 available,
             });
         }
-        let targets = HashSet::from([node_id.to_owned()]);
-        let view = canonical_session_admission_view(event_store, high_water, session_id, &targets)?;
-        Ok(view.rows.get(node_id).map(|row| CommittedContextIdentity {
+        self.ensure_verified_index_locked(event_store, high_water)?;
+        let identity = self.source_index_identity(session_id, node_id)?;
+        self.record_admission_index_lookups(1)?;
+        Ok(identity.map(|identity| CommittedContextIdentity {
             session_id: session_id.to_owned(),
-            task_id: row.task_id.clone(),
+            task_id: identity.task_id,
             node_id: node_id.to_owned(),
-            event_id: row.event_id.clone(),
-            event_seq: row.event_seq,
+            event_id: identity.event_id,
+            event_seq: identity.event_seq,
         }))
     }
 
@@ -1081,23 +1378,7 @@ impl ContextProjection {
                 available,
             });
         }
-        {
-            let connection = self.connection()?;
-            let checkpoint = read_checkpoint(&connection)?.ok_or_else(|| {
-                ContextProjectionError::ProjectionNotSynchronized {
-                    checkpoint: 0,
-                    high_water,
-                }
-            })?;
-            if checkpoint.through_seq != high_water
-                || !checkpoint_anchor_matches(&checkpoint, event_store)?
-            {
-                return Err(ContextProjectionError::ProjectionNotSynchronized {
-                    checkpoint: checkpoint.through_seq,
-                    high_water,
-                });
-            }
-        }
+        self.ensure_verified_index_locked(event_store, high_water)?;
 
         if draft.session_id.trim().is_empty() {
             return Err(ContextProjectionError::InvalidScope {
@@ -1105,20 +1386,13 @@ impl ContextProjection {
                 reason: "session_id is empty".into(),
             });
         }
-        let mut rebuilt = false;
-        let proposed_targets = HashSet::from([draft.node.id.clone()]);
-        let proposed_view = self.admission_view_locked(
-            event_store,
-            high_water,
-            &draft.session_id,
-            &proposed_targets,
-            &mut rebuilt,
-        )?;
-        if let Some(existing) = proposed_view.rows.get(&draft.node.id) {
+        let proposed_identity = self.source_index_identity(&draft.session_id, &draft.node.id)?;
+        self.record_admission_index_lookups(1)?;
+        if let Some(existing) = proposed_identity {
             return Err(ContextProjectionError::DuplicateNodeIdentity {
                 session_id: draft.session_id.clone(),
                 node_id: draft.node.id.clone(),
-                event_id: existing.event_id.clone(),
+                event_id: existing.event_id,
                 seq: existing.event_seq,
             });
         }
@@ -1131,18 +1405,10 @@ impl ContextProjection {
         )?;
         validate_durable_node(&draft.node)?;
 
-        let targets = std::iter::once(draft.node.id.clone())
-            .chain(draft.node.supersedes.iter().cloned())
-            .collect::<HashSet<_>>();
-        let canonical_view = self.admission_view_locked(
-            event_store,
-            high_water,
-            &draft.session_id,
-            &targets,
-            &mut rebuilt,
-        )?;
         for superseded_id in &draft.node.supersedes {
-            match canonical_view.rows.get(superseded_id) {
+            let existing = self.source_index_identity(&draft.session_id, superseded_id)?;
+            self.record_admission_index_lookups(1)?;
+            match existing {
                 None => {
                     return Err(ContextProjectionError::MissingSupersededNode {
                         node_id: draft.node.id.clone(),
@@ -1163,6 +1429,7 @@ impl ContextProjection {
             &draft.node,
             &scope,
             high_water.saturating_add(1),
+            None,
         )?;
 
         Ok(ValidatedContextNodeDraft {
@@ -1173,50 +1440,151 @@ impl ContextProjection {
         })
     }
 
-    fn admission_view_locked(
+    fn ensure_verified_index_locked(
         &self,
         event_store: &EventStore,
         high_water: i64,
-        session_id: &str,
-        targets: &HashSet<String>,
-        rebuilt: &mut bool,
-    ) -> Result<CanonicalAdmissionView, ContextProjectionError> {
-        let view = canonical_session_admission_view(event_store, high_water, session_id, targets)?;
-        let matches = {
-            let connection = self.connection()?;
-            relevant_cache_matches(&connection, session_id, targets, &view)?
-        };
-        if matches {
-            return Ok(view);
-        }
-        if *rebuilt {
-            let checkpoint = self.checkpoint()?;
+    ) -> Result<ProjectionCheckpoint, ContextProjectionError> {
+        let checkpoint = self.checkpoint()?;
+        if checkpoint.through_seq != high_water
+            || !checkpoint_anchor_matches(&checkpoint, event_store)?
+        {
             return Err(ContextProjectionError::ProjectionNotSynchronized {
                 checkpoint: checkpoint.through_seq,
                 high_water,
             });
         }
-
+        if high_water == 0
+            && checkpoint.canonical_state_digest == empty_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN)
         {
-            let mut connection = self.connection()?;
-            reset_schema(&mut connection)?;
+            return Ok(checkpoint);
         }
-        self.synchronize_through_locked(event_store, high_water, true)?;
-        *rebuilt = true;
+        if self.source_verification_matches_cache()? {
+            return Ok(checkpoint);
+        }
 
-        let repaired =
-            canonical_session_admission_view(event_store, high_water, session_id, targets)?;
-        let matches = {
-            let connection = self.connection()?;
-            relevant_cache_matches(&connection, session_id, targets, &repaired)?
-        };
-        if !matches {
-            return Err(ContextProjectionError::ProjectionNotSynchronized {
-                checkpoint: self.checkpoint()?.through_seq,
-                high_water,
-            });
+        let rebuilt = self.rebuild_verified_through_locked(event_store, high_water, true)?;
+        if !self.source_verification_matches_cache()? {
+            return Err(ContextProjectionError::SessionIndexIntegrityMismatch { high_water });
         }
-        Ok(repaired)
+        Ok(rebuilt.checkpoint)
+    }
+
+    fn source_index_identity(
+        &self,
+        session_id: &str,
+        node_id: &str,
+    ) -> Result<Option<SessionIndexIdentity>, ContextProjectionError> {
+        Ok(self
+            .verification_state()?
+            .source
+            .as_ref()
+            .and_then(|source| source.sessions.get(session_id))
+            .and_then(|session| session.get(node_id))
+            .cloned())
+    }
+
+    fn prevalidate_delta_against_verified_index(
+        &self,
+        event_store: &EventStore,
+        after_seq: i64,
+        through_seq: i64,
+    ) -> Result<(), ContextProjectionError> {
+        let mut overlay = HashMap::<(String, String), SessionIndexIdentity>::new();
+        let mut budget = DeltaVerificationBudget::default();
+        let mut cursor = after_seq;
+        while cursor < through_seq {
+            if budget.remaining_events() == 0 {
+                return Err(ContextProjectionError::SessionIndexLimitExceeded {
+                    dimension: "normal delta events",
+                    attempted: MAX_NORMAL_DELTA_EVENTS + 1,
+                    maximum: MAX_NORMAL_DELTA_EVENTS,
+                });
+            }
+            let limit = usize::try_from(
+                budget
+                    .remaining_events()
+                    .min(u64::try_from(SYNC_PAGE_SIZE).unwrap_or(u64::MAX)),
+            )
+            .unwrap_or(SYNC_PAGE_SIZE);
+            let page = event_store.list_through(
+                &EventQuery {
+                    after_seq: Some(cursor),
+                    limit: Some(limit),
+                    ..EventQuery::default()
+                },
+                through_seq,
+            )?;
+            let Some(last) = page.last() else {
+                return Err(ContextProjectionError::HighWaterUnreachable {
+                    cursor,
+                    high_water: through_seq,
+                });
+            };
+            let mut previous = cursor;
+            for event in &page {
+                budget.charge_event()?;
+                if event.seq <= previous || event.seq > through_seq {
+                    return Err(ContextProjectionError::NonMonotonicPage {
+                        after: previous,
+                        found: event.seq,
+                    });
+                }
+                previous = event.seq;
+                if event.kind != event_kind::CONTEXT_NODE_RECORDED {
+                    continue;
+                }
+                let validated =
+                    decode_recorded_node_with_budget(event_store, event, Some(&mut budget))?;
+                budget.charge_lookup()?;
+                let key = (validated.session_id.clone(), validated.node.id.clone());
+                let existing = overlay
+                    .get(&key)
+                    .cloned()
+                    .or(self.source_index_identity(&validated.session_id, &validated.node.id)?);
+                if let Some(existing) = existing {
+                    return Err(ContextProjectionError::DuplicateNodeIdentity {
+                        session_id: validated.session_id,
+                        node_id: validated.node.id,
+                        event_id: existing.event_id,
+                        seq: existing.event_seq,
+                    });
+                }
+                for superseded_id in &validated.node.supersedes {
+                    budget.charge_lookup()?;
+                    let superseded_key = (validated.session_id.clone(), superseded_id.clone());
+                    let existing = overlay
+                        .get(&superseded_key)
+                        .cloned()
+                        .or(self.source_index_identity(&validated.session_id, superseded_id)?);
+                    match existing {
+                        None => {
+                            return Err(ContextProjectionError::MissingSupersededNode {
+                                node_id: validated.node.id,
+                                superseded_id: superseded_id.clone(),
+                            });
+                        }
+                        Some(existing) if existing.task_id != validated.task_id => {
+                            return Err(ContextProjectionError::SupersessionScopeMismatch {
+                                node_id: validated.node.id,
+                                superseded_id: superseded_id.clone(),
+                            });
+                        }
+                        Some(_) => {}
+                    }
+                }
+                overlay.insert(
+                    key,
+                    SessionIndexIdentity {
+                        task_id: validated.task_id,
+                        event_seq: event.seq,
+                        event_id: event.event_id.clone(),
+                    },
+                );
+            }
+            cursor = last.seq;
+        }
+        Ok(())
     }
 
     fn synchronize_through_locked(
@@ -1254,6 +1622,7 @@ impl ContextProjection {
             .into());
         }
 
+        let source_verified = self.source_verification_matches_cache()?;
         let mut rebuilt = already_rebuilt;
         let mut checkpoint = {
             let mut connection = self.connection()?;
@@ -1287,85 +1656,71 @@ impl ContextProjection {
             .into());
         }
 
-        if checkpoint.through_seq < high_water
-            && !self.delta_dependencies_match_cache(
+        let mut source_index_recovery = checkpoint.through_seq < high_water
+            && !source_verified
+            && self.source_verification_checkpoint()?.as_ref() == Some(&checkpoint);
+        if source_index_recovery {
+            self.prevalidate_delta_against_verified_index(
                 event_store,
                 checkpoint.through_seq,
                 high_water,
-            )?
-        {
-            if rebuilt {
-                return Err(SynchronizeThroughError::PersistentCacheDivergence {
-                    checkpoint: checkpoint.through_seq,
-                });
-            }
-            {
+            )?;
+            if !self.recover_source_verification_from_cache(&checkpoint)? {
                 let mut connection = self.connection()?;
                 reset_schema(&mut connection)?;
+                checkpoint = ProjectionCheckpoint::zero();
+                rebuilt = true;
+                source_index_recovery = false;
             }
-            rebuilt = true;
-            checkpoint = ProjectionCheckpoint::zero();
         }
 
-        let checkpoint = match self.catch_up_from_checkpoint(event_store, high_water, checkpoint) {
-            Ok(checkpoint) => checkpoint,
-            Err(CatchUpError::Public(error)) => return Err(error.into()),
-            Err(CatchUpError::RepairableCacheDivergence) if !rebuilt => {
-                {
-                    let mut connection = self.connection()?;
-                    reset_schema(&mut connection)?;
-                }
-                rebuilt = true;
-                match self.catch_up_from_checkpoint(
-                    event_store,
-                    high_water,
-                    ProjectionCheckpoint::zero(),
-                ) {
-                    Ok(checkpoint) => checkpoint,
-                    Err(CatchUpError::Public(error)) => return Err(error.into()),
-                    Err(CatchUpError::RepairableCacheDivergence) => {
-                        return Err(SynchronizeThroughError::PersistentCacheDivergence {
-                            checkpoint: self.checkpoint()?.through_seq,
-                        });
+        let mode = if checkpoint.through_seq == 0 && (rebuilt || !source_verified) {
+            CatchUpMode::FullReplay
+        } else {
+            CatchUpMode::VerifiedDelta
+        };
+        let mut completed_mode = mode;
+        let caught_up =
+            match self.catch_up_from_checkpoint(event_store, high_water, checkpoint, mode) {
+                Ok(caught_up) => caught_up,
+                Err(CatchUpError::Public(error)) => return Err(error.into()),
+                Err(CatchUpError::RepairableCacheDivergence) if !rebuilt => {
+                    {
+                        let mut connection = self.connection()?;
+                        reset_schema(&mut connection)?;
+                    }
+                    rebuilt = true;
+                    completed_mode = CatchUpMode::FullReplay;
+                    match self.catch_up_from_checkpoint(
+                        event_store,
+                        high_water,
+                        ProjectionCheckpoint::zero(),
+                        CatchUpMode::FullReplay,
+                    ) {
+                        Ok(caught_up) => caught_up,
+                        Err(CatchUpError::Public(error)) => return Err(error.into()),
+                        Err(CatchUpError::RepairableCacheDivergence) => {
+                            return Err(SynchronizeThroughError::PersistentCacheDivergence {
+                                checkpoint: self.checkpoint()?.through_seq,
+                            });
+                        }
                     }
                 }
-            }
-            Err(CatchUpError::RepairableCacheDivergence) => {
-                return Err(SynchronizeThroughError::PersistentCacheDivergence {
-                    checkpoint: self.checkpoint()?.through_seq,
-                });
-            }
-        };
+                Err(CatchUpError::RepairableCacheDivergence) => {
+                    return Err(SynchronizeThroughError::PersistentCacheDivergence {
+                        checkpoint: self.checkpoint()?.through_seq,
+                    });
+                }
+            };
+
+        self.record_catch_up_work(completed_mode, caught_up.work)?;
 
         Ok(ProjectionSync {
             captured_high_water: high_water,
-            checkpoint,
+            checkpoint: caught_up.checkpoint,
             rebuilt,
+            source_index_recovery: source_index_recovery && !rebuilt,
         })
-    }
-
-    fn delta_dependencies_match_cache(
-        &self,
-        event_store: &EventStore,
-        after_seq: i64,
-        through_seq: i64,
-    ) -> Result<bool, ContextProjectionError> {
-        let mut connection = self.connection()?;
-        ensure_delta_preflight_tables(&connection)?;
-        let transaction = connection.transaction()?;
-        clear_delta_preflight_tables(&transaction)?;
-        collect_delta_dependencies(&transaction, event_store, after_seq, through_seq)?;
-        seed_canonical_delta_dependencies(&transaction, event_store, after_seq)?;
-        let matches = delta_dependency_cache_matches(&transaction)?;
-        validate_delta_against_canonical_dependencies(
-            &transaction,
-            event_store,
-            after_seq,
-            through_seq,
-        )?;
-        clear_delta_preflight_tables(&transaction)?;
-        transaction.commit()?;
-        Ok(matches)
     }
 
     fn catch_up_from_checkpoint(
@@ -1373,14 +1728,35 @@ impl ContextProjection {
         event_store: &EventStore,
         high_water: i64,
         mut checkpoint: ProjectionCheckpoint,
-    ) -> Result<ProjectionCheckpoint, CatchUpError> {
+        mode: CatchUpMode,
+    ) -> Result<CatchUpResult, CatchUpError> {
+        let mut delta_budget =
+            (mode == CatchUpMode::VerifiedDelta).then(DeltaVerificationBudget::default);
+        let mut work = CatchUpWork::default();
         let mut cursor = checkpoint.through_seq;
         while cursor < high_water {
+            let page_limit = match delta_budget.as_ref() {
+                Some(budget) if budget.remaining_events() == 0 => {
+                    return Err(ContextProjectionError::SessionIndexLimitExceeded {
+                        dimension: "normal delta events",
+                        attempted: MAX_NORMAL_DELTA_EVENTS + 1,
+                        maximum: MAX_NORMAL_DELTA_EVENTS,
+                    }
+                    .into());
+                }
+                Some(budget) => usize::try_from(
+                    budget
+                        .remaining_events()
+                        .min(u64::try_from(SYNC_PAGE_SIZE).unwrap_or(u64::MAX)),
+                )
+                .unwrap_or(SYNC_PAGE_SIZE),
+                None => SYNC_PAGE_SIZE,
+            };
             let page = event_store
                 .list_through(
                     &EventQuery {
                         after_seq: Some(cursor),
-                        limit: Some(SYNC_PAGE_SIZE),
+                        limit: Some(page_limit),
                         ..EventQuery::default()
                     },
                     high_water,
@@ -1393,6 +1769,11 @@ impl ContextProjection {
             };
             let mut previous = cursor;
             for event in &page {
+                if let Some(budget) = delta_budget.as_mut() {
+                    budget.charge_event()?;
+                } else {
+                    work.events = work.events.saturating_add(1);
+                }
                 if event.seq <= previous || event.seq > high_water {
                     return Err(ContextProjectionError::NonMonotonicPage {
                         after: previous,
@@ -1408,17 +1789,25 @@ impl ContextProjection {
                 let transaction = connection
                     .transaction()
                     .map_err(ContextProjectionError::from)?;
+                let mut page_digest = checkpoint.canonical_state_digest;
                 for event in &page {
                     if event.kind == event_kind::CONTEXT_NODE_RECORDED {
-                        apply_context_event(&transaction, event_store, event)?;
+                        page_digest = apply_context_event(
+                            &transaction,
+                            event_store,
+                            event,
+                            page_digest,
+                            delta_budget.as_mut(),
+                        )?;
                     }
                 }
                 let updated = transaction.execute(
-                    "UPDATE projection_checkpoint SET schema_version = ?1, through_seq = ?2, through_event_id = ?3 WHERE singleton = 1",
+                    "UPDATE projection_checkpoint SET schema_version = ?1, through_seq = ?2, through_event_id = ?3, canonical_state_digest = ?4 WHERE singleton = 1",
                     params![
                         CONTEXT_PROJECTION_SCHEMA_VERSION,
                         last.seq,
-                        &last.event_id
+                        &last.event_id,
+                        page_digest.as_slice(),
                     ],
                 )
                 .map_err(ContextProjectionError::from)?;
@@ -1426,15 +1815,20 @@ impl ContextProjection {
                     return Err(ContextProjectionError::MissingCheckpointDuringPage.into());
                 }
                 transaction.commit().map_err(ContextProjectionError::from)?;
+                checkpoint.canonical_state_digest = page_digest;
             }
             cursor = last.seq;
             checkpoint = ProjectionCheckpoint {
                 schema_version: CONTEXT_PROJECTION_SCHEMA_VERSION,
                 through_seq: last.seq,
                 through_event_id: Some(last.event_id),
+                canonical_state_digest: checkpoint.canonical_state_digest,
             };
         }
-        Ok(checkpoint)
+        if let Some(budget) = delta_budget {
+            work = budget.work;
+        }
+        Ok(CatchUpResult { checkpoint, work })
     }
 
     fn capture_snapshot_locked(
@@ -1701,12 +2095,16 @@ struct NodeScope<'a> {
 
 struct ResolvedNode {
     causation_id: String,
+    causation_seq: i64,
+    provenance_digest: [u8; 32],
+    source_count: usize,
 }
 
 struct ValidatedRecordedNode {
     node: ContextNode,
     session_id: String,
     task_id: Option<String>,
+    resolved: ResolvedNode,
 }
 
 enum ApplyContextEventError {
@@ -1723,6 +2121,70 @@ impl From<ContextProjectionError> for ApplyContextEventError {
 enum CatchUpError {
     Public(ContextProjectionError),
     RepairableCacheDivergence,
+}
+
+struct CatchUpResult {
+    checkpoint: ProjectionCheckpoint,
+    work: CatchUpWork,
+}
+
+#[derive(Debug, Clone)]
+struct SessionIndexEntry {
+    session_id: String,
+    node_id: String,
+    task_id: Option<String>,
+    event_seq: i64,
+    event_id: String,
+    node_digest: [u8; 32],
+    provenance_digest: [u8; 32],
+    source_count: usize,
+    causation_seq: i64,
+    causation_event_id: String,
+    supersession_digest: [u8; 32],
+    supersession_count: usize,
+    accounted_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionIndexIdentity {
+    task_id: Option<String>,
+    event_seq: i64,
+    event_id: String,
+}
+
+struct RawSessionIndexEntry {
+    session_id: String,
+    node_id: String,
+    task_id: Option<String>,
+    event_seq: i64,
+    event_id: String,
+    node_digest: Vec<u8>,
+    provenance_digest: Vec<u8>,
+    source_count: i64,
+    causation_seq: i64,
+    causation_event_id: String,
+    supersession_digest: Vec<u8>,
+    supersession_count: i64,
+    accounted_bytes: i64,
+    projected_node_id: Option<String>,
+    projected_task_id: Option<String>,
+    projected_event_seq: Option<i64>,
+    projected_event_id: Option<String>,
+    projected_node_json: Option<String>,
+    projected_epistemic_status: Option<String>,
+    projected_valid_from_millis: Option<i64>,
+    projected_valid_from_submillis_nanos: Option<i64>,
+    projected_valid_until_millis: Option<i64>,
+    projected_valid_until_submillis_nanos: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionIndexState {
+    through_seq: i64,
+    through_event_id: String,
+    state_digest: [u8; 32],
+    entry_count: u64,
+    accounted_bytes: u64,
 }
 
 impl From<ContextProjectionError> for CatchUpError {
@@ -1959,19 +2421,23 @@ fn schema_is_current(connection: &Connection) -> Result<bool, ContextProjectionE
           AND name IN (
               'projection_checkpoint',
               'projected_nodes',
-              'supersession_edges'
+              'supersession_edges',
+              'session_index_nodes',
+              'session_index_state'
           )
         "#,
         [],
         |row| row.get(0),
     )?;
-    if table_count != 3 {
+    if table_count != 5 {
         return Ok(false);
     }
     let statements = [
-        "SELECT schema_version, through_seq, through_event_id FROM projection_checkpoint LIMIT 0",
+        "SELECT schema_version, through_seq, through_event_id, canonical_state_digest FROM projection_checkpoint LIMIT 0",
         "SELECT session_id, task_id, node_id, event_seq, event_id, node_json, epistemic_status, valid_from_millis, valid_from_submillis_nanos, valid_until_millis, valid_until_submillis_nanos FROM projected_nodes LIMIT 0",
         "SELECT session_id, task_key, superseding_node_id, superseded_node_id, event_seq FROM supersession_edges LIMIT 0",
+        "SELECT session_id, node_id, task_id, event_seq, event_id, node_digest, provenance_digest, source_count, causation_seq, causation_event_id, supersession_digest, supersession_count, accounted_bytes FROM session_index_nodes LIMIT 0",
+        "SELECT session_id, through_seq, through_event_id, state_digest, entry_count, accounted_bytes FROM session_index_state LIMIT 0",
     ];
     Ok(statements
         .into_iter()
@@ -1982,12 +2448,19 @@ fn reset_schema(connection: &mut Connection) -> Result<(), ContextProjectionErro
     let transaction = connection.transaction()?;
     transaction.execute_batch(
         r#"
+        DROP TABLE IF EXISTS session_index_state;
+        DROP TABLE IF EXISTS session_index_nodes;
         DROP TABLE IF EXISTS supersession_edges;
         DROP TABLE IF EXISTS projected_nodes;
         DROP TABLE IF EXISTS projection_checkpoint;
         "#,
     )?;
-    transaction.execute_batch(SCHEMA_V3)?;
+    transaction.execute_batch(SCHEMA_V4)?;
+    let empty_digest = empty_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN);
+    transaction.execute(
+        "UPDATE projection_checkpoint SET canonical_state_digest = ?1 WHERE singleton = 1",
+        params![empty_digest.as_slice()],
+    )?;
     transaction.pragma_update(None, "user_version", CONTEXT_PROJECTION_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -1996,20 +2469,27 @@ fn reset_schema(connection: &mut Connection) -> Result<(), ContextProjectionErro
 fn read_checkpoint(
     connection: &Connection,
 ) -> Result<Option<ProjectionCheckpoint>, ContextProjectionError> {
-    connection
+    let raw = connection
         .query_row(
-            "SELECT schema_version, through_seq, through_event_id FROM projection_checkpoint WHERE singleton = 1",
+            "SELECT schema_version, through_seq, through_event_id, canonical_state_digest FROM projection_checkpoint WHERE singleton = 1",
             [],
-            |row| {
-                Ok(ProjectionCheckpoint {
-                    schema_version: row.get(0)?,
-                    through_seq: row.get(1)?,
-                    through_event_id: row.get(2)?,
-                })
-            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get::<_, Vec<u8>>(3)?)),
         )
         .optional()
-        .map_err(Into::into)
+        .map_err(ContextProjectionError::from)?;
+    raw.map(|(schema_version, through_seq, through_event_id, digest)| {
+        Ok(ProjectionCheckpoint {
+            schema_version,
+            through_seq,
+            through_event_id,
+            canonical_state_digest: digest_from_blob(
+                &digest,
+                through_seq,
+                "projection checkpoint canonical state digest",
+            )?,
+        })
+    })
+    .transpose()
 }
 
 fn checkpoint_anchor_matches(
@@ -2030,515 +2510,6 @@ fn checkpoint_anchor_matches(
         && by_id.as_ref().is_some_and(|event| {
             event.event_id == expected_id && event.seq == checkpoint.through_seq
         }))
-}
-
-fn ensure_delta_preflight_tables(connection: &Connection) -> Result<(), ContextProjectionError> {
-    // Dependency sets can grow with the bounded delta, so keep their derived
-    // spill storage off the Rust heap regardless of SQLite's build default.
-    connection.pragma_update(None, "temp_store", "FILE")?;
-    connection.execute_batch(
-        r#"
-        CREATE TEMP TABLE IF NOT EXISTS context_delta_targets (
-            session_id TEXT NOT NULL,
-            node_id TEXT NOT NULL,
-            PRIMARY KEY (session_id, node_id)
-        ) WITHOUT ROWID;
-        CREATE TEMP TABLE IF NOT EXISTS context_delta_events (
-            event_seq INTEGER PRIMARY KEY,
-            event_id TEXT NOT NULL UNIQUE
-        );
-        CREATE TEMP TABLE IF NOT EXISTS context_delta_canonical_rows (
-            session_id TEXT NOT NULL,
-            node_id TEXT NOT NULL,
-            task_id TEXT,
-            event_seq INTEGER NOT NULL,
-            event_id TEXT NOT NULL,
-            node_json TEXT NOT NULL,
-            PRIMARY KEY (session_id, node_id)
-        ) WITHOUT ROWID;
-        CREATE TEMP TABLE IF NOT EXISTS context_delta_canonical_edges (
-            session_id TEXT NOT NULL,
-            task_key TEXT NOT NULL,
-            superseding_node_id TEXT NOT NULL,
-            superseded_node_id TEXT NOT NULL,
-            event_seq INTEGER NOT NULL
-        );
-        CREATE TEMP TABLE IF NOT EXISTS context_delta_working_rows (
-            session_id TEXT NOT NULL,
-            node_id TEXT NOT NULL,
-            task_id TEXT,
-            event_seq INTEGER NOT NULL,
-            event_id TEXT NOT NULL,
-            node_json TEXT NOT NULL,
-            PRIMARY KEY (session_id, node_id)
-        ) WITHOUT ROWID;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn clear_delta_preflight_tables(connection: &Connection) -> Result<(), ContextProjectionError> {
-    connection.execute_batch(
-        r#"
-        DELETE FROM context_delta_targets;
-        DELETE FROM context_delta_events;
-        DELETE FROM context_delta_canonical_rows;
-        DELETE FROM context_delta_canonical_edges;
-        DELETE FROM context_delta_working_rows;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn visit_event_range(
-    event_store: &EventStore,
-    after_seq: i64,
-    through_seq: i64,
-    mut visit: impl FnMut(&EventRecord) -> Result<(), ContextProjectionError>,
-) -> Result<(), ContextProjectionError> {
-    visit_filtered_event_range(event_store, after_seq, through_seq, None, &mut visit)
-}
-
-fn visit_filtered_event_range(
-    event_store: &EventStore,
-    after_seq: i64,
-    through_seq: i64,
-    session_id: Option<&str>,
-    visit: &mut impl FnMut(&EventRecord) -> Result<(), ContextProjectionError>,
-) -> Result<(), ContextProjectionError> {
-    let mut cursor = after_seq;
-    while cursor < through_seq {
-        let page = event_store.list_through(
-            &EventQuery {
-                after_seq: Some(cursor),
-                limit: Some(SYNC_PAGE_SIZE),
-                session_id: session_id.map(str::to_owned),
-                ..EventQuery::default()
-            },
-            through_seq,
-        )?;
-        let Some(last) = page.last() else {
-            if session_id.is_some() {
-                break;
-            }
-            return Err(ContextProjectionError::HighWaterUnreachable {
-                cursor,
-                high_water: through_seq,
-            });
-        };
-        let mut previous = cursor;
-        for event in &page {
-            if event.seq <= previous || event.seq > through_seq {
-                return Err(ContextProjectionError::NonMonotonicPage {
-                    after: previous,
-                    found: event.seq,
-                });
-            }
-            visit(event)?;
-            previous = event.seq;
-        }
-        cursor = last.seq;
-    }
-    Ok(())
-}
-
-fn collect_delta_dependencies(
-    transaction: &Transaction<'_>,
-    event_store: &EventStore,
-    after_seq: i64,
-    through_seq: i64,
-) -> Result<(), ContextProjectionError> {
-    visit_event_range(event_store, after_seq, through_seq, |event| {
-        if event.kind != event_kind::CONTEXT_NODE_RECORDED {
-            return Ok(());
-        }
-        let validated = decode_recorded_node(event_store, event)?;
-        transaction.execute(
-            "INSERT INTO context_delta_events (event_seq, event_id) VALUES (?1, ?2)",
-            params![event.seq, &event.event_id],
-        )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO context_delta_targets (session_id, node_id) VALUES (?1, ?2)",
-            params![&validated.session_id, &validated.node.id],
-        )?;
-        for superseded_id in &validated.node.supersedes {
-            transaction.execute(
-                "INSERT OR IGNORE INTO context_delta_targets (session_id, node_id) VALUES (?1, ?2)",
-                params![&validated.session_id, superseded_id],
-            )?;
-        }
-        Ok(())
-    })
-}
-
-fn delta_target_contains(
-    connection: &Connection,
-    session_id: &str,
-    node_id: &str,
-) -> Result<bool, ContextProjectionError> {
-    connection
-        .query_row(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM context_delta_targets
-                WHERE session_id = ?1 AND node_id = ?2
-            )
-            "#,
-            params![session_id, node_id],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
-}
-
-fn seed_canonical_delta_dependencies(
-    transaction: &Transaction<'_>,
-    event_store: &EventStore,
-    through_seq: i64,
-) -> Result<(), ContextProjectionError> {
-    let mut after_session: Option<String> = None;
-    loop {
-        let sessions = {
-            let mut statement = transaction.prepare(
-                r#"
-                SELECT DISTINCT session_id
-                FROM context_delta_targets
-                WHERE (?1 IS NULL OR session_id > ?1)
-                ORDER BY session_id ASC
-                LIMIT 128
-                "#,
-            )?;
-            statement
-                .query_map(params![after_session.as_deref()], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        if sessions.is_empty() {
-            break;
-        }
-        for session_id in &sessions {
-            visit_filtered_event_range(
-                event_store,
-                0,
-                through_seq,
-                Some(session_id),
-                &mut |event| seed_canonical_delta_event(transaction, event_store, event),
-            )?;
-        }
-        after_session = sessions.last().cloned();
-    }
-    Ok(())
-}
-
-fn seed_canonical_delta_event(
-    transaction: &Transaction<'_>,
-    event_store: &EventStore,
-    event: &EventRecord,
-) -> Result<(), ContextProjectionError> {
-    if event.kind != event_kind::CONTEXT_NODE_RECORDED {
-        return Ok(());
-    }
-    let validated = decode_recorded_node(event_store, event)?;
-    let row_is_target =
-        delta_target_contains(transaction, &validated.session_id, &validated.node.id)?;
-    if row_is_target {
-        if let Some((event_id, event_seq)) = transaction
-                .query_row(
-                    "SELECT event_id, event_seq FROM context_delta_canonical_rows WHERE session_id = ?1 AND node_id = ?2",
-                    params![&validated.session_id, &validated.node.id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .optional()?
-            {
-                return Err(ContextProjectionError::DuplicateNodeIdentity {
-                    session_id: validated.session_id,
-                    node_id: validated.node.id,
-                    event_id,
-                    seq: event_seq,
-                });
-            }
-        transaction.execute(
-            r#"
-                INSERT INTO context_delta_canonical_rows (
-                    session_id, node_id, task_id, event_seq, event_id, node_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                "#,
-            params![
-                &validated.session_id,
-                &validated.node.id,
-                &validated.task_id,
-                event.seq,
-                &event.event_id,
-                serde_json::to_string(&validated.node).map_err(|error| {
-                    ContextProjectionError::InvalidNode {
-                        node_id: validated.node.id.clone(),
-                        reason: error.to_string(),
-                    }
-                })?,
-            ],
-        )?;
-    }
-
-    for superseded_id in &validated.node.supersedes {
-        if row_is_target
-            || delta_target_contains(transaction, &validated.session_id, superseded_id)?
-        {
-            transaction.execute(
-                r#"
-                    INSERT INTO context_delta_canonical_edges (
-                        session_id, task_key, superseding_node_id,
-                        superseded_node_id, event_seq
-                    ) VALUES (?1, ?2, ?3, ?4, ?5)
-                    "#,
-                params![
-                    &validated.session_id,
-                    task_key(validated.task_id.as_deref()),
-                    &validated.node.id,
-                    superseded_id,
-                    event.seq,
-                ],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn delta_dependency_cache_matches(
-    transaction: &Transaction<'_>,
-) -> Result<bool, ContextProjectionError> {
-    let row_mismatch: bool = transaction.query_row(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM context_delta_targets AS target
-            LEFT JOIN context_delta_canonical_rows AS canonical
-              ON canonical.session_id = target.session_id
-             AND canonical.node_id = target.node_id
-            LEFT JOIN projected_nodes AS cached
-              ON cached.session_id = target.session_id
-             AND cached.node_id = target.node_id
-            WHERE (canonical.node_id IS NULL) <> (cached.node_id IS NULL)
-               OR (
-                    canonical.node_id IS NOT NULL
-                AND (
-                       canonical.task_id IS NOT cached.task_id
-                    OR canonical.event_seq != cached.event_seq
-                    OR canonical.event_id != cached.event_id
-                    OR canonical.node_json != cached.node_json
-                )
-               )
-        )
-        "#,
-        [],
-        |row| row.get(0),
-    )?;
-    let occupied_delta_event: bool = transaction.query_row(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM projected_nodes AS cached
-            JOIN context_delta_events AS delta
-              ON cached.event_seq = delta.event_seq
-              OR cached.event_id = delta.event_id
-        )
-        "#,
-        [],
-        |row| row.get(0),
-    )?;
-    let missing_edge: bool = transaction.query_row(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM context_delta_canonical_edges AS canonical
-            LEFT JOIN supersession_edges AS cached
-              ON cached.session_id = canonical.session_id
-             AND cached.task_key = canonical.task_key
-             AND cached.superseding_node_id = canonical.superseding_node_id
-             AND cached.superseded_node_id = canonical.superseded_node_id
-             AND cached.event_seq = canonical.event_seq
-            WHERE cached.session_id IS NULL
-        )
-        "#,
-        [],
-        |row| row.get(0),
-    )?;
-    let extra_edge: bool = transaction.query_row(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM supersession_edges AS cached
-            JOIN context_delta_targets AS target
-              ON target.session_id = cached.session_id
-             AND (
-                    target.node_id = cached.superseding_node_id
-                 OR target.node_id = cached.superseded_node_id
-             )
-            LEFT JOIN context_delta_canonical_edges AS canonical
-              ON canonical.session_id = cached.session_id
-             AND canonical.task_key = cached.task_key
-             AND canonical.superseding_node_id = cached.superseding_node_id
-             AND canonical.superseded_node_id = cached.superseded_node_id
-             AND canonical.event_seq = cached.event_seq
-            WHERE canonical.session_id IS NULL
-        )
-        "#,
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(!(row_mismatch || occupied_delta_event || missing_edge || extra_edge))
-}
-
-fn validate_delta_against_canonical_dependencies(
-    transaction: &Transaction<'_>,
-    event_store: &EventStore,
-    after_seq: i64,
-    through_seq: i64,
-) -> Result<(), ContextProjectionError> {
-    transaction.execute(
-        r#"
-        INSERT INTO context_delta_working_rows (
-            session_id, node_id, task_id, event_seq, event_id, node_json
-        )
-        SELECT session_id, node_id, task_id, event_seq, event_id, node_json
-        FROM context_delta_canonical_rows
-        "#,
-        [],
-    )?;
-    visit_event_range(event_store, after_seq, through_seq, |event| {
-        if event.kind != event_kind::CONTEXT_NODE_RECORDED {
-            return Ok(());
-        }
-        let validated = decode_recorded_node(event_store, event)?;
-        if let Some((event_id, event_seq)) = transaction
-            .query_row(
-                "SELECT event_id, event_seq FROM context_delta_working_rows WHERE session_id = ?1 AND node_id = ?2",
-                params![&validated.session_id, &validated.node.id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?
-        {
-            return Err(ContextProjectionError::DuplicateNodeIdentity {
-                session_id: validated.session_id,
-                node_id: validated.node.id,
-                event_id,
-                seq: event_seq,
-            });
-        }
-        for superseded_id in &validated.node.supersedes {
-            match transaction
-                .query_row(
-                    "SELECT task_id FROM context_delta_working_rows WHERE session_id = ?1 AND node_id = ?2",
-                    params![&validated.session_id, superseded_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()?
-            {
-                None => {
-                    return Err(ContextProjectionError::MissingSupersededNode {
-                        node_id: validated.node.id,
-                        superseded_id: superseded_id.clone(),
-                    });
-                }
-                Some(task_id) if task_id != validated.task_id => {
-                    return Err(ContextProjectionError::SupersessionScopeMismatch {
-                        node_id: validated.node.id,
-                        superseded_id: superseded_id.clone(),
-                    });
-                }
-                Some(_) => {}
-            }
-        }
-        transaction.execute(
-            r#"
-            INSERT INTO context_delta_working_rows (
-                session_id, node_id, task_id, event_seq, event_id, node_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-            params![
-                &validated.session_id,
-                &validated.node.id,
-                &validated.task_id,
-                event.seq,
-                &event.event_id,
-                serde_json::to_string(&validated.node).map_err(|error| {
-                    ContextProjectionError::InvalidNode {
-                        node_id: validated.node.id.clone(),
-                        reason: error.to_string(),
-                    }
-                })?,
-            ],
-        )?;
-        Ok(())
-    })
-}
-
-fn canonical_session_admission_view(
-    event_store: &EventStore,
-    through_seq: i64,
-    session_id: &str,
-    targets: &HashSet<String>,
-) -> Result<CanonicalAdmissionView, ContextProjectionError> {
-    let mut view = CanonicalAdmissionView::default();
-    let mut cursor = 0_i64;
-    loop {
-        let page = event_store.list_through(
-            &EventQuery {
-                after_seq: Some(cursor),
-                limit: Some(1_000),
-                session_id: Some(session_id.to_owned()),
-                task_id: None,
-            },
-            through_seq,
-        )?;
-        if page.is_empty() {
-            break;
-        }
-        for event in &page {
-            if event.seq <= cursor || event.seq > through_seq {
-                return Err(ContextProjectionError::NonMonotonicPage {
-                    after: cursor,
-                    found: event.seq,
-                });
-            }
-            cursor = event.seq;
-            if event.kind != event_kind::CONTEXT_NODE_RECORDED {
-                continue;
-            }
-            let validated = decode_recorded_node(event_store, event)?;
-            let mut targeted_supersedes = validated
-                .node
-                .supersedes
-                .iter()
-                .filter(|superseded_id| targets.contains(*superseded_id))
-                .collect::<Vec<_>>();
-            targeted_supersedes.sort_unstable();
-            for superseded_id in targeted_supersedes {
-                view.incoming_edges
-                    .entry(superseded_id.clone())
-                    .or_default()
-                    .update(
-                        &validated.node.id,
-                        task_key(validated.task_id.as_deref()),
-                        event.seq,
-                        superseded_id,
-                    );
-            }
-            if !targets.contains(&validated.node.id) {
-                continue;
-            }
-            let row = canonical_cache_row(&validated, event)?;
-            if let Some(existing) = view.rows.insert(validated.node.id.clone(), row) {
-                return Err(ContextProjectionError::DuplicateNodeIdentity {
-                    session_id: session_id.to_owned(),
-                    node_id: validated.node.id,
-                    event_id: existing.event_id,
-                    seq: existing.event_seq,
-                });
-            }
-        }
-    }
-    Ok(view)
 }
 
 fn canonical_scope_snapshot_view(
@@ -2865,67 +2836,574 @@ fn cached_scope_edge_view(
     Ok(Some(result))
 }
 
-fn relevant_cache_matches(
+fn read_session_index_identity(
     connection: &Connection,
     session_id: &str,
-    targets: &HashSet<String>,
-    canonical: &CanonicalAdmissionView,
-) -> Result<bool, ContextProjectionError> {
-    for node_id in targets {
-        let cached = connection
-            .query_row(
-                r#"
-                SELECT task_id, event_seq, event_id, node_json
-                FROM projected_nodes
-                WHERE session_id = ?1 AND node_id = ?2
-                "#,
-                params![session_id, node_id],
-                |row| {
-                    let node_json = row.get::<_, String>(3)?;
-                    Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        digest_bytes(node_json.as_bytes()),
-                    ))
+    node_id: &str,
+) -> Result<Option<SessionIndexIdentity>, ContextProjectionError> {
+    connection
+        .query_row(
+            r#"
+            SELECT task_id, event_seq, event_id
+            FROM session_index_nodes
+            WHERE session_id = ?1 AND node_id = ?2
+            "#,
+            params![session_id, node_id],
+            |row| {
+                Ok(SessionIndexIdentity {
+                    task_id: row.get(0)?,
+                    event_seq: row.get(1)?,
+                    event_id: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn load_verified_session_identities(
+    connection: &Connection,
+    checkpoint: &ProjectionCheckpoint,
+) -> Result<HashMap<String, HashMap<String, SessionIndexIdentity>>, ContextProjectionError> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT
+            i.session_id, i.node_id, i.task_id, i.event_seq, i.event_id,
+            i.node_digest, i.provenance_digest, i.source_count,
+            i.causation_seq, i.causation_event_id,
+            i.supersession_digest, i.supersession_count, i.accounted_bytes,
+            p.node_id, p.task_id, p.event_seq, p.event_id, p.node_json,
+            p.epistemic_status,
+            p.valid_from_millis, p.valid_from_submillis_nanos,
+            p.valid_until_millis, p.valid_until_submillis_nanos
+        FROM session_index_nodes AS i
+        LEFT JOIN projected_nodes AS p
+          ON p.session_id = i.session_id AND p.node_id = i.node_id
+        ORDER BY i.event_seq ASC, i.session_id ASC, i.node_id ASC
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(RawSessionIndexEntry {
+            session_id: row.get(0)?,
+            node_id: row.get(1)?,
+            task_id: row.get(2)?,
+            event_seq: row.get(3)?,
+            event_id: row.get(4)?,
+            node_digest: row.get(5)?,
+            provenance_digest: row.get(6)?,
+            source_count: row.get(7)?,
+            causation_seq: row.get(8)?,
+            causation_event_id: row.get(9)?,
+            supersession_digest: row.get(10)?,
+            supersession_count: row.get(11)?,
+            accounted_bytes: row.get(12)?,
+            projected_node_id: row.get(13)?,
+            projected_task_id: row.get(14)?,
+            projected_event_seq: row.get(15)?,
+            projected_event_id: row.get(16)?,
+            projected_node_json: row.get(17)?,
+            projected_epistemic_status: row.get(18)?,
+            projected_valid_from_millis: row.get(19)?,
+            projected_valid_from_submillis_nanos: row.get(20)?,
+            projected_valid_until_millis: row.get(21)?,
+            projected_valid_until_submillis_nanos: row.get(22)?,
+        })
+    })?;
+
+    let mut sessions = HashMap::<String, HashMap<String, SessionIndexIdentity>>::new();
+    let mut session_states = HashMap::<String, SessionIndexState>::new();
+    let mut global_digest = empty_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN);
+    let mut row_count = 0_u64;
+    for raw in rows {
+        let raw = raw?;
+        let entry = validated_session_index_entry(connection, raw)?;
+        row_count = row_count.saturating_add(1);
+        let prior = session_states.remove(&entry.session_id);
+        let state = advance_session_index_state(prior, &entry)?;
+        session_states.insert(entry.session_id.clone(), state);
+        global_digest = advance_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN, global_digest, &entry);
+        if sessions
+            .entry(entry.session_id.clone())
+            .or_default()
+            .insert(
+                entry.node_id.clone(),
+                SessionIndexIdentity {
+                    task_id: entry.task_id,
+                    event_seq: entry.event_seq,
+                    event_id: entry.event_id,
                 },
             )
-            .optional()?;
-        let Some(expected) = canonical.rows.get(node_id) else {
-            if cached.is_some() || cache_has_edges_for_node(connection, session_id, node_id)? {
-                return Ok(false);
-            }
-            continue;
-        };
-        let Some((task_id, event_seq, event_id, node_digest)) = cached else {
-            return Ok(false);
-        };
-        if task_id != expected.task_id
-            || event_seq != expected.event_seq
-            || event_id != expected.event_id
-            || node_digest != expected.node_digest
+            .is_some()
         {
-            return Ok(false);
-        }
-
-        let (outgoing_edge_digest, outgoing_edge_count) =
-            cached_outgoing_edge_digest(connection, session_id, node_id)?;
-        if outgoing_edge_digest != expected.outgoing_edge_digest
-            || outgoing_edge_count != expected.outgoing_edge_count
-        {
-            return Ok(false);
-        }
-
-        let incoming_edge_shape = cached_incoming_edge_digest(connection, session_id, node_id)?;
-        let expected_incoming_edge_shape = canonical
-            .incoming_edges
-            .get(node_id)
-            .map_or_else(empty_edge_shape, EdgeAccumulator::shape);
-        if incoming_edge_shape != expected_incoming_edge_shape {
-            return Ok(false);
+            return Err(ContextProjectionError::CorruptProjectionRow {
+                seq: entry.event_seq,
+                reason: "compact session index contains a duplicate identity".into(),
+            });
         }
     }
-    Ok(true)
+
+    if global_digest != checkpoint.canonical_state_digest {
+        return Err(ContextProjectionError::SessionIndexIntegrityMismatch {
+            high_water: checkpoint.through_seq,
+        });
+    }
+    let projected_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM projected_nodes", [], |row| row.get(0))?;
+    if u64::try_from(projected_count).ok() != Some(row_count) {
+        return Err(ContextProjectionError::SessionIndexIntegrityMismatch {
+            high_water: checkpoint.through_seq,
+        });
+    }
+    let state_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM session_index_state", [], |row| {
+            row.get(0)
+        })?;
+    if usize::try_from(state_count).ok() != Some(session_states.len()) {
+        return Err(ContextProjectionError::SessionIndexIntegrityMismatch {
+            high_water: checkpoint.through_seq,
+        });
+    }
+    for (session_id, expected) in session_states {
+        let actual = read_session_index_state(connection, &session_id)?.ok_or(
+            ContextProjectionError::SessionIndexIntegrityMismatch {
+                high_water: checkpoint.through_seq,
+            },
+        )?;
+        if actual.through_seq != expected.through_seq
+            || actual.through_event_id != expected.through_event_id
+            || actual.state_digest != expected.state_digest
+            || actual.entry_count != expected.entry_count
+            || actual.accounted_bytes != expected.accounted_bytes
+        {
+            return Err(ContextProjectionError::SessionIndexIntegrityMismatch {
+                high_water: checkpoint.through_seq,
+            });
+        }
+    }
+    Ok(sessions)
+}
+
+fn validated_session_index_entry(
+    connection: &Connection,
+    raw: RawSessionIndexEntry,
+) -> Result<SessionIndexEntry, ContextProjectionError> {
+    let projected_matches = raw.projected_node_id.as_deref() == Some(raw.node_id.as_str())
+        && raw.projected_task_id == raw.task_id
+        && raw.projected_event_seq == Some(raw.event_seq)
+        && raw.projected_event_id.as_deref() == Some(raw.event_id.as_str());
+    let Some(projected_node_json) = raw.projected_node_json.as_deref() else {
+        return Err(ContextProjectionError::SessionIndexIntegrityMismatch {
+            high_water: raw.event_seq,
+        });
+    };
+    let node_digest = digest_from_blob(&raw.node_digest, raw.event_seq, "indexed node digest")?;
+    let provenance_digest = digest_from_blob(
+        &raw.provenance_digest,
+        raw.event_seq,
+        "indexed provenance digest",
+    )?;
+    let supersession_digest = digest_from_blob(
+        &raw.supersession_digest,
+        raw.event_seq,
+        "indexed supersession digest",
+    )?;
+    let source_count = usize::try_from(raw.source_count).map_err(|_| {
+        ContextProjectionError::CorruptProjectionRow {
+            seq: raw.event_seq,
+            reason: "indexed source count is negative".into(),
+        }
+    })?;
+    let supersession_count = usize::try_from(raw.supersession_count).map_err(|_| {
+        ContextProjectionError::CorruptProjectionRow {
+            seq: raw.event_seq,
+            reason: "indexed supersession count is negative".into(),
+        }
+    })?;
+    let accounted_bytes = u64::try_from(raw.accounted_bytes).map_err(|_| {
+        ContextProjectionError::CorruptProjectionRow {
+            seq: raw.event_seq,
+            reason: "indexed accounted bytes are negative".into(),
+        }
+    })?;
+    let node = serde_json::from_str::<ContextNode>(projected_node_json).map_err(|error| {
+        ContextProjectionError::CorruptProjectionRow {
+            seq: raw.event_seq,
+            reason: error.to_string(),
+        }
+    })?;
+    let expected_accounted_bytes = session_index_entry_bytes(
+        &raw.session_id,
+        raw.task_id.as_deref(),
+        &raw.node_id,
+        &raw.event_id,
+        &raw.causation_event_id,
+    )?;
+    let expected_valid_from = node.valid_from.as_ref().map(projection_timestamp_parts);
+    let expected_valid_until = node.valid_until.as_ref().map(projection_timestamp_parts);
+    let cached_edge_shape = cached_outgoing_edge_digest(connection, &raw.session_id, &raw.node_id)?;
+    if !projected_matches
+        || digest_bytes(projected_node_json.as_bytes()) != node_digest
+        || raw.projected_epistemic_status.as_deref() != Some(epistemic_status(node.epistemic))
+        || raw.projected_valid_from_millis != expected_valid_from.map(|value| value.0)
+        || raw.projected_valid_from_submillis_nanos != expected_valid_from.map(|value| value.1)
+        || raw.projected_valid_until_millis != expected_valid_until.map(|value| value.0)
+        || raw.projected_valid_until_submillis_nanos != expected_valid_until.map(|value| value.1)
+        || cached_edge_shape != (supersession_digest, supersession_count)
+        || !(1..=MAX_CONTEXT_SOURCE_EVENT_IDS).contains(&source_count)
+        || supersession_count > MAX_CONTEXT_SUPERSEDES
+        || node.id != raw.node_id
+        || node.source_event_ids.len() != source_count
+        || node.supersedes.len() != supersession_count
+        || !node
+            .source_event_ids
+            .iter()
+            .any(|source| source == &raw.causation_event_id)
+        || raw.causation_seq <= 0
+        || raw.causation_seq >= raw.event_seq
+        || accounted_bytes != expected_accounted_bytes
+    {
+        return Err(ContextProjectionError::SessionIndexIntegrityMismatch {
+            high_water: raw.event_seq,
+        });
+    }
+    Ok(SessionIndexEntry {
+        session_id: raw.session_id,
+        node_id: raw.node_id,
+        task_id: raw.task_id,
+        event_seq: raw.event_seq,
+        event_id: raw.event_id,
+        node_digest,
+        provenance_digest,
+        source_count,
+        causation_seq: raw.causation_seq,
+        causation_event_id: raw.causation_event_id,
+        supersession_digest,
+        supersession_count,
+        accounted_bytes,
+    })
+}
+
+fn load_session_identity_updates(
+    connection: &Connection,
+    after_seq: i64,
+    through_seq: i64,
+) -> Result<Vec<(String, String, SessionIndexIdentity)>, ContextProjectionError> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT session_id, node_id, task_id, event_seq, event_id
+        FROM session_index_nodes
+        WHERE event_seq > ?1 AND event_seq <= ?2
+        ORDER BY event_seq ASC
+        "#,
+    )?;
+    statement
+        .query_map(params![after_seq, through_seq], |row| {
+            let session_id = row.get::<_, String>(0)?;
+            let node_id = row.get::<_, String>(1)?;
+            Ok((
+                session_id,
+                node_id,
+                SessionIndexIdentity {
+                    task_id: row.get(2)?,
+                    event_seq: row.get(3)?,
+                    event_id: row.get(4)?,
+                },
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn read_session_index_state(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<SessionIndexState>, ContextProjectionError> {
+    let raw = connection
+        .query_row(
+            r#"
+            SELECT through_seq, through_event_id, state_digest,
+                   entry_count, accounted_bytes
+            FROM session_index_state
+            WHERE session_id = ?1
+            "#,
+            [session_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    raw.map(
+        |(through_seq, through_event_id, digest, entry_count, accounted_bytes)| {
+            let entry_count = u64::try_from(entry_count).map_err(|_| {
+                ContextProjectionError::CorruptProjectionRow {
+                    seq: through_seq,
+                    reason: "session index entry count is negative".into(),
+                }
+            })?;
+            let accounted_bytes = u64::try_from(accounted_bytes).map_err(|_| {
+                ContextProjectionError::CorruptProjectionRow {
+                    seq: through_seq,
+                    reason: "session index accounted bytes are negative".into(),
+                }
+            })?;
+            Ok(SessionIndexState {
+                through_seq,
+                through_event_id,
+                state_digest: digest_from_blob(&digest, through_seq, "session index state digest")?,
+                entry_count,
+                accounted_bytes,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn insert_session_index_entry(
+    transaction: &Transaction<'_>,
+    entry: &SessionIndexEntry,
+) -> Result<(), ContextProjectionError> {
+    transaction.execute(
+        r#"
+        INSERT INTO session_index_nodes (
+            session_id, node_id, task_id, event_seq, event_id,
+            node_digest, provenance_digest, source_count,
+            causation_seq, causation_event_id,
+            supersession_digest, supersession_count, accounted_bytes
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        "#,
+        params![
+            &entry.session_id,
+            &entry.node_id,
+            entry.task_id.as_deref(),
+            entry.event_seq,
+            &entry.event_id,
+            entry.node_digest.as_slice(),
+            entry.provenance_digest.as_slice(),
+            i64::try_from(entry.source_count).unwrap_or(i64::MAX),
+            entry.causation_seq,
+            &entry.causation_event_id,
+            entry.supersession_digest.as_slice(),
+            i64::try_from(entry.supersession_count).unwrap_or(i64::MAX),
+            i64::try_from(entry.accounted_bytes).unwrap_or(i64::MAX),
+        ],
+    )?;
+    Ok(())
+}
+
+fn write_session_index_state(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+    state: &SessionIndexState,
+) -> Result<(), ContextProjectionError> {
+    transaction.execute(
+        r#"
+        INSERT INTO session_index_state (
+            session_id, through_seq, through_event_id, state_digest,
+            entry_count, accounted_bytes
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(session_id) DO UPDATE SET
+            through_seq = excluded.through_seq,
+            through_event_id = excluded.through_event_id,
+            state_digest = excluded.state_digest,
+            entry_count = excluded.entry_count,
+            accounted_bytes = excluded.accounted_bytes
+        "#,
+        params![
+            session_id,
+            state.through_seq,
+            &state.through_event_id,
+            state.state_digest.as_slice(),
+            i64::try_from(state.entry_count).unwrap_or(i64::MAX),
+            i64::try_from(state.accounted_bytes).unwrap_or(i64::MAX),
+        ],
+    )?;
+    Ok(())
+}
+
+fn advance_session_index_state(
+    prior: Option<SessionIndexState>,
+    entry: &SessionIndexEntry,
+) -> Result<SessionIndexState, ContextProjectionError> {
+    let (prior_digest, prior_count, prior_bytes) = match prior {
+        Some(prior) => {
+            if prior.through_seq >= entry.event_seq {
+                return Err(ContextProjectionError::CorruptProjectionRow {
+                    seq: entry.event_seq,
+                    reason: "session index event sequence did not advance".into(),
+                });
+            }
+            (prior.state_digest, prior.entry_count, prior.accounted_bytes)
+        }
+        None => (
+            empty_state_digest(SESSION_INDEX_DIGEST_DOMAIN),
+            0_u64,
+            0_u64,
+        ),
+    };
+    let entry_count = checked_bounded_sum(
+        prior_count,
+        1,
+        "session index identities",
+        MAX_SESSION_INDEX_IDENTITIES,
+    )?;
+    let accounted_bytes = checked_bounded_sum(
+        prior_bytes,
+        entry.accounted_bytes,
+        "session index accounted bytes",
+        MAX_SESSION_INDEX_BYTES,
+    )?;
+    Ok(SessionIndexState {
+        through_seq: entry.event_seq,
+        through_event_id: entry.event_id.clone(),
+        state_digest: advance_state_digest(SESSION_INDEX_DIGEST_DOMAIN, prior_digest, entry),
+        entry_count,
+        accounted_bytes,
+    })
+}
+
+fn session_index_entry_bytes(
+    session_id: &str,
+    task_id: Option<&str>,
+    node_id: &str,
+    event_id: &str,
+    causation_event_id: &str,
+) -> Result<u64, ContextProjectionError> {
+    [
+        session_id.len(),
+        task_id.map_or(0, str::len),
+        node_id.len(),
+        event_id.len(),
+        causation_event_id.len(),
+    ]
+    .into_iter()
+    .try_fold(INDEX_ENTRY_FIXED_BYTES, |total, bytes| {
+        total
+            .checked_add(u64::try_from(bytes).unwrap_or(u64::MAX))
+            .ok_or(ContextProjectionError::SessionIndexLimitExceeded {
+                dimension: "session index accounted bytes",
+                attempted: u64::MAX,
+                maximum: MAX_SESSION_INDEX_BYTES,
+            })
+    })
+}
+
+fn canonical_provenance_digest(sources: &[EventRecord]) -> [u8; 32] {
+    let mut ordered = sources.iter().collect::<Vec<_>>();
+    ordered.sort_unstable_by(|left, right| {
+        left.seq
+            .cmp(&right.seq)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+    let mut hasher = Sha256::new();
+    update_framed_bytes(&mut hasher, PROVENANCE_DIGEST_DOMAIN);
+    hasher.update(
+        u64::try_from(ordered.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for source in ordered {
+        hasher.update(source.seq.to_be_bytes());
+        update_framed_bytes(&mut hasher, source.event_id.as_bytes());
+        update_framed_bytes(
+            &mut hasher,
+            source.session_id.as_deref().unwrap_or("").as_bytes(),
+        );
+        update_framed_bytes(
+            &mut hasher,
+            source.task_id.as_deref().unwrap_or("").as_bytes(),
+        );
+        update_framed_bytes(&mut hasher, source.actor.as_str().as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+fn empty_state_digest(domain: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    update_framed_bytes(&mut hasher, domain);
+    hasher.finalize().into()
+}
+
+fn advance_state_digest(domain: &[u8], prior: [u8; 32], entry: &SessionIndexEntry) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    update_framed_bytes(&mut hasher, domain);
+    hasher.update(prior);
+    update_framed_bytes(&mut hasher, entry.session_id.as_bytes());
+    update_framed_bytes(&mut hasher, entry.node_id.as_bytes());
+    update_framed_bytes(
+        &mut hasher,
+        entry.task_id.as_deref().unwrap_or("").as_bytes(),
+    );
+    hasher.update(entry.event_seq.to_be_bytes());
+    update_framed_bytes(&mut hasher, entry.event_id.as_bytes());
+    hasher.update(entry.node_digest);
+    hasher.update(entry.provenance_digest);
+    hasher.update(
+        u64::try_from(entry.source_count)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hasher.update(entry.causation_seq.to_be_bytes());
+    update_framed_bytes(&mut hasher, entry.causation_event_id.as_bytes());
+    hasher.update(entry.supersession_digest);
+    hasher.update(
+        u64::try_from(entry.supersession_count)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hasher.update(entry.accounted_bytes.to_be_bytes());
+    hasher.finalize().into()
+}
+
+fn update_framed_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn digest_from_blob(
+    bytes: &[u8],
+    seq: i64,
+    label: &str,
+) -> Result<[u8; 32], ContextProjectionError> {
+    bytes
+        .try_into()
+        .map_err(|_| ContextProjectionError::CorruptProjectionRow {
+            seq,
+            reason: format!("{label} is not exactly 32 bytes"),
+        })
+}
+
+fn checked_bounded_sum(
+    current: u64,
+    amount: u64,
+    dimension: &'static str,
+    maximum: u64,
+) -> Result<u64, ContextProjectionError> {
+    let attempted = current.checked_add(amount).unwrap_or(u64::MAX);
+    if attempted > maximum {
+        Err(ContextProjectionError::SessionIndexLimitExceeded {
+            dimension,
+            attempted,
+            maximum,
+        })
+    } else {
+        Ok(attempted)
+    }
+}
+
+fn charge_bounded_counter(
+    counter: &mut u64,
+    amount: u64,
+    dimension: &'static str,
+    maximum: u64,
+) -> Result<(), ContextProjectionError> {
+    *counter = checked_bounded_sum(*counter, amount, dimension, maximum)?;
+    Ok(())
 }
 
 fn digest_bytes(bytes: &[u8]) -> [u8; 32] {
@@ -3036,53 +3514,59 @@ fn cache_has_edges_for_node(
         .map_err(Into::into)
 }
 
-fn cached_incoming_edge_digest(
-    connection: &Connection,
-    session_id: &str,
-    node_id: &str,
-) -> Result<([u8; 32], usize), ContextProjectionError> {
-    let mut statement = connection.prepare(
-        r#"
-        SELECT superseding_node_id, task_key, event_seq, superseded_node_id
-        FROM supersession_edges
-        WHERE session_id = ?1 AND superseded_node_id = ?2
-        ORDER BY event_seq ASC, superseding_node_id ASC, task_key ASC, superseded_node_id ASC
-        "#,
-    )?;
-    let rows = statement.query_map(params![session_id, node_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
-    let mut hasher = Sha256::new();
-    let mut count = 0_usize;
-    for row in rows {
-        let (superseding_node_id, edge_task_key, event_seq, target) = row?;
-        update_edge_digest(
-            &mut hasher,
-            &superseding_node_id,
-            &edge_task_key,
-            event_seq,
-            &target,
-        );
-        count += 1;
-    }
-    Ok((hasher.finalize().into(), count))
-}
-
 fn apply_context_event(
     transaction: &Transaction<'_>,
     event_store: &EventStore,
     event: &EventRecord,
-) -> Result<(), ApplyContextEventError> {
-    let validated = decode_recorded_node(event_store, event)?;
+    prior_global_digest: [u8; 32],
+    mut delta_budget: Option<&mut DeltaVerificationBudget>,
+) -> Result<[u8; 32], ApplyContextEventError> {
+    let validated =
+        decode_recorded_node_with_budget(event_store, event, delta_budget.as_deref_mut())?;
     let scope = NodeScope {
         session_id: &validated.session_id,
         task_id: validated.task_id.as_deref(),
     };
+    if let Some(budget) = delta_budget.as_deref_mut() {
+        budget.charge_lookup()?;
+    }
+    if let Some(existing) =
+        read_session_index_identity(transaction, &validated.session_id, &validated.node.id)?
+    {
+        return Err(ContextProjectionError::DuplicateNodeIdentity {
+            session_id: validated.session_id,
+            node_id: validated.node.id,
+            event_id: existing.event_id,
+            seq: existing.event_seq,
+        }
+        .into());
+    }
+    for superseded_id in &validated.node.supersedes {
+        if let Some(budget) = delta_budget.as_deref_mut() {
+            budget.charge_lookup()?;
+        }
+        match read_session_index_identity(transaction, &validated.session_id, superseded_id)? {
+            None => {
+                return Err(ContextProjectionError::MissingSupersededNode {
+                    node_id: validated.node.id,
+                    superseded_id: superseded_id.clone(),
+                }
+                .into());
+            }
+            Some(existing) if existing.task_id != validated.task_id => {
+                return Err(ContextProjectionError::SupersessionScopeMismatch {
+                    node_id: validated.node.id,
+                    superseded_id: superseded_id.clone(),
+                }
+                .into());
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(budget) = delta_budget.as_deref_mut() {
+        budget.charge_lookup()?;
+        budget.charge_lookup()?;
+    }
     let preflight_conflict = cache_preflight_conflicts_with_event(transaction, event, &validated)?;
     let validation_conflict = projection_cache_conflicts(transaction, &validated.node, &scope)?;
     if preflight_conflict || validation_conflict {
@@ -3095,6 +3579,41 @@ fn apply_context_event(
             reason: error.to_string(),
         }
     })?;
+    let node_digest = digest_bytes(node_json.as_bytes());
+    let supersession_digest = canonical_edge_digest(
+        &validated.node.id,
+        task_key(scope.task_id),
+        event.seq,
+        &validated.node.supersedes,
+    );
+    let accounted_bytes = session_index_entry_bytes(
+        &validated.session_id,
+        validated.task_id.as_deref(),
+        &validated.node.id,
+        &event.event_id,
+        &validated.resolved.causation_id,
+    )?;
+    let entry = SessionIndexEntry {
+        session_id: validated.session_id.clone(),
+        node_id: validated.node.id.clone(),
+        task_id: validated.task_id.clone(),
+        event_seq: event.seq,
+        event_id: event.event_id.clone(),
+        node_digest,
+        provenance_digest: validated.resolved.provenance_digest,
+        source_count: validated.resolved.source_count,
+        causation_seq: validated.resolved.causation_seq,
+        causation_event_id: validated.resolved.causation_id.clone(),
+        supersession_digest,
+        supersession_count: validated.node.supersedes.len(),
+        accounted_bytes,
+    };
+    if let Some(budget) = delta_budget {
+        budget.charge_lookup()?;
+    }
+    let prior_session_state = read_session_index_state(transaction, &validated.session_id)?;
+    let session_state = advance_session_index_state(prior_session_state, &entry)?;
+
     let valid_from = validated
         .node
         .valid_from
@@ -3149,7 +3668,13 @@ fn apply_context_event(
             )
             .map_err(ContextProjectionError::from)?;
     }
-    Ok(())
+    insert_session_index_entry(transaction, &entry)?;
+    write_session_index_state(transaction, &entry.session_id, &session_state)?;
+    Ok(advance_state_digest(
+        GLOBAL_INDEX_DIGEST_DOMAIN,
+        prior_global_digest,
+        &entry,
+    ))
 }
 
 fn projection_timestamp_parts(value: &DateTime<Utc>) -> (i64, i64) {
@@ -3186,6 +3711,14 @@ fn decode_recorded_node(
     event_store: &EventStore,
     event: &EventRecord,
 ) -> Result<ValidatedRecordedNode, ContextProjectionError> {
+    decode_recorded_node_with_budget(event_store, event, None)
+}
+
+fn decode_recorded_node_with_budget(
+    event_store: &EventStore,
+    event: &EventRecord,
+    mut delta_budget: Option<&mut DeltaVerificationBudget>,
+) -> Result<ValidatedRecordedNode, ContextProjectionError> {
     if event.actor != EventActor::System {
         return Err(ContextProjectionError::InvalidActor {
             seq: event.seq,
@@ -3207,6 +3740,9 @@ fn decode_recorded_node(
         serialized_payload.len(),
         MAX_SERIALIZED_CONTEXT_PAYLOAD_BYTES,
     )?;
+    if let Some(budget) = delta_budget.as_deref_mut() {
+        budget.charge_context_payload(serialized_payload.len())?;
+    }
 
     let version = event
         .payload
@@ -3251,7 +3787,7 @@ fn decode_recorded_node(
     }
 
     validate_durable_node(&payload.node)?;
-    let resolved = resolve_sources(event_store, &payload.node, &scope, event.seq)?;
+    let resolved = resolve_sources(event_store, &payload.node, &scope, event.seq, delta_budget)?;
     if event.causation_id.as_deref() != Some(&resolved.causation_id) {
         return Err(ContextProjectionError::CausationMismatch {
             seq: event.seq,
@@ -3263,6 +3799,7 @@ fn decode_recorded_node(
         node: payload.node,
         session_id: scope.session_id.to_owned(),
         task_id: scope.task_id.map(str::to_owned),
+        resolved,
     })
 }
 
@@ -3396,9 +3933,13 @@ fn resolve_sources(
     node: &ContextNode,
     scope: &NodeScope<'_>,
     recording_seq: i64,
+    mut delta_budget: Option<&mut DeltaVerificationBudget>,
 ) -> Result<ResolvedNode, ContextProjectionError> {
     let mut sources = Vec::with_capacity(node.source_event_ids.len());
     for source_event_id in &node.source_event_ids {
+        if let Some(budget) = delta_budget.as_deref_mut() {
+            budget.charge_lookup()?;
+        }
         let source = event_store
             .get_by_event_id(source_event_id)?
             .ok_or_else(|| ContextProjectionError::MissingSource {
@@ -3437,18 +3978,20 @@ fn resolve_sources(
             origin: node.origin,
         });
     }
-    let causation_id = sources
-        .iter()
-        .max_by_key(|source| source.seq)
-        .ok_or(ContextProjectionError::DurableListOutOfRange {
+    let causation = sources.iter().max_by_key(|source| source.seq).ok_or(
+        ContextProjectionError::DurableListOutOfRange {
             field: "source_event_ids",
             actual: 0,
             minimum: 1,
             maximum: MAX_CONTEXT_SOURCE_EVENT_IDS,
-        })?
-        .event_id
-        .clone();
-    Ok(ResolvedNode { causation_id })
+        },
+    )?;
+    Ok(ResolvedNode {
+        causation_id: causation.event_id.clone(),
+        causation_seq: causation.seq,
+        provenance_digest: canonical_provenance_digest(&sources),
+        source_count: sources.len(),
+    })
 }
 
 fn validate_requested_scope<'a>(
@@ -3718,6 +4261,102 @@ mod tests {
     }
 
     #[test]
+    fn persistent_post_rebuild_session_index_corruption_returns_no_snapshot() {
+        let directory = tempfile::tempdir().expect("session index integrity fixture");
+        let store = EventStore::open(directory.path().join("state.db")).expect("event store");
+        let projection = ContextProjection::open_in(directory.path()).expect("projection");
+        let source = store
+            .append(NewEvent {
+                session_id: Some("session-index-integrity".into()),
+                task_id: None,
+                actor: EventActor::User,
+                kind: "fixture.source".into(),
+                payload: json!({"source": true}),
+                causation_id: None,
+                correlation_id: Some("session-index-integrity".into()),
+                span_id: None,
+            })
+            .expect("source event");
+        let node = ContextNode {
+            id: "persistent-index-node".into(),
+            kind: ContextNodeKind::Claim,
+            summary: "canonical summary".into(),
+            origin: ContextOrigin::User,
+            epistemic: EpistemicStatus::Verified,
+            scope: ContextScope::Session,
+            lens: ContextLens::Task,
+            confidence: 1.0,
+            source_event_ids: vec![source.event_id.clone()],
+            supersedes: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+        };
+        let recorded = store
+            .append(NewEvent {
+                session_id: Some("session-index-integrity".into()),
+                task_id: None,
+                actor: EventActor::System,
+                kind: event_kind::CONTEXT_NODE_RECORDED.into(),
+                payload: serde_json::to_value(ContextNodeRecordedPayloadV1::new(node))
+                    .expect("context payload"),
+                causation_id: Some(source.event_id),
+                correlation_id: Some("session-index-integrity".into()),
+                span_id: None,
+            })
+            .expect("context event");
+        projection.rebuild(&store).expect("source-verified replay");
+        let connection = Connection::open(projection.database_path()).expect("corrupt cache");
+        connection
+            .execute(
+                "UPDATE projected_nodes SET node_json = '{}' WHERE node_id = 'persistent-index-node'",
+                [],
+            )
+            .expect("force one repair attempt");
+        drop(connection);
+
+        *projection
+            .post_rebuild_snapshot_hook
+            .lock()
+            .expect("snapshot hook") = Some(Arc::new(|path| {
+            let connection = Connection::open(path).expect("post-rebuild index connection");
+            connection
+                .execute(
+                    "UPDATE session_index_state SET state_digest = zeroblob(32) WHERE session_id = 'session-index-integrity'",
+                    [],
+                )
+                .expect("persistently corrupt rebuilt session index");
+        }));
+
+        let error = projection
+            .synchronize_and_verified_snapshot_through(
+                &store,
+                recorded.seq,
+                "session-index-integrity",
+                None,
+            )
+            .expect_err("persistent index mismatch must not return a snapshot");
+        assert!(matches!(
+            error,
+            ContextProjectionError::ProjectionSnapshotIntegrityMismatch { high_water }
+                if high_water == recorded.seq
+        ));
+        let connection = Connection::open(projection.database_path()).expect("inspect index");
+        let digest: Vec<u8> = connection
+            .query_row(
+                "SELECT state_digest FROM session_index_state WHERE session_id = 'session-index-integrity'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("persistently corrupted index digest");
+        assert_eq!(
+            digest,
+            vec![0; 32],
+            "a second rebuild must not have occurred"
+        );
+        assert_eq!(store.count().expect("source count"), 2);
+    }
+
+    #[test]
     fn catch_up_repair_consumes_the_verified_snapshot_rebuild_budget() {
         let directory = tempfile::tempdir().expect("catch-up repair fixture");
         let store = EventStore::open(directory.path().join("state.db")).expect("event store");
@@ -3916,6 +4555,152 @@ mod tests {
                 .expect("repair metrics")
                 .cache_repairs,
             1
+        );
+    }
+
+    fn bounded_index_entry(accounted_bytes: u64, event_seq: i64) -> SessionIndexEntry {
+        SessionIndexEntry {
+            session_id: "session-bounds".into(),
+            node_id: format!("node-{event_seq}"),
+            task_id: None,
+            event_seq,
+            event_id: format!("event-{event_seq}"),
+            node_digest: [1; 32],
+            provenance_digest: [2; 32],
+            source_count: 1,
+            causation_seq: event_seq - 1,
+            causation_event_id: format!("source-{}", event_seq - 1),
+            supersession_digest: [3; 32],
+            supersession_count: 0,
+            accounted_bytes,
+        }
+    }
+
+    #[test]
+    fn compact_index_and_delta_counters_accept_exact_bounds_and_reject_n_plus_one() {
+        let entry = bounded_index_entry(1, 2);
+        let count_at_n = advance_session_index_state(
+            Some(SessionIndexState {
+                through_seq: 1,
+                through_event_id: "event-1".into(),
+                state_digest: [4; 32],
+                entry_count: MAX_SESSION_INDEX_IDENTITIES - 1,
+                accounted_bytes: 1,
+            }),
+            &entry,
+        )
+        .expect("identity count N is accepted");
+        assert_eq!(count_at_n.entry_count, MAX_SESSION_INDEX_IDENTITIES);
+        let count_error = advance_session_index_state(Some(count_at_n), &bounded_index_entry(1, 3))
+            .expect_err("identity count N+1 is rejected");
+        assert!(matches!(
+            count_error,
+            ContextProjectionError::SessionIndexLimitExceeded {
+                dimension: "session index identities",
+                attempted,
+                maximum: MAX_SESSION_INDEX_IDENTITIES,
+            } if attempted == MAX_SESSION_INDEX_IDENTITIES + 1
+        ));
+
+        let bytes_at_n = advance_session_index_state(
+            Some(SessionIndexState {
+                through_seq: 1,
+                through_event_id: "event-1".into(),
+                state_digest: [5; 32],
+                entry_count: 1,
+                accounted_bytes: MAX_SESSION_INDEX_BYTES - 7,
+            }),
+            &bounded_index_entry(7, 2),
+        )
+        .expect("accounted byte N is accepted");
+        assert_eq!(bytes_at_n.accounted_bytes, MAX_SESSION_INDEX_BYTES);
+        let byte_error = advance_session_index_state(Some(bytes_at_n), &bounded_index_entry(1, 3))
+            .expect_err("accounted byte N+1 is rejected");
+        assert!(matches!(
+            byte_error,
+            ContextProjectionError::SessionIndexLimitExceeded {
+                dimension: "session index accounted bytes",
+                attempted,
+                maximum: MAX_SESSION_INDEX_BYTES,
+            } if attempted == MAX_SESSION_INDEX_BYTES + 1
+        ));
+
+        let mut delta = DeltaVerificationBudget::default();
+        delta.work.events = MAX_NORMAL_DELTA_EVENTS - 1;
+        delta.charge_event().expect("delta event N is accepted");
+        let event_error = delta
+            .charge_event()
+            .expect_err("delta event N+1 is rejected");
+        assert_eq!(delta.work.events, MAX_NORMAL_DELTA_EVENTS);
+        assert!(matches!(
+            event_error,
+            ContextProjectionError::SessionIndexLimitExceeded {
+                dimension: "normal delta events",
+                attempted,
+                maximum: MAX_NORMAL_DELTA_EVENTS,
+            } if attempted == MAX_NORMAL_DELTA_EVENTS + 1
+        ));
+
+        let mut delta = DeltaVerificationBudget::default();
+        delta.work.context_payload_bytes = MAX_NORMAL_DELTA_CONTEXT_BYTES - 1;
+        delta
+            .charge_context_payload(1)
+            .expect("delta context byte N is accepted");
+        let payload_error = delta
+            .charge_context_payload(1)
+            .expect_err("delta context byte N+1 is rejected");
+        assert_eq!(
+            delta.work.context_payload_bytes,
+            MAX_NORMAL_DELTA_CONTEXT_BYTES
+        );
+        assert!(matches!(
+            payload_error,
+            ContextProjectionError::SessionIndexLimitExceeded {
+                dimension: "normal delta context payload bytes",
+                attempted,
+                maximum: MAX_NORMAL_DELTA_CONTEXT_BYTES,
+            } if attempted == MAX_NORMAL_DELTA_CONTEXT_BYTES + 1
+        ));
+
+        let mut delta = DeltaVerificationBudget::default();
+        delta.work.verification_work = MAX_NORMAL_DELTA_VERIFICATION_WORK - 1;
+        delta.charge_work(1).expect("delta work N is accepted");
+        let work_error = delta
+            .charge_work(1)
+            .expect_err("delta work N+1 is rejected");
+        assert_eq!(
+            delta.work.verification_work,
+            MAX_NORMAL_DELTA_VERIFICATION_WORK
+        );
+        assert!(matches!(
+            work_error,
+            ContextProjectionError::SessionIndexLimitExceeded {
+                dimension: "normal delta verification work",
+                attempted,
+                maximum: MAX_NORMAL_DELTA_VERIFICATION_WORK,
+            } if attempted == MAX_NORMAL_DELTA_VERIFICATION_WORK + 1
+        ));
+    }
+
+    #[test]
+    fn canonical_index_digest_is_domain_separated_ordered_and_field_sensitive() {
+        let first = bounded_index_entry(128, 2);
+        let second = bounded_index_entry(128, 3);
+        let empty_global = empty_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN);
+        let empty_session = empty_state_digest(SESSION_INDEX_DIGEST_DOMAIN);
+        assert_ne!(empty_global, empty_session);
+
+        let first_global = advance_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN, empty_global, &first);
+        let ordered = advance_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN, first_global, &second);
+        let second_first = advance_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN, empty_global, &second);
+        let reversed = advance_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN, second_first, &first);
+        assert_ne!(ordered, reversed);
+
+        let mut changed = second.clone();
+        changed.provenance_digest[0] ^= 0xff;
+        assert_ne!(
+            ordered,
+            advance_state_digest(GLOBAL_INDEX_DIGEST_DOMAIN, first_global, &changed)
         );
     }
 
