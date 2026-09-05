@@ -209,3 +209,11 @@ fn input_manifest_and_raw_authority_are_closed() {
         );
     }
 }
+
+#[test]
+fn input_reference_preserves_known_persisted_encoding() {
+    assert_eq!(
+        sort::input_reference(b"abc"),
+        "artifact:sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}

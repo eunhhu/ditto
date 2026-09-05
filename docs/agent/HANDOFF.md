@@ -26,7 +26,8 @@
 ## Canonical state
 
 - Branch: `dev/task-011-model-sort`, based on main merge
-  `ef65fff624703a7ad886967dc93f27a7bdbd33c5` (Task 010, PR #15).
+  `ef65fff624703a7ad886967dc93f27a7bdbd33c5` (Task 010, PR #15), then integrated
+  main `cbc301d57cd5a5b196366fda9999aeef1642def2` with its separate dependency updates.
   The user authorized merge and continued implementation. Tested ancestry is
   retained with merge commits; the associated PR records final Linux checks.
 - Runtime: Rust daemon and CLI.
@@ -137,13 +138,20 @@
   Cancellation before authorization or after claim cannot publish new success;
   the existing child cancellation/cleanup path is used.
 - Final macOS/aarch64 canonical gate passed canaries, format, strict Clippy,
-  413 unit/integration tests, 25 compile-fail doctests and three required actual
-  CLI tests: **441 tests across 45 suites**. Rust 1.88 workspace/all-target check
+  416 unit/integration tests, 25 compile-fail doctests and three required actual
+  CLI tests: **444 tests across 45 suites**. Rust 1.88 workspace/all-target check
   passed. Production daemon/CLI smoke passed disabled attachment with no
   artifact/admission, memory/restart/SSE shutdown, and the existing provider-free
   sort workflow. No live/paid model call, provider credential access, new crate,
   dependency or service was used. Review was local; no external model approval
   or measured performance superiority is claimed.
+
+- The first Linux CI combined this branch with separately updated main and
+  exposed sha2 0.11's removed LowerHex implementation. That base was integrated,
+  the failure reproduced locally, and bounded explicit encoding restored the
+  identical persisted hash format. Known-vector regressions cover artifacts,
+  sort inputs and package digests. The final checks use all updated dependencies;
+  those independent main changes are retained.
 
 ## Earlier verified slices
 

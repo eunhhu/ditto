@@ -1,6 +1,8 @@
 # Task 011 verification evidence
 
-Base: main `ef65fff624703a7ad886967dc93f27a7bdbd33c5` (Task 010 / PR #15).
+Initial base: main `ef65fff624703a7ad886967dc93f27a7bdbd33c5` (Task 010 / PR #15).
+Final integrated base: `cbc301d57cd5a5b196366fda9999aeef1642def2`, including the
+separately merged dependency updates from PRs #8–#11.
 Branch: `dev/task-011-model-sort`.
 Contract: [Task 011](011-model-sort.md), [ADR 0018](../../adr/0018-user-scoped-model-sort.md).
 
@@ -11,11 +13,11 @@ documentation-only updates:
 
 | Component | Git object |
 | --- | --- |
-| `crates/` tree | `8eb33887a5fdaabd43cd89d70c61db206c500e4b` |
+| `crates/` tree | `9f129aca79d18a70cdcfc59a49f0e6f8051ec34c` |
 | `apps/` tree | `07e1e4ec3de35a50f8d5c191ac87ec249f366586` |
 | `scripts/` tree | `4deefcb3c1e66376e8a24d4183d0835fddcde905` |
 | `capabilities/` tree | `587656a7bdb5587e2402e2e5227da23f7d7e2935` |
-| `Cargo.lock` blob | `40da6ef7fe4f3efb63aa447d53804e58ca74f7b0` |
+| `Cargo.lock` blob | `8becaa9b566177cc2040bf75682bbbc2329d0e8a` |
 
 ## Replayable checks
 
@@ -45,11 +47,20 @@ rtk git diff --check
 ```
 
 The canonical gate passed formatting, strict all-target/all-feature Clippy,
-**413 unit/integration tests + 25 compile-fail doctests + 3 required built-CLI
-tests = 441 tests across 45 suites**. Initially ignored CLI tests are explicitly
+**416 unit/integration tests + 25 compile-fail doctests + 3 required built-CLI
+tests = 444 tests across 45 suites**. Initially ignored CLI tests are explicitly
 run after the gate builds the binary. The first gate found a test assertion
 requiring EventRecord equality; the test now compares its complete serialized
 record. The final gate is green. No skipped check is counted as passed.
+
+The first Linux PR run (33998585130) exposed independently merged main's sha2
+0.11 update: its output container no longer implements LowerHex. Integrating
+that main reproduced the compiler failure locally. The compatibility fix keeps
+lowercase, zero-padded hashes with bounded byte encoding and reuses the existing
+capability encoder. Three known-vector tests in artifact-store, artifact-sort
+and capability prove persisted references/package digests retain their format.
+The final canonical/MSRV checks and production smoke use the integrated
+versions of sha2, toml, base64 and tower-http; those updates are preserved.
 
 Review focused on live canonical authority, lazy disclosure, shared ownership
 and cancellation, at-most-once dispatch, evidence consistency, independent
