@@ -3,6 +3,46 @@
 A capability is metadata plus an isolated implementation. Discovering a
 manifest must not start its runtime.
 
+## Package headers and manifest paging
+
+On Linux/macOS, a package can include generated `capability.header.json` beside
+`capability.toml`. The daemon indexes bounded headers and reads a full manifest
+only when selected for execution. Headers carry discovery/card fields,
+retrieval metadata, candidate-byte accounting, and the exact manifest-byte
+SHA-256 digest. They carry no runtime command, resource templates, policy, or
+verification implementation and grant no invocation authority.
+
+Generate a header after editing a manifest:
+
+```bash
+cargo run -p ditto-capability --example package_header -- \
+  capabilities/core/artifact-read/capability.toml \
+  > capabilities/core/artifact-read/capability.header.json
+```
+
+The generator writes JSON to stdout; the catalogue never writes package files.
+Bundled-package tests detect generator/header drift. Reload the catalogue after
+regenerating headers. A selected manifest must match both the header's digest
+and complete metadata projection before existing schema/live-binding checks.
+Changed or unavailable bodies fail closed; no stale full-manifest cache is used.
+
+Headerless packages remain supported through a bounded legacy startup read:
+derive the header/digest once and discard the full manifest. Metrics distinguish
+legacy reads from cold header-backed loading. Inactive header-backed packages
+never parse their bodies or validate their inactive complement links. Active
+complements must resolve to installed headers; lifecycle/runtime filters still
+apply before selection. Package metadata is trusted installation input; signing
+and hot reload are deferred.
+
+The Rust 0.2 catalogue exposes `header` for discovery, `page_manifest` for
+fallible owned full-manifest access, and `load_metrics` for inspectable work.
+The explicit in-memory `insert` path retains the caller's manifest; its header
+has an empty file digest and cannot serialize as an installed package header.
+Headered startup and retrieval use no model/provider calls or runtime process.
+See [ADR 0014](../adr/0014-capability-package-headers.md) for the exact file,
+traversal, package-count, startup-byte and retained-data envelopes and platform
+boundaries. Serialized capability and event versions remain unchanged.
+
 ```toml
 id = "device.process.run"
 version = "0.1.0"
@@ -72,8 +112,9 @@ installed placement, prerequisites, allowed capability IDs, and an effect ceilin
 must all permit the manifest's minimum effect.
 
 Available placements are a set, not one global location. A remote primary tool
-may therefore compose with a local artifact reader. Complements are validated at
-catalogue load and deduplicated across ranked roots and expansions.
+may therefore compose with a local artifact reader. Active complement references
+are resolved from headers at catalogue load and deduplicated across ranked roots
+and expansions; full runtime metadata is validated on selected manifest paging.
 
 Descriptions, intents, aliases, negative examples, prerequisites, and
 complements may influence the historical catalogue ranking. Health and observed
@@ -82,7 +123,7 @@ ranking tuple. Embedding similarity only reranks already eligible candidates; it
 never bypasses hard filters or policy.
 
 The shared-query V2 path is separately bounded and typed; the historical
-raw-string search remains unchanged. V2 counts installed manifests before
+raw-string search remains unchanged. V2 counts lifecycle-active headers before
 filters, rejects catalogue candidate 10,001, accepts 1 through 256 ranked roots,
 and accepts 1 through 512 expanded cards. It consumes only retrieval-owned
 normalization and tokenization. Entity/resource exact terms may select a whole

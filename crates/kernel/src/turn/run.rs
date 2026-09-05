@@ -190,17 +190,30 @@ impl DittoKernel {
         )?;
         cause = context_event.event_id;
 
-        let Some(manifest) = self.inner.capabilities.get(ARTIFACT_READ_ID) else {
-            return Err(self.persist_turn_failure(
-                &scope,
-                &cause,
-                TurnFailureCode::CapabilityUnavailable,
-                "installed artifact.read capability is unavailable",
-                None,
-                None,
-            ));
+        let manifest = match self.inner.capabilities.page_manifest(ARTIFACT_READ_ID) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => {
+                return Err(self.persist_turn_failure(
+                    &scope,
+                    &cause,
+                    TurnFailureCode::CapabilityUnavailable,
+                    "installed artifact.read capability is unavailable",
+                    None,
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(self.persist_turn_failure(
+                    &scope,
+                    &cause,
+                    TurnFailureCode::CapabilityContract,
+                    "installed artifact.read package could not be verified",
+                    None,
+                    None,
+                ));
+            }
         };
-        if let Err(error) = validate_artifact_read_manifest(manifest) {
+        if let Err(error) = validate_artifact_read_manifest(&manifest) {
             return Err(self.persist_turn_failure(
                 &scope,
                 &cause,
@@ -233,7 +246,6 @@ impl DittoKernel {
             ));
         }
 
-        let manifest = manifest.clone();
         let deriver = ArtifactReadDeriver::default();
         let mut live_epoch = LiveExecutionEpoch::new(1);
         if live_epoch
