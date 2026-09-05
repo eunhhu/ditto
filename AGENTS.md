@@ -5,7 +5,9 @@ rules for their directories.
 
 ## Mission
 
-Build Ditto as a local-first semantic agent microkernel:
+Build Ditto as a local-first personal general-purpose agent, implemented through
+a semantic agent microkernel. [Product intent](docs/product.md) owns its user
+positioning and long-term efficiency goals.
 
 > Context is compiled. Capabilities are paged. Effects are leased. Improvements
 > are promoted.

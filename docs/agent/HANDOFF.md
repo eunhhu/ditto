@@ -1,5 +1,22 @@
 # Verified handoff
 
+## Confirmed product intent
+
+- On 2026-09-06, the user confirmed a personal general-purpose agent, with
+  Hermes as a positioning reference. The target problems are process memory
+  overhead, context inefficiency, memory and scheduled-job reliability,
+  long-use self-improvement degradation, task performance, and latency.
+  [Product intent](../product.md) records that clarification and separates
+  proposed measurements from implemented guarantees. This is user-provided
+  positioning, not a benchmark of Hermes or evidence of achieved superiority.
+- Product framing is now explicit in the root README and agent guidance.
+  Runtime contracts, deferred subsystems, and the Task 006 frontier are
+  unchanged by this documentation clarification.
+- Documentation verification: `rtk ./scripts/agent-check.sh` passed the canary,
+  formatting, strict Clippy, 351 unit/integration tests, and 24 compile-fail
+  doctests. The new product document passed the staged canary and diff checks;
+  all 27 local Markdown link targets across the five changed documents resolve.
+
 ## Canonical state
 
 - Branch: `dev/task-006-session-index`.
