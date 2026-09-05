@@ -329,7 +329,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<CapabilityManifest, CapabilityError> {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::invocation::hex(&Sha256::digest(bytes))
 }
 pub(super) fn invalid(reason: &'static str) -> CapabilityError {
     CapabilityError::PackageInvalid(reason)
@@ -362,6 +362,14 @@ pub(super) fn charge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_digest_preserves_known_persisted_encoding() {
+        assert_eq!(
+            super::digest(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn fixed_aggregate_envelopes_accept_n_and_leave_counters_unchanged_at_n_plus_one() {

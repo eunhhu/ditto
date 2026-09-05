@@ -25,14 +25,13 @@
 
 ## Canonical state
 
-- Branch: `dev/task-010-local-process`, based on main merge
-  `aefe9d28be564db7a9fe1205fe0c9f996b2e2ec9` (Task 009, PR #14). The user authorized merge and
-  continuation: PR #7 merged as `bc990a9e2e003ef04999867dc49d7843f3824847`, then
-  PR #12 was retargeted to main and merged as `32bb4d1`, followed by PR #13.
-  Existing tested
-  commit ancestry was retained with merge commits.
+- Branch: `dev/task-011-model-sort`, based on main merge
+  `ef65fff624703a7ad886967dc93f27a7bdbd33c5` (Task 010, PR #15), then integrated
+  main `cbc301d57cd5a5b196366fda9999aeef1642def2` with its separate dependency updates.
+  The user authorized merge and continued implementation. Tested ancestry is
+  retained with merge commits; the associated PR records final Linux checks.
 - Runtime: Rust daemon and CLI.
-- Durable stores: SQLite event spine (schema 3 adds task/turn lookup indexes)
+- Durable stores: SQLite event spine (schema 4 adds the bounded model-sort index)
   plus local SHA-256 artifact objects. Context projection remains schema 4.
 - Public mutation ingress: typed user-input and explicit input-to-memory
   promotion commands; arbitrary event append and trusted drafts are not public
@@ -41,6 +40,8 @@
   request identity, or signal cancellation; ordinary input remains record-only.
   A separate explicit sort command accepts bounded file content and unique mode,
   with typed status/cancel and kernel-owned authority. Sort routes are loopback-only.
+  Model runs can additionally carry one exact sort attachment and a separate
+  deduplication permission. The kernel derives authority; model text cannot grant it.
 - Streaming design: subscribe-first, high-water-bounded, paginated durable
   replay with sequence-gap and lag recovery.
 - Capability state: generated file-backed package headers with selected-only
@@ -106,10 +107,53 @@
   credentials, bounded SSE decoding and correlation, exact model/storage/
   continuation checks, optional-versus-required usage handling, and explicit
   ephemeral or provider-managed remote response state. The kernel now owns an
-  injected-driver `artifact.read` continuation loop and pure replay projector;
+  injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
 ## Latest verified slice
+
+- Task 011 is complete under [ADR 0018](../adr/0018-user-scoped-model-sort.md).
+  [Evidence](tasks/011-evidence.md) identifies the tested source trees and checks.
+- `run REQUEST --sort-file FILE [--allow-deduplicate]` attaches bounded exact
+  content and authorizes one model-directed sort until the turn deadline. Only
+  the reference and actual user permission enter initial context. The same
+  bounded loop conditionally pages read/sort schemas and dispatches the existing
+  worker through one exact-resource lease and affine claim. Invalid arguments,
+  another artifact and unapproved deduplication do not consume the lease; a
+  repeated allowed call cannot execute again.
+- Version-2 agent-run metadata binds exact attachment bytes and the permission
+  to retry identity; no-attachment requests retain version 1. Distinct causal
+  sort request/start/output events and rooted artifacts preserve evidence. The
+  model answer remains unverified, without a model-task completion producer.
+- Run status independently rechecks bounded input/output hashes, causal roots
+  and the line contract. A verified sort survives later model failure or runtime
+  loss; restart and exact retry never reissue it. Denied attempts remain not-run
+  with a failure code and cannot erase prior executed results. The schema-4
+  partial index bounds sort inspection to nine rows, including a corruption
+  sentinel, without full transcript scans or a growing result cache. Legacy
+  event records are not rewritten and context projection stays schema 4.
+- Pure replay validates source permission, selected contracts, normalization,
+  causal dispatch/result and exact model continuation without process/provider
+  or artifact I/O. Artifact content verification remains a status/worker duty.
+  Cancellation before authorization or after claim cannot publish new success;
+  the existing child cancellation/cleanup path is used.
+- Final macOS/aarch64 canonical gate passed canaries, format, strict Clippy,
+  416 unit/integration tests, 25 compile-fail doctests and three required actual
+  CLI tests: **444 tests across 45 suites**. Rust 1.88 workspace/all-target check
+  passed. Production daemon/CLI smoke passed disabled attachment with no
+  artifact/admission, memory/restart/SSE shutdown, and the existing provider-free
+  sort workflow. No live/paid model call, provider credential access, new crate,
+  dependency or service was used. Review was local; no external model approval
+  or measured performance superiority is claimed.
+
+- The first Linux CI combined this branch with separately updated main and
+  exposed sha2 0.11's removed LowerHex implementation. That base was integrated,
+  the failure reproduced locally, and bounded explicit encoding restored the
+  identical persisted hash format. Known-vector regressions cover artifacts,
+  sort inputs and package digests. The final checks use all updated dependencies;
+  those independent main changes are retained.
+
+## Earlier verified slices
 
 - Task 010 is complete under [ADR 0017](../adr/0017-bounded-local-sort.md).
   [Evidence](tasks/010-evidence.md) maps authority, real-process, verifier,
@@ -136,7 +180,7 @@
   new sort-specific `task.completed` producer. Status verifies exact causal
   artifact roots, bounded content hashes and line evidence before returning
   `verified`; exit code alone is insufficient. Broader model answers remain
-  unverified and automatic model-to-process dispatch is deferred.
+  unverified. Task 011 subsequently adds explicit per-run model dispatch.
 - The macOS canonical gate passed canary, format, strict Clippy, 403
   unit/integration tests, 25 compile-fail doctests, and both required built-CLI
   tests: 430 total across 44 suites. The new CLI test is part of the gate.
@@ -523,12 +567,12 @@
 
 ## Intentionally deferred
 
-- durable scheduled execution and general/effectful tool continuation;
+- durable scheduled execution and additional effectful tool profiles;
 - additional providers, OpenAI model profiles, reasoning replay, remote cancel,
   and explicit prompt-cache breakpoints;
 - additional capability derivers, durable/cross-process authorization,
   approval fulfillment, and the capability worker protocol;
-- device registry, general process profiles/model dispatch, SSH transport, and secrets;
+- device registry, general process profiles, SSH transport, and secrets;
 - a production embedding worker/provider and persisted embedding cache;
 - additional completion verifiers and improvement compiler;
 - authenticated remote gateway and web inspector.
@@ -573,8 +617,9 @@
   by append rather than an atomic verifier/admission transaction. The new sort
   producer uses dedicated `sort_*` tasks and the shared slot gate; it does not
   add a completion producer for model `run_*` tasks.
-- The first process profile is explicit sort only. Model-driven process grants,
-  broader programs, host-crash containment and additional task verifiers need
-  separate contracts; do not widen the current resource claim to arbitrary code.
+- The only process profile is bounded sort, explicitly invoked or attached to
+  a model run with scoped permission. Broader programs, host-crash containment
+  and additional task verifiers need separate contracts; do not widen the
+  current resource claim to arbitrary code.
 
 Update this file only after code and checks establish a new fact.

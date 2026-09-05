@@ -71,6 +71,12 @@ def main():
                 disabled = run("run", "hello", "--request-id", request, success=False)
                 assert request in disabled.stderr and "503" in disabled.stderr
                 assert health()["durable_events"] == before
+                attachment = root / "list.txt"
+                attachment.write_text("b\na\nb", encoding="utf-8")
+                disabled_sort = run("run", "sort attachment", "--sort-file", str(attachment),
+                                    "--allow-deduplicate", "--request-id", request, success=False)
+                assert "503" in disabled_sort.stderr and "sort attached file once" in disabled_sort.stderr
+                assert health()["durable_events"] == before
                 assert "404" in run("run-status", request, success=False).stderr
                 assert "404" in run("run-cancel", request, success=False).stderr
                 run("input", "record only", "--session", "personal")
@@ -88,7 +94,7 @@ def main():
                 assert "404" in run("run-status", request, success=False).stderr
                 stop()
                 print(json.dumps({"result": "passed", "scenarios": [
-                    "disabled run has no durable admission", "recoverable CLI request ID",
+                    "disabled run has no durable admission", "disabled sort attachment has no artifact or admission", "recoverable CLI request ID",
                     "missing run inspection/cancellation", "record-only input",
                     "SIGTERM with open SSE follower", "restart preserves memory and does not run rejected work"
                 ]}))

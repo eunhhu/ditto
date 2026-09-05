@@ -158,16 +158,19 @@ owns this command and retry contract.
 
 ## Explicit agent runs
 
-`POST /v1/commands/run` accepts only `request_id`, `session_id`, and `text`.
+`POST /v1/commands/run` accepts `request_id`, `session_id`, `text`, and the
+optional bounded `sort` permission described below.
 The request ID is a canonical uppercase ULID; session IDs are canonical and
 text is at most 16 KiB UTF-8 before existing whitespace normalization. The
 kernel derives task ID `run_<request_id>` and creates a fresh turn correlation.
-The durable input carries additive `agent_run: {version: 1, request_id: ...}`
-metadata fixed by the kernel, never copied from client event fields.
+Without a sort attachment the durable input carries additive
+`agent_run: {version: 1, request_id: ...}` metadata fixed by the kernel, never
+copied from client event fields.
 
 Acceptance precedes dispatch and returns HTTP 202 with `running`. Identical
 normalized text with the same session/request ID returns the existing run,
-including terminal or interrupted runs; changed text is HTTP 409. One active
+including terminal or interrupted runs; changed text, attachment or permission
+is HTTP 409. One active
 run is allowed per kernel, and additional identities get HTTP 429 without
 acceptance or a queue. Disabled execution and shutdown return HTTP 503 for new
 work. The daemon's default is disabled; input and memory routes remain free of
@@ -249,8 +252,53 @@ race; cancellation after completion returns that completion.
 HTTP statuses are 202 for running admission, 200 for prior/terminal results,
 400 invalid input, 404 absent/wrong scope, 409 changed retry, 422 unknown fields,
 429 occupied slot, 503 shutdown and 500 unavailable storage. Non-loopback
-listeners do not mount these routes. Existing model-turn payloads, replay and
-the event-store schema are unchanged. See [ADR 0017](../adr/0017-bounded-local-sort.md).
+listeners do not mount these routes. See [ADR 0017](../adr/0017-bounded-local-sort.md).
+
+## Model-directed sort permission
+
+`POST /v1/commands/run` additionally accepts optional
+`sort: {"text": "b\na", "allow_deduplicate": false}`. Both nested fields are
+required and unknown fields are rejected. The same 64 KiB / 4096 UTF-8 LF-line,
+no-NUL bound applies. The kernel stores this exact input as a task artifact and
+records version-2 `agent_run` metadata with its reference, source event ID and
+permission bit. Clients cannot choose those internal fields. Without an
+attachment, metadata remains version 1 and the sort schema is absent.
+
+CLI `--sort-file FILE` grants one sort of the attachment until the end of this
+bounded turn; `--allow-deduplicate` additionally permits duplicate removal.
+Normalized request text, exact attachment bytes and permission are retry identity.
+The initial user message projects the reference and permission, with no local
+path or file body. The existing loop pages the exact read/sort schemas, uses one
+canonical-resource lease/affine claim, and continues with a structured result.
+Each process retains the existing five-second owned lifetime; the lease expires
+with the turn, at most five minutes after admission.
+
+Version-1 `agent.sort.requested` (model), `agent.sort.started` (capability), and
+`agent.sort.output` (capability) extend the same strict turn cause chain. They
+carry `turn_id`, request index and call ID; spans use the call ID. Requested
+evidence includes raw and normalized arguments. Started evidence records the
+normalized operation, epoch/digest/permit/claim identities and claim/expiry times.
+`claimed` on output means a claim was consumed, not that process spawning was
+observed. Output is either a verified reference/verifier/line-count result or a
+closed error code. A successful artifact root is system-authored, task-scoped,
+caused by that start and outside the turn correlation. Output names its exact
+artifact event while retaining the start as its cause.
+
+No model `run_*` task.completed is emitted. The response optionally contains
+`sort` with input reference, deduplication permission, state (`not_run`,
+`running`, `verified`, `failed`, `interrupted`) and output/reference or failure
+code. A rejected attempt may report a failure code while remaining `not_run`.
+Later rejected attempts cannot overwrite an already executed result. Status
+uses a schema-4 partial index for start/output records with a nine-row corruption
+sentinel (one start plus seven outputs are valid). Exact evidence/root lookups,
+bounded hashes and an independent line verifier establish verified output,
+including after model failure or owner loss. Corruption returns storage failure.
+
+Pure replay adds `sort_calls`, validates permission, selected contracts,
+normalization, one-shot dispatch, output roots and exact continuation without
+I/O or reconstructed live authority. It checks structural evidence; status also
+checks artifact content. Existing turns remain readable, and an old reader must
+reject version-2 metadata. See [ADR 0018](../adr/0018-user-scoped-model-sort.md).
 
 ## Kernel artifact-read turns
 

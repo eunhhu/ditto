@@ -435,7 +435,11 @@ impl DittoKernel {
         Ok(response)
     }
 
-    fn sort_artifact_bytes(&self, reference: &str, limit: usize) -> Result<Vec<u8>, AgentRunError> {
+    pub(crate) fn sort_artifact_bytes(
+        &self,
+        reference: &str,
+        limit: usize,
+    ) -> Result<Vec<u8>, AgentRunError> {
         let reference = ArtifactRef::new(reference).map_err(|_| AgentRunError::Storage)?;
         let read = self
             .inner

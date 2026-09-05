@@ -163,18 +163,35 @@ mod tests {
         fn descriptor(&self) -> &DriverDescriptor {
             &self.descriptor
         }
-        fn stream(&self, _request: ModelRequest, _: CancellationToken) -> ModelEventStream {
+        fn stream(&self, request: ModelRequest, _: CancellationToken) -> ModelEventStream {
             let index = self.calls.fetch_add(1, Ordering::SeqCst);
             let reference = self.reference.clone();
+            let grant = request.turn.conversation.iter().find_map(|item| {
+                let ditto_model::ConversationItem::Message { content, .. } = item else {
+                    return None;
+                };
+                content.iter().find_map(|part| {
+                    let ditto_model::ContentPart::Structured { value } = part else {
+                        return None;
+                    };
+                    Some((
+                        value["attachment"]["reference"].as_str()?.to_owned(),
+                        value["user_permission"]["allow_deduplicate"].as_bool()?,
+                    ))
+                })
+            });
             let block = self.block;
             ModelEventStream::new(async_stream::stream! {
                 if block { std::future::pending::<()>().await; }
                 if index == 0 {
                     let id = ProviderCallId::new("http-read").unwrap();
-                    let arguments = json!({"reference":reference,"offset":0,"length":32});
-                    yield ModelEvent::ToolCallStarted { call_id: id.clone(), capability_id: "artifact.read".into() };
+                    let (capability,arguments) = match grant {
+                        Some((reference,unique)) => ("artifact.sort",json!({"reference":reference,"unique":unique})),
+                        None => ("artifact.read",json!({"reference":reference,"offset":0,"length":32})),
+                    };
+                    yield ModelEvent::ToolCallStarted { call_id: id.clone(), capability_id: capability.into() };
                     yield ModelEvent::ToolCallArgumentDelta { call_id: id.clone(), delta: arguments.to_string() };
-                    yield ModelEvent::ToolCallReady { call_id:id, capability_id:"artifact.read".into(), arguments };
+                    yield ModelEvent::ToolCallReady { call_id:id, capability_id:capability.into(), arguments };
                     yield ModelEvent::Completed { finish_reason: FinishReason::ToolCalls, continuation: None };
                 } else {
                     yield ModelEvent::TextDelta { text: "HTTP artifact answer".into() };
@@ -561,5 +578,158 @@ mod tests {
         assert_eq!(status.failure_code.as_deref(), Some("cancelled"));
         task.abort();
         let _ = task.await;
+    }
+    #[tokio::test]
+    #[ignore = "requires cargo build -p ditto-cli; runs model-directed OS sort via the actual CLI"]
+    async fn built_cli_model_sort_permission_retry_and_disabled_status() {
+        let root = tempfile::tempdir().unwrap();
+        let config = KernelConfig::new(
+            root.path().join("data"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
+        );
+        let kernel = DittoKernel::open(config.clone()).unwrap();
+        let driver = Arc::new(HttpDriver::new(String::new(), false));
+        let (api, server_task) = server(kernel.clone(), Some(driver.clone())).await;
+        let file = root.path().join("input.txt");
+        std::fs::write(&file, b"b\na\nb").unwrap();
+        let path = file.to_str().unwrap();
+        let id = "01K00000000000000000000011";
+        let args = vec![
+            "run",
+            "sort attachment",
+            "--sort-file",
+            path,
+            "--allow-deduplicate",
+            "--request-id",
+            id,
+        ];
+        let output = built_cli(&api, args.clone()).await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("sort attached file once; deduplication allowed")
+        );
+        let result: AgentRunResponse = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result.status, AgentRunStatus::Unverified);
+        assert_eq!(
+            result.sort.as_ref().unwrap().state,
+            ditto_protocol::AgentSortState::Verified
+        );
+        assert_eq!(
+            result.sort.as_ref().unwrap().output.as_deref(),
+            Some("a\nb\n")
+        );
+        let count = kernel.event_count().unwrap();
+        let retry = built_cli(&api, args).await;
+        assert!(retry.status.success());
+        assert_eq!(
+            serde_json::from_slice::<AgentRunResponse>(&retry.stdout).unwrap(),
+            result
+        );
+        let conflict = built_cli(
+            &api,
+            vec![
+                "run",
+                "sort attachment",
+                "--sort-file",
+                path,
+                "--request-id",
+                id,
+            ],
+        )
+        .await;
+        assert!(!conflict.status.success());
+        let invalid = built_cli(&api, vec!["run", "sort attachment", "--allow-deduplicate"]).await;
+        assert!(!invalid.status.success());
+        assert_eq!(kernel.event_count().unwrap(), count);
+        assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
+        kernel.shutdown_agent_runs().await.unwrap();
+        server_task.abort();
+        let _ = server_task.await;
+        drop(kernel);
+        let reopened = DittoKernel::open(config).unwrap();
+        let (api, server_task) = server(reopened.clone(), None).await;
+        let status = built_cli(&api, vec!["run-status", id]).await;
+        assert!(status.status.success());
+        assert_eq!(
+            serde_json::from_slice::<AgentRunResponse>(&status.stdout).unwrap(),
+            result
+        );
+        let disabled = built_cli(&api, vec!["run", "new work", "--sort-file", path]).await;
+        assert!(!disabled.status.success());
+        assert_eq!(reopened.event_count().unwrap(), count);
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn http_sort_permission_cannot_supply_internal_authority_or_bypass_disabled_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let kernel = DittoKernel::open(KernelConfig::new(
+            root.path().join("data"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
+        ))
+        .unwrap();
+        let driver = Arc::new(HttpDriver::new(String::new(), false));
+        let (api, server_task) = server(kernel.clone(), Some(driver.clone())).await;
+        let client = reqwest::Client::new();
+        let command = json!({"request_id":"01K00000000000000000000011","session_id":"personal","text":"sort", "sort":{"text":"b\na","allow_deduplicate":false}});
+        for field in [
+            "reference",
+            "source_event_id",
+            "lease",
+            "maximum_calls",
+            "actor",
+        ] {
+            let mut forged = command.clone();
+            forged["sort"][field] = json!("forged");
+            assert_eq!(
+                client
+                    .post(format!("{api}/v1/commands/run"))
+                    .json(&forged)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        let mut missing = command.clone();
+        missing["sort"]
+            .as_object_mut()
+            .unwrap()
+            .remove("allow_deduplicate");
+        assert_eq!(
+            client
+                .post(format!("{api}/v1/commands/run"))
+                .json(&missing)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(driver.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(kernel.event_count().unwrap(), 0);
+        server_task.abort();
+        let _ = server_task.await;
+        let (api, server_task) = server(kernel.clone(), None).await;
+        assert_eq!(
+            client
+                .post(format!("{api}/v1/commands/run"))
+                .json(&command)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(kernel.event_count().unwrap(), 0);
+        server_task.abort();
+        let _ = server_task.await;
     }
 }

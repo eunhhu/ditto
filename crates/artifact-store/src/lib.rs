@@ -190,7 +190,7 @@ impl ArtifactStore {
             temporary.sync_all()?;
             drop(temporary);
 
-            let reference = ArtifactRef::from_sha256(format!("{:x}", hasher.finalize()))?;
+            let reference = ArtifactRef::from_sha256(digest_hex(&hasher.finalize()))?;
             let object_path = self.object_path(&reference);
             match fs::hard_link(&temporary_path, &object_path) {
                 Ok(()) => {
@@ -297,7 +297,7 @@ impl ArtifactStore {
             }
         }
 
-        let actual = format!("{:x}", hasher.finalize());
+        let actual = digest_hex(&hasher.finalize());
         if actual != reference.sha256() {
             return Err(ArtifactStoreError::Integrity {
                 expected: reference.to_string(),
@@ -410,7 +410,7 @@ fn verify_open_file(
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = digest_hex(&hasher.finalize());
     if actual != reference.sha256() {
         return Err(ArtifactStoreError::Integrity {
             expected: reference.to_string(),
@@ -459,6 +459,18 @@ fn sync_directory(path: &Path) -> Result<(), ArtifactStoreError> {
     Ok(())
 }
 
+// Keep the persisted lowercase, zero-padded encoding independent of the
+// digest library's output container (sha2 0.11 no longer implements LowerHex).
+fn digest_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -469,6 +481,25 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{ArtifactRef, ArtifactStore, ArtifactStoreError};
+
+    #[test]
+    fn sha256_reference_preserves_known_persisted_encoding() {
+        let directory = tempdir().unwrap();
+        let store = ArtifactStore::open(directory.path()).unwrap();
+        let stored = store.put(b"abc").unwrap();
+        assert_eq!(
+            stored.reference.to_string(),
+            "artifact:sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(store.get(&stored.reference).unwrap(), b"abc");
+        assert_eq!(
+            store
+                .read_verified_range(&stored.reference, 0, 3)
+                .unwrap()
+                .bytes(),
+            b"abc"
+        );
+    }
 
     #[test]
     fn deduplicates_and_reads_ranges() {
