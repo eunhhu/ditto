@@ -5,13 +5,17 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-No active implementation task. Task 007 is complete on
-`dev/task-007-capability-package-headers`, stacked on the Task 006 branch.
-See its [verification evidence](tasks/007-evidence.md) before choosing the next
-product slice.
+No active implementation task. Task 008 is complete on
+`dev/task-008-user-memory`, based on the main merge of Tasks 006 and 007.
+Its [evidence](tasks/008-evidence.md) records the tested code identities and
+replayable CLI workflow.
 
 ## Completed
 
+- [`008 Explicit user memory`](tasks/008-user-memory.md): CLI/HTTP save, list,
+  and correction of exact user input through existing session context; identical
+  retries return the original event, concurrent stale corrections conflict,
+  and verified reads recover after restart or projection deletion.
 - [`007 Bounded capability package headers`](tasks/007-capability-package-headers.md):
   generated compact headers keep full bodies out of startup/search and retained
   catalogue state; bounded descriptor-safe discovery and selected digest/projection
@@ -70,6 +74,8 @@ product slice.
 
 ## Later
 
+- event-driven scheduled-work state and restart recovery before recurring
+  autonomous execution;
 - batched, compact rerank pools and descriptor/hash caching before a production
   embedding worker;
 - device registry and local process worker;

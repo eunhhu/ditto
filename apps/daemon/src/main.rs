@@ -26,6 +26,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_REPLAY_PAGE_SIZE: usize = 500;
+mod memory;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -70,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState { kernel };
     let app = Router::new()
+        .merge(memory::routes())
         .route("/health", get(health))
         .route("/v1/commands/input", post(submit_input))
         .route("/v1/events", get(list_events))

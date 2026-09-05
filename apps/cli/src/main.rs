@@ -2,6 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
+mod memory;
 
 #[derive(Debug, Parser)]
 #[command(name = "ditto", version, about = "Operate the local Ditto daemon")]
@@ -14,6 +15,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Save, inspect, or correct explicit user memory.
+    Memory {
+        #[command(subcommand)]
+        command: memory::Command,
+    },
     /// Check daemon health.
     Ping,
     /// Submit trusted user input. The daemon chooses actor and event kind.
@@ -50,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let api = cli.api.trim_end_matches('/');
 
     match cli.command {
+        Command::Memory { command } => memory::run(&client, api, command).await?,
         Command::Ping => {
             let value = client
                 .get(format!("{api}/health"))

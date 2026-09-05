@@ -25,11 +25,16 @@
 
 ## Canonical state
 
-- Branch: `dev/task-007-capability-package-headers`, stacked on Task 006.
+- Branch: `dev/task-008-user-memory`, based on main merge
+  `32bb4d16893403db6dd4b108d51ec7832980a934`. The user authorized merge and
+  continuation: PR #7 merged as `bc990a9e2e003ef04999867dc49d7843f3824847`, then
+  PR #12 was retargeted to main and merged as the base above. Existing tested
+  commit ancestry was retained with merge commits.
 - Runtime: Rust daemon and CLI.
 - Durable stores: SQLite event spine plus local SHA-256 artifact objects.
-- Public mutation ingress: typed user-input command only; arbitrary event append
-  is not a public route.
+- Public mutation ingress: typed user-input and explicit input-to-memory
+  promotion commands; arbitrary event append and trusted drafts are not public
+  routes. The memory command derives node metadata and exact user provenance.
 - Streaming design: subscribe-first, high-water-bounded, paginated durable
   replay with sequence-gap and lag recovery.
 - Capability state: generated file-backed package headers with selected-only
@@ -100,6 +105,33 @@
 
 ## Latest verified slice
 
+- Task 008 is complete under [ADR 0015](../adr/0015-explicit-user-memory.md).
+  [Verification evidence](tasks/008-evidence.md) identifies the exact tested
+  crates/apps/scripts trees and maps the contract to domain, HTTP, and real CLI
+  scenarios. CLI `memory save`, `memory list`, and `memory from-input` now use
+  existing input events, context admission, and source-verified snapshots.
+- Memories contain the exact same-session, task-free user input, with a
+  deterministic lowercase ID and kernel-fixed User/Asserted/Personal metadata.
+  A correction supersedes one active memory. An identical input/replacement
+  retry returns the original event without a second append or publication;
+  concurrent stale corrections conflict under the shared context gate.
+- Text is bounded to 4 KiB and pages to 100 entries. Reads recheck exact source
+  text and preserve scope isolation. The CLI distinguishes captured input from
+  saved memory; HTTP 202 explicitly reports an accepted durable memory whose
+  projection is unavailable. Projection deletion/restart, cache drift, and
+  retry recovery use the existing canonical event spine.
+- The final macOS gate passed canaries, formatting, strict workspace Clippy,
+  374 unit/integration tests and 24 compile-fail doctests across 38 suites.
+  Rust 1.88 workspace/all-target checking passed. The built CLI/daemon smoke
+  script passed eight scenarios, including partial-input recovery and cache
+  deletion/restart. New code was reviewed locally for source equality, scope,
+  idempotency, gate lifetime, error translation, and bounded reads; no separate
+  model-review approval is claimed. Linux CI is reported on the associated PR.
+- There is no new runtime dependency, database, provider invocation, embedding,
+  scheduler, or background process. Two daemon test dependencies reuse existing
+  workspace packages. The `personal` default is a session name, not global
+  memory, and no automatic model request or memory injection was added.
+
 - Task 007 is complete under
   [ADR 0014](../adr/0014-capability-package-headers.md). The tracked
   [verification evidence](tasks/007-evidence.md) maps its exit criteria to
@@ -128,7 +160,7 @@
   Rust 1.88 workspace/all-target checking and staged/unstaged diff checks passed
   on aarch64 macOS. PR #12 Linux Actions run `33983282889` passed both `rust`
   and `msrv` on `50c9474829203a0a05937f94658c8e7368c3bed2`, with the same
-  implementation tree. Devin reported that its full review was skipped because
+  runtime and test code. Devin reported that its full review was skipped because
   credits were unavailable; no independent model-review approval is claimed.
   Local counters are not RSS or latency benchmarks and no percentage
   improvement is asserted.
@@ -424,6 +456,10 @@
 
 ## Known engineering debt
 
+- Explicit memory listing materializes the existing bounded active session
+  snapshot before forming an ID page. Its 10,000-candidate and cumulative byte
+  limits also include other active context in that session; measure large-set
+  listing before introducing a separate projection paging path.
 - SQLite calls are synchronous and will need a measured async boundary before
   high-concurrency gateways.
 - Artifact range reads verify the whole object for integrity; optimize only with
