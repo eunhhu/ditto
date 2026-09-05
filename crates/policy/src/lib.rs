@@ -262,11 +262,12 @@ pub enum AuthorizationOutcome {
     ApprovalRequired(ApprovalRequest),
 }
 
-/// One-shot ingress token required by any future effectful worker.
+/// One-shot ingress token required by effectful workers.
 ///
-/// The epoch authorizer issues at most one claim for a permit. A future worker
+/// The epoch authorizer issues at most one claim for a permit. A worker
 /// must consume this value by ownership and must never accept an
-/// `InvocationPermit` directly. Task 005.1 intentionally adds no worker.
+/// `InvocationPermit` directly. The first consumer is the closed artifact.sort
+/// worker introduced in Task 010.
 ///
 /// ```compile_fail
 /// use ditto_policy::ExecutionClaim;
@@ -295,6 +296,24 @@ pub struct ExecutionClaim {
 }
 
 impl ExecutionClaim {
+    /// Recheck the sealed dispatch identity and validity at worker entry.
+    pub fn validate(
+        &self,
+        invocation: &CanonicalInvocation,
+        now: DateTime<Utc>,
+    ) -> Result<(), PolicyError> {
+        if self.epoch_id != invocation.epoch_id() {
+            return Err(PolicyError::EpochMismatch);
+        }
+        if self.invocation_digest != invocation.digest() {
+            return Err(PolicyError::PermitInvocationMismatch);
+        }
+        if now < self.claimed_at || now >= self.expires_at {
+            return Err(PolicyError::PermitExpired);
+        }
+        Ok(())
+    }
+
     pub fn claim_id(&self) -> &str {
         &self.claim_id
     }
@@ -551,8 +570,7 @@ impl InvocationAuthorizer {
         Ok(outcome)
     }
 
-    /// Atomically consume the sole future effectful-dispatch slot carried by
-    /// one permit. No worker is implemented by Task 005.1.
+    /// Atomically consume the sole effectful-dispatch slot carried by one permit.
     pub fn claim_execution(
         &self,
         permit: InvocationPermit,

@@ -1,0 +1,43 @@
+id = "artifact.sort"
+version = "0.1.0"
+namespace = "artifact"
+kind = "tool"
+summary = "Sort bounded UTF-8 artifact lines in byte order, optionally removing duplicates."
+
+[runtime]
+type = "process"
+command = "/usr/bin/sort"
+lazy = true
+idle_ttl_ms = 0
+
+[placement]
+modes = ["local"]
+requires = ["posix-sort"]
+
+[retrieval]
+intents = ["sort a list", "remove duplicate lines"]
+negative_examples = ["run an arbitrary shell command"]
+aliases = ["sort lines", "deduplicate list"]
+complements = ["artifact.read"]
+
+[effects]
+resources = ["artifact:{artifact_id}"]
+
+[effects.minimum]
+access = "content"
+mutation = "reversible"
+externality = "local"
+privilege = "user"
+
+[effects.maximum]
+access = "content"
+mutation = "reversible"
+externality = "local"
+privilege = "user"
+
+[policy]
+approval = "explicit-command"
+secret_handles = []
+
+[verification]
+default = "sorted-line-multiplicity-v1"

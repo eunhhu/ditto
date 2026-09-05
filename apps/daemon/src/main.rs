@@ -28,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_REPLAY_PAGE_SIZE: usize = 500;
 mod memory;
 mod runs;
+mod sorts;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -85,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .merge(memory::routes())
         .merge(runs::routes())
+        .merge(sorts::routes(args.bind.ip().is_loopback()))
         .route("/health", get(health))
         .route("/v1/commands/input", post(submit_input))
         .route("/v1/events", get(list_events))

@@ -47,11 +47,13 @@ The executable foundation includes:
   injected-driver read-only artifact continuation loop;
 - explicit CLI/HTTP model runs with current session context, durable retry
   identity, cancellation, and restart inspection;
+- explicitly requested local artifact sorting through a one-shot process lease,
+  bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - repository-native instructions for long-running coding agents.
 
 Scheduled execution, additional model
-providers, effectful capability execution, SSH, a production embedding
-worker/cache, authenticated remote gateways, completion verifiers, and the
+providers, general effectful model-tool continuation, SSH, a production embedding
+worker/cache, authenticated remote gateways, additional completion verifiers, and the
 improvement compiler are still deferred. They are not represented by fake
 success paths.
 
@@ -107,6 +109,26 @@ General file/process tools are not connected yet. One run executes at a time;
 other work is rejected without queuing. An interrupted run is inspectable and
 never automatically restarted. A model answer remains `unverified`.
 
+Local file sorting works with the default provider-disabled daemon on Linux and
+macOS (`/usr/bin/sort` required):
+
+```bash
+cargo run -p ditto-cli -- sort list.txt --unique
+cargo run -p ditto-cli -- sort-status REQUEST_ID
+cargo run -p ditto-cli -- sort-cancel REQUEST_ID
+```
+
+The CLI reads a regular UTF-8 file of at most 64 KiB / 4096 lines. Output is JSON
+with sorted text and an immutable artifact reference; the original file is
+unchanged. Ordering is by bytes, LF separates lines, CR remains data, and a
+nonempty last line gains LF. `--unique` removes exact duplicate lines. The
+process uses a cleared environment and private scratch, runs for at most five
+seconds while owned, and shares the single execution slot with model runs.
+`verified` means the exact line ordering and multiplicity contract passed, not
+that a broader model goal was completed. Same-ID retries do not rerun work.
+This closed profile has no shell or caller-selected executable; autonomous
+model dispatch and general process profiles remain future work.
+
 ## HTTP surface
 
 | Method | Path | Purpose |
@@ -118,6 +140,9 @@ never automatically restarted. A model answer remains `unverified`.
 | `POST` | `/v1/commands/run` | Explicitly admit one model run using a stable request ID |
 | `GET` | `/v1/runs` | Inspect a run by session and request ID |
 | `POST` | `/v1/commands/run/cancel` | Signal cancellation of the matching live run |
+| `POST` | `/v1/commands/sort` | Explicit local sort with exact request identity; loopback only |
+| `GET` | `/v1/sorts` | Inspect verified sort output by session and request ID; loopback only |
+| `POST` | `/v1/commands/sort/cancel` | Cancel the matching sort; loopback only |
 | `GET` | `/v1/events` | Query one durable event page |
 | `GET` | `/v1/stream` | Replay all pages through a high-water mark, then follow |
 | `GET` | `/v1/capabilities` | Catalogue-level capability card search |
@@ -167,6 +192,7 @@ See [`docs/architecture.md`](docs/architecture.md).
 cargo build -p ditto-daemon -p ditto-cli --locked
 python3 scripts/smoke-user-memory.py
 python3 scripts/smoke-agent-run.py
+python3 scripts/smoke-local-sort.py
 # Actual CLI + daemon router + deterministic model fixture, without API calls:
 cargo test -p ditto-daemon built_cli_run_wait_retry_status_and_cancel -- --ignored
 ```

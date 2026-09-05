@@ -23,14 +23,14 @@ pub(crate) struct AgentRunMetadata {
 
 #[derive(Default)]
 pub(crate) struct RunSlot {
-    active: Option<ActiveRun>,
-    stopping: bool,
+    pub(crate) active: Option<ActiveRun>,
+    pub(crate) stopping: bool,
 }
 
-struct ActiveRun {
-    input_event_id: String,
-    cancellation: CancellationToken,
-    finished: CancellationToken,
+pub(crate) struct ActiveRun {
+    pub(crate) input_event_id: String,
+    pub(crate) cancellation: CancellationToken,
+    pub(crate) finished: CancellationToken,
 }
 
 #[derive(Debug, Error)]
@@ -245,10 +245,10 @@ impl DittoKernel {
     }
 }
 
-struct ActiveGuard {
-    kernel: DittoKernel,
-    input_event_id: String,
-    finished: CancellationToken,
+pub(crate) struct ActiveGuard {
+    pub(crate) kernel: DittoKernel,
+    pub(crate) input_event_id: String,
+    pub(crate) finished: CancellationToken,
 }
 
 impl Drop for ActiveGuard {
@@ -265,7 +265,7 @@ impl Drop for ActiveGuard {
     }
 }
 
-fn validate_query(query: &AgentRunQuery) -> Result<String, AgentRunError> {
+pub(crate) fn validate_query(query: &AgentRunQuery) -> Result<String, AgentRunError> {
     SessionId::new(&query.session_id)
         .map_err(|_| AgentRunError::Invalid("session ID is not canonical"))?;
     let id = query

@@ -207,6 +207,51 @@ A six-minute client follow ceiling does not restart or cancel server work;
 the server's existing five-minute turn ceiling remains authoritative.
 See [ADR 0016](../adr/0016-explicit-agent-runs.md).
 
+## Explicit local sort requests
+
+Loopback listeners expose `POST /v1/commands/sort` with only `request_id`
+(uppercase canonical ULID), `session_id`, `text` and required boolean `unique`.
+Text is at most 64 KiB / 4096 UTF-8 LF-delimited lines and contains no NUL.
+Content and whitespace are preserved before hashing; changing the final LF or
+unique option with the same ID conflicts. Unknown fields are rejected.
+`GET /v1/sorts` and `POST /v1/commands/sort/cancel` take only the two identity
+fields. The provider may remain disabled. No program, environment, path,
+effect, lease, actor or evidence is client-selectable.
+
+The kernel derives `sort_<request_id>` task scope and fresh `turn_*` correlation,
+shares the existing model-run slot, stores the input artifact, then durably
+accepts `sort.requested` (user, version 1) before dispatch. This event contains
+the request ID, input reference and unique option, not the source text or local
+filename. Exact retries return prior state, changed retries conflict, busy work
+is not queued, and owner loss projects interrupted state without reexecution.
+
+`sort.started` (system, version 1) records the dispatch attempt after a canonical
+invocation, one-call expiring lease and one-shot claim exist. It records exact
+revision, epoch, effect/resources, expiry and invocation/claim identity before
+spawning; its presence alone is not proof of a successful process start.
+Verified output gets an `artifact.created` root. A single `task.completed`
+(system, version 1) certifies only this sort contract: `capability_id`, `verifier`,
+input/output references, unique mode, input/output line counts, zero exit code,
+start-event ID and matching invocation/claim identity. Its cause is the result
+artifact event; that artifact's cause is the dispatch event. Only the sealed
+verifier output reaches this producer. Failure appends `sort.failed` (system,
+version 1) with a closed, path-free error code. Storage failure may leave an
+interrupted request rather than inventing a terminal.
+
+Responses report `running`, `verified`, `failed` or `interrupted`, identities,
+cancellation intent, and optional output/reference or failure code. Inspection
+uses indexed boundaries and exact evidence/root lookups, hashes both bounded
+artifacts and reruns the line verifier before returning verified output. It
+never starts a process. Corrupted or contradictory evidence returns storage
+failure. Cancellation and completion use the shared slot gate to resolve their
+race; cancellation after completion returns that completion.
+
+HTTP statuses are 202 for running admission, 200 for prior/terminal results,
+400 invalid input, 404 absent/wrong scope, 409 changed retry, 422 unknown fields,
+429 occupied slot, 503 shutdown and 500 unavailable storage. Non-loopback
+listeners do not mount these routes. Existing model-turn payloads, replay and
+the event-store schema are unchanged. See [ADR 0017](../adr/0017-bounded-local-sort.md).
+
 ## Kernel artifact-read turns
 
 The kernel owns version 1 of the durable read-only turn state machine. Clients

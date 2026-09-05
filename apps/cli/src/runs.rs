@@ -209,14 +209,22 @@ async fn wait_for_terminal(
 /// model requests/results or a growing transcript; canonical status is fetched
 /// once a terminal event wakes the client.
 #[derive(Default)]
-struct TerminalNotice {
+pub(super) struct TerminalNotice {
     line: Vec<u8>,
     overflow: bool,
     terminal: bool,
+    sort: bool,
 }
 
 impl TerminalNotice {
-    fn push(&mut self, chunk: &[u8]) -> bool {
+    pub(super) fn sort() -> Self {
+        Self {
+            sort: true,
+            ..Default::default()
+        }
+    }
+
+    pub(super) fn push(&mut self, chunk: &[u8]) -> bool {
         let mut noticed = false;
         for &byte in chunk {
             if byte == b'\n' {
@@ -228,7 +236,11 @@ impl TerminalNotice {
                     self.terminal = false;
                 } else if !self.overflow && self.line.starts_with(b"event:") {
                     let event = self.line[6..].strip_prefix(b" ").unwrap_or(&self.line[6..]);
-                    self.terminal = event == b"turn.finished" || event == b"turn.failed";
+                    self.terminal = if self.sort {
+                        event == b"task.completed" || event == b"sort.failed"
+                    } else {
+                        event == b"turn.finished" || event == b"turn.failed"
+                    };
                 }
                 self.line.clear();
                 self.overflow = false;

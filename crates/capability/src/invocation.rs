@@ -754,6 +754,9 @@ pub enum CanonicalResourceError {
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedPlacement {
     LocalBuiltin,
+    /// Placement only; an exact registered worker must still validate and consume
+    /// the invocation's claim. This never authorizes a manifest-selected program.
+    LocalProcess,
 }
 
 /// Fixed work counter supplied to registered deterministic derivers.
@@ -1171,6 +1174,10 @@ fn resolve_placement(manifest: &CapabilityManifest) -> Result<ResolvedPlacement,
         && manifest.placement.modes.as_slice() == ["local"]
     {
         Ok(ResolvedPlacement::LocalBuiltin)
+    } else if manifest.runtime.runtime_type == RuntimeType::Process
+        && manifest.placement.modes.as_slice() == ["local"]
+    {
+        Ok(ResolvedPlacement::LocalProcess)
     } else {
         Err(InvocationError::UnsupportedPlacement)
     }

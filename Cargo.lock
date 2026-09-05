@@ -369,6 +369,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ditto-artifact-sort"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ditto-capability",
+ "ditto-model",
+ "ditto-policy",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "ditto-artifact-store"
 version = "0.1.0"
 dependencies = [
@@ -407,6 +425,7 @@ dependencies = [
  "clap",
  "ditto-protocol",
  "futures-util",
+ "libc",
  "reqwest",
  "serde_json",
  "tokio",
@@ -488,6 +507,7 @@ dependencies = [
  "async-stream",
  "chrono",
  "ditto-artifact-read",
+ "ditto-artifact-sort",
  "ditto-artifact-store",
  "ditto-capability",
  "ditto-context",

@@ -22,6 +22,7 @@ mod agent_run;
 mod context_admission;
 mod context_retrieval;
 mod memory;
+mod sort_run;
 pub mod turn;
 pub use agent_run::AgentRunError;
 

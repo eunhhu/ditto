@@ -1,0 +1,49 @@
+{
+  "header_version": 1,
+  "manifest_sha256": "959ea052b73a514a006acda3887d474190ccfbc9ede3f5a91bcd0a78db25789b",
+  "id": "artifact.sort",
+  "version": "0.1.0",
+  "namespace": "artifact",
+  "kind": "tool",
+  "lifecycle": "active",
+  "summary": "Sort bounded UTF-8 artifact lines in byte order, optionally removing duplicates.",
+  "placement": {
+    "modes": [
+      "local"
+    ],
+    "requires": [
+      "posix-sort"
+    ]
+  },
+  "retrieval": {
+    "intents": [
+      "sort a list",
+      "remove duplicate lines"
+    ],
+    "negative_examples": [
+      "run an arbitrary shell command"
+    ],
+    "complements": [
+      "artifact.read"
+    ],
+    "aliases": [
+      "sort lines",
+      "deduplicate list"
+    ]
+  },
+  "effects": {
+    "minimum": {
+      "access": "content",
+      "mutation": "reversible",
+      "externality": "local",
+      "privilege": "user"
+    },
+    "maximum": {
+      "access": "content",
+      "mutation": "reversible",
+      "externality": "local",
+      "privilege": "user"
+    }
+  },
+  "candidate_bytes": 301
+}
