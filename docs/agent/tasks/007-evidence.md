@@ -41,6 +41,7 @@ Commands ran from the repository root on 2026-09-06, with Rust 1.88.0 on
 | `rtk ./scripts/agent-check.sh` | Passed: tracked canaries, formatting, strict workspace/all-target/all-feature Clippy, 366 unit/integration tests, and 24 compile-fail doctests across 37 suites. The final run includes the single-hash paging refinement. |
 | `rtk cargo +1.88.0 check --locked --workspace --all-targets` | Passed on the final implementation for all workspace crates and targets available on the local host. |
 | `rtk git diff --check` and `rtk git diff --cached --check` | Passed. |
+| [PR #12](https://github.com/eunhhu/ditto/pull/12), Linux Actions run [`33983282889`](https://github.com/eunhhu/ditto/actions/runs/33983282889), head `50c9474829203a0a05937f94658c8e7368c3bed2` | Passed both the `rust` repository gate and `msrv`. This head adds only the local evidence/task-closure documents to the implementation commit above. |
 
 Development verification found that rejecting all ancestor symlinks also rejected
 the normal macOS temporary-directory alias. The implementation and ADR now
@@ -55,9 +56,11 @@ they were removed and the final gate is clean.
   RSS, allocation counts, wall-clock latency, or a zero-cost result. Retained
   accounting includes owned header fields/capacities, source paths, and ID-index
   entries; it excludes outer collection capacity and allocator overhead.
-- Linux uses the same descriptor contract but was not executed locally. Only
-  the aarch64 macOS Rust target was installed for local checking. A CI result
-  must be attached separately before claiming Linux runtime verification.
+- Only the aarch64 macOS Rust target was installed for local checking. The
+  separate Linux CI run above verifies the implementation on Ubuntu with Rust
+  1.88. Devin's status said its full review was skipped because its trial had
+  expired and no credits remained; a green status is not an independent model
+  review, and no such approval is claimed.
 - Package roots remain trusted installation input. Headers are not signatures,
   and unused bodies are not integrity-audited at startup. Reload after explicit
   header regeneration; there is no hot reload or daemon-managed header cache.
@@ -67,4 +70,5 @@ they were removed and the final gate is clean.
 - No live application provider/model call, credential resolution, capability worker,
   scheduler, SSH, paid inference, or completion-verifier feature was added or
   executed. Tests use local temporary files, FIFOs, symlinks, and existing local
-  fixtures. Local `.omo` and `.surf` state remains untracked and is not evidence.
+  fixtures. External repository operations were the branch push, draft PR, and
+  checks. Local `.omo` and `.surf` state remains untracked and is not evidence.

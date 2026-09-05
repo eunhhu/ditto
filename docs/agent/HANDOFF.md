@@ -126,8 +126,12 @@
 - The final local canonical gate passed canaries, formatting, strict Clippy,
   366 unit/integration tests, and 24 compile-fail doctests across 37 suites.
   Rust 1.88 workspace/all-target checking and staged/unstaged diff checks passed
-  on aarch64 macOS. Linux execution remains for CI; local counters are not RSS
-  or latency benchmarks and no percentage improvement is asserted.
+  on aarch64 macOS. PR #12 Linux Actions run `33983282889` passed both `rust`
+  and `msrv` on `50c9474829203a0a05937f94658c8e7368c3bed2`, with the same
+  implementation tree. Devin reported that its full review was skipped because
+  credits were unavailable; no independent model-review approval is claimed.
+  Local counters are not RSS or latency benchmarks and no percentage
+  improvement is asserted.
 
 - Task 006 is complete under
   [ADR 0013](../adr/0013-compact-source-verified-session-index.md). The tracked
