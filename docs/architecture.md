@@ -108,8 +108,12 @@ not expose embedding vectors or capability credentials to the model. Capability
 retrieval remains read-only in this slice; execution and effectful invocation
 are separate deferred boundaries.
 
-Capability manifests are runtime input. Unknown complements and malformed
-runtime metadata fail catalogue load.
+Capability package headers are bounded discovery input. Active unknown
+complements and malformed headers fail catalogue load. Full manifests remain
+runtime input: selected paging verifies their digest and exact header projection
+before schema binding or invocation. Header-backed startup/search read no full
+manifest bodies; headerless packages use a metered bounded compatibility read.
+No full-manifest cache accumulates as packages are selected. See ADR 0014.
 
 ## Effect firewall
 

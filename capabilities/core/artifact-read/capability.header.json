@@ -1,0 +1,45 @@
+{
+  "header_version": 1,
+  "manifest_sha256": "9687f14b7059c5707ed5be8bdbf09beb5546293536885e41333672b9f2f11ffb",
+  "id": "artifact.read",
+  "version": "0.1.0",
+  "namespace": "artifact",
+  "kind": "tool",
+  "lifecycle": "active",
+  "summary": "Read a bounded range from a content-addressed artifact.",
+  "placement": {
+    "modes": [
+      "local"
+    ],
+    "requires": []
+  },
+  "retrieval": {
+    "intents": [
+      "inspect the full output of a previous command",
+      "read a bounded range from a large log or file"
+    ],
+    "negative_examples": [
+      "modify a file"
+    ],
+    "complements": [],
+    "aliases": [
+      "read output",
+      "open artifact"
+    ]
+  },
+  "effects": {
+    "minimum": {
+      "access": "content",
+      "mutation": "none",
+      "externality": "local",
+      "privilege": "user"
+    },
+    "maximum": {
+      "access": "content",
+      "mutation": "none",
+      "externality": "local",
+      "privilege": "user"
+    }
+  },
+  "candidate_bytes": 252
+}

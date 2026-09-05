@@ -1,16 +1,25 @@
 # Ditto
 
-**A local-first semantic microkernel for frontier agents.**
+**A local-first personal general-purpose agent.**
 
-One daemon, infinite capabilities, constant context.
+Ditto is being built to keep personal AI work effective, responsive, and
+resource-efficient as memories, capabilities, schedules, and experience grow.
+Its product goals are lower memory overhead, focused context, reliable memory
+and scheduled work, and improvements that earn their ongoing cost. These are
+goals to measure, not performance claims already established by the foundation.
+**Zero cost, zero overhead** is a primary design premise, including development
+effort and future technical debt converging toward zero.
 
 > Context is compiled. Capabilities are paged. Effects are leased. Improvements
 > are promoted.
 
-Ditto lets frontier models retain strategic freedom while the runtime controls
-context, capabilities, side effects, persistence, verification, and long-lived
-execution. It is not a planner/executor framework, persona zoo, or always-on
-reflection loop.
+Its semantic microkernel lets frontier models retain strategic freedom while
+the runtime controls context, capabilities, side effects, persistence,
+verification, and long-lived execution. The personal agent is the product;
+the microkernel is its implementation architecture.
+
+See the [product intent](docs/product.md) for the intended user experience,
+long-term efficiency goals, and proposed evaluation criteria.
 
 ## Current state
 
@@ -20,8 +29,9 @@ The executable foundation includes:
 - typed public command ingress with kernel-owned actor and event kind;
 - subscribe-first, high-water-bounded, paginated SSE replay and lag recovery;
 - SHA-256 content-addressed artifacts with private storage and verified reads;
-- file-backed capability manifests, validated complements, strict runtime search,
-  and bounded execution epochs;
+- compact capability package headers, bounded no-follow discovery on Linux/macOS,
+  selected full-manifest verification, strict runtime search, and bounded
+  execution epochs; headerless packages retain a bounded compatibility path;
 - typed Context IR with provenance validation, trusted compiler directives, and
   locally derived token cost;
 - kernel-only trusted admission of session/task context nodes as fixed
