@@ -34,6 +34,8 @@ pub struct CapabilitiesSelectedPayload {
     pub event_version: u16,
     pub turn_id: String,
     pub manifest: CapabilityManifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_manifest: Option<CapabilityManifest>,
     pub epoch: ExecutionEpochEvidence,
     pub schemas: Vec<CapabilitySchema>,
 }
@@ -205,6 +207,8 @@ pub struct ReplayedReadOnlyTurn {
     pub requests: Vec<ModelRequestedPayload>,
     pub outputs: Vec<ModelOutputPayload>,
     pub calls: Vec<ReplayedArtifactReadCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sort_calls: Vec<super::sort::ReplayedSortCall>,
     pub terminal: ArtifactReadTurnReplay,
     pub sequence_span: TurnSequenceSpan,
 }

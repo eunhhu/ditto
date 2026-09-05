@@ -10,7 +10,12 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 use ulid::Ulid;
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
+
+const MIGRATION_V4: &str = r#"
+CREATE INDEX IF NOT EXISTS events_agent_sort ON events(session_id, task_id, correlation_id, seq)
+    WHERE kind IN ('agent.sort.started', 'agent.sort.output');
+"#;
 
 const MIGRATION_V3: &str = r#"
 CREATE INDEX IF NOT EXISTS events_session_task_seq ON events(session_id, task_id, seq)
@@ -236,6 +241,29 @@ impl EventStore {
         )?)
     }
 
+    /// A bounded projection input: one claim plus at most seven tool results.
+    /// The ninth record is a corruption sentinel, never silently truncated state.
+    pub fn agent_sort_events(
+        &self,
+        session: &str,
+        task: &str,
+        correlation: &str,
+    ) -> Result<Vec<EventRecord>, EventStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+             FROM events INDEXED BY events_agent_sort
+             WHERE session_id = ?1 AND task_id = ?2 AND correlation_id = ?3
+               AND kind IN ('agent.sort.started', 'agent.sort.output') ORDER BY seq LIMIT 9",
+        )?;
+        let rows = statement.query_map(
+            params![session, task, correlation],
+            raw_event_record_from_row,
+        )?;
+        rows.map(|row| row?.try_into()).collect()
+    }
+
     /// Returns the event with the exact globally unique event ID, if present.
     pub fn get_by_event_id(&self, event_id: &str) -> Result<Option<EventRecord>, EventStoreError> {
         let connection = self.connection()?;
@@ -453,6 +481,9 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> 
     if version < 3 {
         transaction.execute_batch(MIGRATION_V3)?;
     }
+    if version < 4 {
+        transaction.execute_batch(MIGRATION_V4)?;
+    }
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -524,6 +555,64 @@ mod tests {
     use super::EventStore;
 
     #[test]
+    fn schema_four_sort_lookup_migrates_without_rewrite_and_bounds_exact_turn_work() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        let store = EventStore::open(&path).unwrap();
+        let old = store
+            .append(NewEvent::user_input("s", None, "legacy"))
+            .unwrap();
+        drop(store);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("DROP INDEX events_agent_sort; PRAGMA user_version=3;")
+            .unwrap();
+        drop(db);
+        let store = EventStore::open(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.get_by_event_id(&old.event_id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(old).unwrap()
+        );
+        let plan=store.connection().unwrap().prepare(
+            "EXPLAIN QUERY PLAN SELECT seq FROM events INDEXED BY events_agent_sort WHERE session_id='s' AND task_id='t' AND correlation_id='turn_x' AND kind IN ('agent.sort.started','agent.sort.output') ORDER BY seq LIMIT 9"
+        ).unwrap().query_map([],|row|row.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>().unwrap().join(" ");
+        assert!(
+            plan.contains("SEARCH events USING")
+                && plan.contains("events_agent_sort")
+                && !plan.contains("TEMP B-TREE"),
+            "{plan}"
+        );
+        let mut draft = NewEvent::user_input("s", Some("t".into()), "fixture");
+        draft.correlation_id = Some("turn_x".into());
+        for _ in 0..40 {
+            store.append(draft.clone()).unwrap();
+        }
+        draft.kind = event_kind::AGENT_SORT_OUTPUT.into();
+        for _ in 0..12 {
+            store.append(draft.clone()).unwrap();
+        }
+        draft.session_id = Some("other".into());
+        store.append(draft.clone()).unwrap();
+        draft.session_id = Some("s".into());
+        draft.correlation_id = Some("turn_other".into());
+        store.append(draft).unwrap();
+        let results = store.agent_sort_events("s", "t", "turn_x").unwrap();
+        assert_eq!(results.len(), 9);
+        assert!(
+            results
+                .iter()
+                .all(|e| e.kind == event_kind::AGENT_SORT_OUTPUT
+                    && e.session_id.as_deref() == Some("s")
+                    && e.correlation_id.as_deref() == Some("turn_x"))
+        );
+        assert!(
+            store
+                .agent_sort_events("s", "missing", "turn_x")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn schema_three_boundary_indexes_preserve_scope_and_correlation_after_migration() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("state.db");
@@ -536,7 +625,7 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            super::CURRENT_SCHEMA_VERSION
         );
         for (sql, index) in [
             (

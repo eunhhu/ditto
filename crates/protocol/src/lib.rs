@@ -46,6 +46,38 @@ pub struct StartAgentRunCommand {
     pub request_id: String,
     pub session_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<AgentSortPermission>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSortPermission {
+    pub text: String,
+    pub allow_deduplicate: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSortState {
+    NotRun,
+    Running,
+    Verified,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSortProgress {
+    pub input_reference: String,
+    pub allow_deduplicate: bool,
+    pub state: AgentSortState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,12 +105,17 @@ pub struct AgentRunResponse {
     pub status: AgentRunStatus,
     pub cancellation_requested: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<AgentSortProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
 }
 
 pub mod event_kind {
+    pub const AGENT_SORT_REQUESTED: &str = "agent.sort.requested";
+    pub const AGENT_SORT_STARTED: &str = "agent.sort.started";
+    pub const AGENT_SORT_OUTPUT: &str = "agent.sort.output";
     pub const SORT_REQUESTED: &str = "sort.requested";
     pub const SORT_STARTED: &str = "sort.started";
     pub const SORT_FAILED: &str = "sort.failed";

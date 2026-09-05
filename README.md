@@ -49,6 +49,8 @@ The executable foundation includes:
   identity, cancellation, and restart inspection;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
+- model-directed sorting of one explicitly attached file, with separate permission
+  for deduplication and verified output inspection after model failure or restart;
 - repository-native instructions for long-running coding agents.
 
 Scheduled execution, additional model
@@ -105,6 +107,18 @@ cargo run -p ditto-cli -- run-cancel REQUEST_ID
 Runs default to the `personal` session. Relevant current session memory is
 compiled into context; prior conversation text is not automatically reinserted.
 The model can answer directly or read an already-rooted, same-scope artifact.
+An explicit attachment also permits one bounded sort:
+
+```bash
+cargo run -p ditto-cli -- run "Sort this list and explain the result" --sort-file list.txt
+# Add --allow-deduplicate to also permit removing exact duplicate lines.
+```
+
+The model receives an artifact reference and the permission, with file content
+available through a bounded read when needed. It cannot sort another artifact,
+deduplicate without permission, or dispatch twice. `run-status` includes a
+separate `sort` result: verified text remains inspectable even if the subsequent
+model answer fails. Retry identity includes the exact file and permission.
 General file/process tools are not connected yet. One run executes at a time;
 other work is rejected without queuing. An interrupted run is inspectable and
 never automatically restarted. A model answer remains `unverified`.
@@ -126,8 +140,9 @@ process uses a cleared environment and private scratch, runs for at most five
 seconds while owned, and shares the single execution slot with model runs.
 `verified` means the exact line ordering and multiplicity contract passed, not
 that a broader model goal was completed. Same-ID retries do not rerun work.
-This closed profile has no shell or caller-selected executable; autonomous
-model dispatch and general process profiles remain future work.
+This closed profile has no shell or caller-selected executable. Model dispatch
+requires the explicit per-run attachment above; general process profiles remain
+future work.
 
 ## HTTP surface
 
@@ -137,7 +152,7 @@ model dispatch and general process profiles remain future work.
 | `POST` | `/v1/commands/input` | Submit user input; kernel assigns event authority |
 | `POST` | `/v1/commands/memory` | Save an existing same-session user input, optionally replacing an active memory |
 | `GET` | `/v1/memories` | Inspect current session memories with an ID cursor |
-| `POST` | `/v1/commands/run` | Explicitly admit one model run using a stable request ID |
+| `POST` | `/v1/commands/run` | Admit one model run, optionally permitting one attached-file sort |
 | `GET` | `/v1/runs` | Inspect a run by session and request ID |
 | `POST` | `/v1/commands/run/cancel` | Signal cancellation of the matching live run |
 | `POST` | `/v1/commands/sort` | Explicit local sort with exact request identity; loopback only |
@@ -195,6 +210,7 @@ python3 scripts/smoke-agent-run.py
 python3 scripts/smoke-local-sort.py
 # Actual CLI + daemon router + deterministic model fixture, without API calls:
 cargo test -p ditto-daemon built_cli_run_wait_retry_status_and_cancel -- --ignored
+cargo test -p ditto-daemon built_cli_model_sort_permission_retry_and_disabled_status -- --ignored
 ```
 
 Long-running Codex or other coding-agent work starts at [`AGENTS.md`](AGENTS.md)

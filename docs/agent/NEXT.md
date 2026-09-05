@@ -5,18 +5,24 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-No active implementation task. Task 010 is complete on
-`dev/task-010-local-process`, based on main `aefe9d2` (Task 009, PR #14).
-Its [evidence](tasks/010-evidence.md) records the closed local sort profile,
-one-shot authority, process lifetime and independent result verification.
+Task 011 is complete. Next, specify the observable contract for event-driven
+scheduled work and restart recovery before implementing recurring execution.
+Keep it within the existing runtime/storage and avoid periodic model calls.
 
 ## Completed
+
+- [`011 Model-directed, explicitly permitted local work`](tasks/011-model-sort.md):
+  exact file attachment and deduplication permission, conditional schema paging,
+  one-call model-to-process dispatch and continuation, independently verified
+  result inspection after failure/restart, bounded indexed evidence and pure
+  replay. Default-disabled runs admit no artifact or model work. See
+  [verification evidence](tasks/011-evidence.md).
 
 - [`010 Bounded local process execution`](tasks/010-local-process.md): explicit
   local file sorting/deduplication via a one-call lease and affine claim;
   lazy OS process with bounded I/O, cancellation and cleanup; independently
   verified output artifacts, idempotent CLI/HTTP requests and restart inspection.
-  This is one closed process profile, not arbitrary programs or model dispatch.
+  This is one closed process profile; Task 011 adds scoped model dispatch.
 - [`009 Explicit personal-agent request path`](tasks/009-agent-run.md): typed
   CLI/HTTP run, status, and cancellation; durable request identity and bounded
   single-run ownership; source-verified current context, direct answers or
@@ -85,9 +91,6 @@ one-shot authority, process lifetime and independent result verification.
 
 ## Later
 
-- next delivery priority: connect model intent to the existing closed local
-  process profile through explicit user-scoped authority and minimal approval/
-  status UX; specify that vertical contract before expanding executable programs;
 - event-driven scheduled-work state and restart recovery before recurring
   autonomous execution;
 - minimum task-status/approval experience and reproducible RAM, latency, cost,
