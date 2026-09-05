@@ -2,8 +2,10 @@
 
 ## Status
 
-Active on `dev/task-007-capability-package-headers`, stacked on the completed
-Task 006 branch and the user's product-intent documentation commits.
+Complete on `dev/task-007-capability-package-headers`, stacked on the completed
+Task 006 branch and the user's product-intent documentation commits. The
+[verification evidence](007-evidence.md) records implementation, tests, local
+platform coverage, and limitations.
 
 ## Objective
 
