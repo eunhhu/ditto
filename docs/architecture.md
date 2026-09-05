@@ -148,13 +148,21 @@ untrusted model tool call
 → sealed canonical invocation
 → policy authorization or approval-required outcome
 → sealed invocation-bound permit
-→ isolated executor (deferred except existing bounded artifact.read)
+→ one-shot execution claim for a process worker
+→ bounded executor (artifact.read and explicitly requested artifact.sort)
 ```
 
 The model call has no effect, resource, device, program, placement, lease,
 approval, verification, or idempotency authority. Policy selects static policy
 or a harness-side lease only after canonical derivation. Permits are sealed,
 expiring, and bound to one invocation digest.
+
+`artifact.sort` is an explicitly requested closed local process profile. Its
+worker consumes the affine claim, validates exact registered revision/input,
+and starts the trusted OS sort lazily with bounded stdin/output, private scratch,
+cleared environment, and cancellable lifetime. The kernel shares one active slot
+across model and sort requests. No arbitrary executable or shell is exposed;
+model dispatch to process tools remains separate from this explicit command.
 
 SSH is placement transport, not a model-facing raw shell.
 
@@ -174,6 +182,13 @@ scope before the kernel can return its deterministic projection.
 Task completion remains a claim until a task-specific verifier supplies evidence
 such as a diff, commit, provider message ID, health response, or artifact hash. A
 model stream ending is never completion evidence.
+
+The first verifier independently checks artifact-sort line order and exact
+multiplicities or unique set equality. It seals the checked output before the
+kernel stores a result artifact and a single sort-specific `task.completed`
+record. Status revalidates causal artifact roots, both content hashes and the
+line contract, using bounded reads and indexed event identities. A sort
+completion does not certify a model turn's wider goal.
 
 ## Model boundary
 

@@ -4,6 +4,7 @@ members = [
   "apps/cli",
   "apps/daemon",
   "crates/artifact-read",
+  "crates/artifact-sort",
   "crates/artifact-store",
   "crates/capability",
   "crates/context",

@@ -5,12 +5,18 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-No active implementation task. Task 009 is complete on
-`dev/task-009-agent-run`, based on main `4f5d2ff` (Task 008, PR #13).
-Its [evidence](tasks/009-evidence.md) records the tested code and CLI workflow.
+No active implementation task. Task 010 is complete on
+`dev/task-010-local-process`, based on main `aefe9d2` (Task 009, PR #14).
+Its [evidence](tasks/010-evidence.md) records the closed local sort profile,
+one-shot authority, process lifetime and independent result verification.
 
 ## Completed
 
+- [`010 Bounded local process execution`](tasks/010-local-process.md): explicit
+  local file sorting/deduplication via a one-call lease and affine claim;
+  lazy OS process with bounded I/O, cancellation and cleanup; independently
+  verified output artifacts, idempotent CLI/HTTP requests and restart inspection.
+  This is one closed process profile, not arbitrary programs or model dispatch.
 - [`009 Explicit personal-agent request path`](tasks/009-agent-run.md): typed
   CLI/HTTP run, status, and cancellation; durable request identity and bounded
   single-run ownership; source-verified current context, direct answers or
@@ -79,9 +85,9 @@ Its [evidence](tasks/009-evidence.md) records the tested code and CLI workflow.
 
 ## Later
 
-- next delivery priority: structured local process execution with bounded
-  authority, cancellation, and task-specific evidence; specify its vertical
-  task contract before implementation;
+- next delivery priority: connect model intent to the existing closed local
+  process profile through explicit user-scoped authority and minimal approval/
+  status UX; specify that vertical contract before expanding executable programs;
 - event-driven scheduled-work state and restart recovery before recurring
   autonomous execution;
 - minimum task-status/approval experience and reproducible RAM, latency, cost,

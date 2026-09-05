@@ -4,6 +4,7 @@ use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
 mod memory;
 mod runs;
+mod sorts;
 
 #[derive(Debug, Parser)]
 #[command(name = "ditto", version, about = "Operate the local Ditto daemon")]
@@ -16,6 +17,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Sort a UTF-8 file locally, optionally removing duplicates. No model call.
+    Sort(sorts::SortArgs),
+    /// Inspect a local sort request and its verified output.
+    SortStatus(runs::RunIdentity),
+    /// Cancel an active local sort request.
+    SortCancel(runs::RunIdentity),
     /// Ask the configured model; wait for its answer unless detached.
     Run(runs::RunArgs),
     /// Inspect a run using its original request ID.
@@ -65,6 +72,9 @@ async fn main() -> anyhow::Result<()> {
     let api = cli.api.trim_end_matches('/');
 
     match cli.command {
+        Command::Sort(args) => sorts::start(&client, api, args).await?,
+        Command::SortStatus(identity) => sorts::inspect(&client, api, identity).await?,
+        Command::SortCancel(identity) => sorts::cancel(&client, api, identity).await?,
         Command::Run(args) => runs::start(&client, api, args).await?,
         Command::RunStatus(identity) => runs::inspect(&client, api, identity).await?,
         Command::RunCancel(identity) => runs::cancel(&client, api, identity).await?,

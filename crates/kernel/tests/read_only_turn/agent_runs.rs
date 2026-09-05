@@ -301,6 +301,15 @@ async fn concurrent_retries_share_one_run_busy_is_not_queued_and_cancel_is_scope
             .start_agent_run(start_command("other"), driver.clone()),
         Err(AgentRunError::Busy)
     ));
+    assert!(matches!(
+        fixture.kernel.start_sort(ditto_protocol::StartSortCommand {
+            request_id: ulid::Ulid::new().to_string(),
+            session_id: "personal".into(),
+            text: "b\na".into(),
+            unique: false,
+        }),
+        Err(AgentRunError::Busy)
+    ));
     let mut altered = command.clone();
     altered.text.push('!');
     assert!(matches!(
