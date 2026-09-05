@@ -225,3 +225,55 @@ pub struct CapabilitySearchQuery {
     #[serde(default)]
     pub limit: Option<usize>,
 }
+
+/// Promote exact existing user input; the kernel owns every context-node field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RememberInputCommand {
+    pub session_id: String,
+    pub input_event_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
+}
+
+pub const MAX_USER_MEMORY_BYTES: usize = 4_096;
+pub const MAX_USER_MEMORY_PAGE_SIZE: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryWriteOutcome {
+    Recorded,
+    AlreadyRecorded,
+    CommittedButProjectionUnavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RememberInputResponse {
+    pub memory_id: String,
+    pub event_id: String,
+    pub event_seq: i64,
+    pub outcome: MemoryWriteOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryQuery {
+    pub session_id: String,
+    pub after_id: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserMemory {
+    pub id: String,
+    pub text: String,
+    pub input_event_id: String,
+    pub replaces: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPage {
+    pub memories: Vec<UserMemory>,
+    pub next_after_id: Option<String>,
+    pub through_seq: i64,
+}

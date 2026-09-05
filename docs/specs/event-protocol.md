@@ -102,6 +102,60 @@ injected for tests or internal experiments; provider failure is surfaced rather
 than silently falling back to lexical retrieval, and embeddings cannot bypass
 scope or other hard filters.
 
+## Explicit user memory
+
+`POST /v1/commands/memory` accepts only:
+
+```json
+{
+  "session_id": "personal",
+  "input_event_id": "01J00000000000000000000000",
+  "replaces": "memory-01h00000000000000000000000"
+}
+```
+
+`replaces` is optional. IDs in this example are placeholders for real recorded
+input and memory IDs. The input must be an existing same-session, task-free,
+user-authored `input.received` event with nonblank text of at most 4,096 UTF-8
+bytes. Unknown command fields are rejected. The kernel constructs a session
+Claim with User/Asserted/Personal metadata, confidence 1.0, exact source text,
+one source input ID, and the deterministic lowercase `memory-<input ULID>` ID.
+The durable envelope, payload version, provenance checks, and commit boundary
+remain those of `context.node.recorded` above.
+
+Responses contain `memory_id`, the durable context `event_id` and `event_seq`,
+and `outcome`. First acceptance is HTTP 201/`recorded`; a matching retry is
+HTTP 200/`already_recorded` with the original event and no new publication.
+Changing the replacement intent for an already saved input conflicts. A
+replacement must be a currently active explicit memory in the same session;
+concurrent corrections of one old memory are serialized by the admission gate
+and at most one succeeds. HTTP 409 reports a conflict. Unknown/mismatched sources
+and malformed commands are rejected before context append.
+
+HTTP 202/`committed_but_projection_unavailable` means the context event is durable
+but its searchable projection is unavailable. An identical promotion retry
+recovers the projection or reports its existing durable identity. Operational
+errors expose path-free messages. The CLI first records input through the
+existing input command, then promotes it; failure between these steps leaves
+input evidence, not a claimed saved memory. `memory from-input INPUT_ID` supports
+explicit recovery with the same session/replacement options. There is no
+automatic HTTP retry.
+
+`GET /v1/memories?session_id=personal&limit=20` reads a source-verified active
+snapshot. Each item contains `id`, exact `text`, `input_event_id`, and optional
+`replaces`. The response includes `through_seq` and `next_after_id`; use that ID
+as `after_id` on the next request. IDs are ordered lexically, page limits are
+1 through 100 without clamping, and every returned item is compared to its exact
+source input. Each page has its own high-water, so pagination across concurrent
+changes is not a frozen historical snapshot. The existing 10,000 active-node
+and cumulative snapshot byte limits still apply, including other active context
+in that session. Listing adds no event and invokes no model/embedding provider.
+
+`personal` is the CLI's default session name, not a new global scope. Other
+sessions remain isolated. Deletion, automatic extraction, cross-session recall,
+and daemon model scheduling remain deferred. [ADR 0015](../adr/0015-explicit-user-memory.md)
+owns this command and retry contract.
+
 ## Kernel artifact-read turns
 
 The kernel owns version 1 of the durable read-only turn state machine. Clients
