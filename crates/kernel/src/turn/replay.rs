@@ -1614,7 +1614,8 @@ fn valid_capability_contract_failure_message(message: &str) -> bool {
         "retrieval.aliases",
         "retrieval.complements",
     ];
-    message == "artifact.read level-2 schema does not match the installed manifest"
+    message == "installed artifact.read package could not be verified"
+        || message == "artifact.read level-2 schema does not match the installed manifest"
         || message == "artifact.read could not be selected as the sole execution capability"
         || MANIFEST_FIELDS.iter().any(|field| {
             message

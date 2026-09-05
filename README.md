@@ -29,8 +29,9 @@ The executable foundation includes:
 - typed public command ingress with kernel-owned actor and event kind;
 - subscribe-first, high-water-bounded, paginated SSE replay and lag recovery;
 - SHA-256 content-addressed artifacts with private storage and verified reads;
-- file-backed capability manifests, validated complements, strict runtime search,
-  and bounded execution epochs;
+- compact capability package headers, bounded no-follow discovery on Linux/macOS,
+  selected full-manifest verification, strict runtime search, and bounded
+  execution epochs; headerless packages retain a bounded compatibility path;
 - typed Context IR with provenance validation, trusted compiler directives, and
   locally derived token cost;
 - kernel-only trusted admission of session/task context nodes as fixed

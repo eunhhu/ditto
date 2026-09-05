@@ -384,9 +384,10 @@ dependencies = [
 
 [[package]]
 name = "ditto-capability"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ditto-retrieval",
+ "libc",
  "regex",
  "serde",
  "serde_json",

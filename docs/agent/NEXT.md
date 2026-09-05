@@ -5,8 +5,9 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-None. Task 006 is complete on its pull-request branch; do not start the bounded
-capability package-header slice in that branch.
+[`007 Bounded capability package headers`](tasks/007-capability-package-headers.md)
+on `dev/task-007-capability-package-headers`. Task 006 remains complete on its
+separate pull-request branch.
 
 ## Completed
 

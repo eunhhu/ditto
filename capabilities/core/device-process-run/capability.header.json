@@ -1,0 +1,53 @@
+{
+  "header_version": 1,
+  "manifest_sha256": "c4729a7fe177a708c6dfa1978b6e71fee5b17077303f5d72f1431ef26b43217b",
+  "id": "device.process.run",
+  "version": "0.1.0",
+  "namespace": "device",
+  "kind": "tool",
+  "lifecycle": "active",
+  "summary": "Run a structured process on a registered local or remote device.",
+  "placement": {
+    "modes": [
+      "local",
+      "ssh"
+    ],
+    "requires": [
+      "process"
+    ]
+  },
+  "retrieval": {
+    "intents": [
+      "run a command on another computer",
+      "restart a service on the home server",
+      "inspect logs on a registered device"
+    ],
+    "negative_examples": [
+      "send a message to another person",
+      "reboot the entire machine when only one service should restart"
+    ],
+    "complements": [
+      "artifact.read"
+    ],
+    "aliases": [
+      "remote command",
+      "ssh command",
+      "run process"
+    ]
+  },
+  "effects": {
+    "minimum": {
+      "access": "metadata",
+      "mutation": "none",
+      "externality": "local",
+      "privilege": "user"
+    },
+    "maximum": {
+      "access": "credentials",
+      "mutation": "irreversible",
+      "externality": "network",
+      "privilege": "elevated"
+    }
+  },
+  "candidate_bytes": 473
+}
