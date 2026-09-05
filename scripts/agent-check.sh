@@ -24,3 +24,4 @@ cargo test --locked --workspace --all-features
 cargo build --locked -p ditto-cli
 cargo test --locked -p ditto-daemon runs::tests::built_cli_run_wait_retry_status_and_cancel -- --exact --ignored
 cargo test --locked -p ditto-daemon sorts::tests::built_cli_sort_wait_retry_status_and_cancel -- --exact --ignored
+cargo test --locked -p ditto-daemon runs::tests::built_cli_model_sort_permission_retry_and_disabled_status -- --exact --ignored

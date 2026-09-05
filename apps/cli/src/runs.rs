@@ -2,13 +2,20 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use ditto_protocol::{
-    AgentRunQuery, AgentRunResponse, AgentRunStatus, EventQuery, StartAgentRunCommand,
+    AgentRunQuery, AgentRunResponse, AgentRunStatus, AgentSortPermission, EventQuery,
+    StartAgentRunCommand,
 };
 use futures_util::StreamExt;
 
 #[derive(Debug, clap::Args)]
 pub(super) struct RunArgs {
     text: String,
+    /// Permit one sort of this exact file during the run (64 KiB / 4096 lines).
+    #[arg(long)]
+    sort_file: Option<std::path::PathBuf>,
+    /// Also permit removing exact duplicate lines from the attached file.
+    #[arg(long, requires = "sort_file")]
+    allow_deduplicate: bool,
     #[arg(long, default_value = "personal")]
     session: String,
     /// Reuse this ID only for an identical request retry.
@@ -40,6 +47,25 @@ pub(super) async fn start(
     api: &str,
     args: RunArgs,
 ) -> anyhow::Result<()> {
+    let sort = args
+        .sort_file
+        .as_ref()
+        .map(|path| {
+            let text = super::sorts::read_input(path)?;
+            eprintln!(
+                "Permission: sort attached file once; deduplication {} (expires with this run).",
+                if args.allow_deduplicate {
+                    "allowed"
+                } else {
+                    "not allowed"
+                }
+            );
+            Ok::<_, anyhow::Error>(AgentSortPermission {
+                text,
+                allow_deduplicate: args.allow_deduplicate,
+            })
+        })
+        .transpose()?;
     let request_id = args
         .request_id
         .unwrap_or_else(|| ulid::Ulid::new().to_string());
@@ -58,6 +84,7 @@ pub(super) async fn start(
                 request_id,
                 session_id: args.session,
                 text: args.text,
+                sort,
             })
             .send()
             .await

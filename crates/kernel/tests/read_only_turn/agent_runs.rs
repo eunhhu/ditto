@@ -4,8 +4,9 @@ use ditto_protocol::{
     AgentRunQuery, AgentRunResponse, AgentRunStatus, RememberInputCommand, StartAgentRunCommand,
 };
 
-fn start_command(text: &str) -> StartAgentRunCommand {
+pub(super) fn start_command(text: &str) -> StartAgentRunCommand {
     StartAgentRunCommand {
+        sort: None,
         request_id: ulid::Ulid::new().to_string(),
         session_id: "personal".into(),
         text: text.into(),
@@ -43,14 +44,17 @@ async fn legacy_precancel_does_not_materialize_context_during_admission_split() 
     assert!(driver.requests().is_empty());
 }
 
-fn query(command: &StartAgentRunCommand) -> AgentRunQuery {
+pub(super) fn query(command: &StartAgentRunCommand) -> AgentRunQuery {
     AgentRunQuery {
         request_id: command.request_id.clone(),
         session_id: command.session_id.clone(),
     }
 }
 
-async fn terminal(kernel: &DittoKernel, command: &StartAgentRunCommand) -> AgentRunResponse {
+pub(super) async fn terminal(
+    kernel: &DittoKernel,
+    command: &StartAgentRunCommand,
+) -> AgentRunResponse {
     let mut events = kernel.subscribe();
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {

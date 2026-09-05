@@ -161,8 +161,11 @@ expiring, and bound to one invocation digest.
 worker consumes the affine claim, validates exact registered revision/input,
 and starts the trusted OS sort lazily with bounded stdin/output, private scratch,
 cleared environment, and cancellable lifetime. The kernel shares one active slot
-across model and sort requests. No arbitrary executable or shell is exposed;
-model dispatch to process tools remains separate from this explicit command.
+across model and sort requests. An explicit per-run file attachment can grant
+one model-directed sort, with deduplication separately permitted. The kernel
+pages that tool only for the permitted run and derives its exact-resource lease;
+natural-language instructions never create authority. No arbitrary executable
+or shell is exposed. See [ADR 0018](adr/0018-user-scoped-model-sort.md).
 
 SSH is placement transport, not a model-facing raw shell.
 
@@ -185,10 +188,12 @@ model stream ending is never completion evidence.
 
 The first verifier independently checks artifact-sort line order and exact
 multiplicities or unique set equality. It seals the checked output before the
-kernel stores a result artifact and a single sort-specific `task.completed`
-record. Status revalidates causal artifact roots, both content hashes and the
+kernel stores a result artifact. Explicit sort commands produce a sort-specific
+`task.completed`; model-directed sorts produce verified tool evidence while the
+model answer stays unverified. Status revalidates causal artifact roots, both content hashes and the
 line contract, using bounded reads and indexed event identities. A sort
-completion does not certify a model turn's wider goal.
+completion does not certify a model turn's wider goal. Verified tool output
+remains independently inspectable after a later model failure or interruption.
 
 ## Model boundary
 

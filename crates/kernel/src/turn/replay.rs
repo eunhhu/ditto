@@ -9,7 +9,7 @@ use ditto_capability::{CapabilityCard, CapabilityDeriver, CapabilityRevision, Ca
 use ditto_context::{CompiledContext, ContextCapsule, ContextCompiler, TaskSignature};
 use ditto_model::{
     CancellationId, ContentPart, ConversationItem, ExecutionEpochId, FinishReason,
-    GenerationControls, MessageRole, ModelEvent, ModelFeature, ModelRequest, OutputConstraint,
+    GenerationControls, ModelEvent, ModelFeature, ModelRequest, OutputConstraint,
     ParallelToolCalls, ProviderCallId, ToolCallBuffer, ToolChoice, ToolUsePolicy,
 };
 use ditto_protocol::{EventActor, EventRecord, event_kind};
@@ -17,6 +17,10 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::normalize_input_text;
+
+#[path = "sort_replay.rs"]
+mod sort_replay;
+use super::sort::{ReplayedSortCall, SortGrant};
 
 use super::shared::{
     ReadyCall, append_assistant_text, bounded_turn_failure_message, stable_system_prefix,
@@ -175,6 +179,9 @@ pub fn replay_artifact_read_turn(
 
 struct ReplayProjector<'turn, 'snapshot> {
     agent_run: bool,
+    sort: Option<SortGrant>,
+    sort_claimed: bool,
+    sort_calls: Vec<ReplayedSortCall>,
     events: &'turn [EventRecord],
     snapshot: &'snapshot [EventRecord],
     index: usize,
@@ -289,9 +296,14 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         if normalized_input != input.text {
             return Err(replay_invalid("recorded input text is not normalized"));
         }
+        let sort = input.agent_run.and_then(|metadata| metadata.sort);
         let input_text = input.text;
+        let conversation = super::sort::initial_conversation(input_text.clone(), sort.as_ref());
         Ok(Self {
             agent_run,
+            sort,
+            sort_claimed: false,
+            sort_calls: Vec::new(),
             events,
             snapshot,
             index: 1,
@@ -301,12 +313,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             context: None,
             schemas: None,
             execution_epoch_id: None,
-            conversation: vec![ConversationItem::Message {
-                role: MessageRole::User,
-                content: vec![ContentPart::Text {
-                    text: input_text.clone(),
-                }],
-            }],
+            conversation,
             all_call_ids: BTreeSet::new(),
             total_text_bytes: 0,
             tool_call_count: 0,
@@ -356,48 +363,66 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         validate_artifact_read_manifest(&selected.manifest)
             .map_err(|error| replay_invalid(error.to_string()))?;
         let expected_schema = capability_schema();
-        if selected.schemas != vec![expected_schema.clone()]
-            || selected.schemas[0].id != selected.manifest.id
-            || selected.schemas[0].version != selected.manifest.version
-        {
-            return Err(replay_invalid(
-                "selected schemas do not equal the exact artifact.read contract",
-            ));
-        }
-        if !selected.epoch.invocation_revisions().is_empty() {
-            let deriver = ArtifactReadDeriver::default();
-            let expected_revision = CapabilityRevision::from_contract(
+        let mut expected_schemas = vec![expected_schema.clone()];
+        let mut expected_cards = vec![CapabilityCard::from(&selected.manifest)];
+        let mut expected_revisions = vec![
+            CapabilityRevision::from_contract(
                 &selected.manifest,
                 &expected_schema,
-                deriver.revision().clone(),
+                ArtifactReadDeriver::default().revision().clone(),
             )
-            .map_err(|error| replay_invalid(error.to_string()))?;
-            if selected.epoch.invocation_revisions() != [expected_revision] {
+            .map_err(|error| replay_invalid(error.to_string()))?,
+        ];
+        match (&self.sort, &selected.sort_manifest) {
+            (Some(grant), Some(manifest)) => {
+                if !self
+                    .snapshot
+                    .iter()
+                    .any(|root| grant.matches_root(root, &self.events[0]))
+                {
+                    return Err(replay_invalid("sort permission source is unavailable"));
+                }
+                ditto_artifact_sort::validate_manifest(manifest)
+                    .map_err(|_| replay_invalid("sort manifest changed"))?;
+                let schema = ditto_artifact_sort::schema();
+                expected_revisions.push(
+                    CapabilityRevision::from_contract(
+                        manifest,
+                        &schema,
+                        ditto_artifact_sort::SortDeriver::default()
+                            .revision()
+                            .clone(),
+                    )
+                    .map_err(|error| replay_invalid(error.to_string()))?,
+                );
+                expected_schemas.push(schema);
+                expected_cards.push(CapabilityCard::from(manifest));
+            }
+            (None, None) => {}
+            _ => {
                 return Err(replay_invalid(
-                    "selected invocation revision does not equal the exact artifact.read contract",
+                    "selected sort contract contradicts permission",
                 ));
             }
         }
-        let selected_epoch_id = ExecutionEpochId::new(selected.epoch.id().to_owned())
-            .map_err(|error| replay_invalid(error.to_string()))?;
-        let expected_card = CapabilityCard::from(&selected.manifest);
-        let selected_cards = selected.epoch.capabilities();
-        if selected.epoch.max_working_set() != 1 || selected_cards.len() != 1 {
+        if selected.schemas != expected_schemas {
             return Err(replay_invalid(
-                "selected epoch is not the single installed artifact.read capability",
+                "selected schemas do not equal the installed contracts",
             ));
         }
-        let actual_card = &selected_cards[0];
-        if actual_card.id != expected_card.id
-            || actual_card.namespace != expected_card.namespace
-            || actual_card.kind != expected_card.kind
-            || actual_card.summary != expected_card.summary
-            || actual_card.minimum_effect != expected_card.minimum_effect
-            || actual_card.maximum_effect != expected_card.maximum_effect
-            || actual_card.placement_modes != expected_card.placement_modes
+        if (!selected.epoch.invocation_revisions().is_empty() || self.sort.is_some())
+            && selected.epoch.invocation_revisions() != expected_revisions
+        {
+            return Err(replay_invalid("selected invocation revisions changed"));
+        }
+        let selected_epoch_id = ExecutionEpochId::new(selected.epoch.id().to_owned())
+            .map_err(|error| replay_invalid(error.to_string()))?;
+        if selected.epoch.max_working_set() != expected_cards.len()
+            || serde_json::to_value(selected.epoch.capabilities()).ok()
+                != serde_json::to_value(expected_cards).ok()
         {
             return Err(replay_invalid(
-                "selected epoch card contradicts the validated artifact.read manifest",
+                "selected epoch cards contradict the installed contracts",
             ));
         }
         self.execution_epoch_id = Some(selected_epoch_id);
@@ -555,7 +580,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         call_id,
                         capability_id,
                     } => {
-                        if capability_id != ARTIFACT_READ_ID {
+                        if capability_id != ARTIFACT_READ_ID
+                            && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+                        {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
                                 format!("unknown capability {capability_id}"),
@@ -612,7 +639,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         capability_id,
                         arguments,
                     } => {
-                        if capability_id != ARTIFACT_READ_ID {
+                        if capability_id != ARTIFACT_READ_ID
+                            && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+                        {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
                                 format!("unknown capability {capability_id}"),
@@ -793,6 +822,14 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                             ));
                         }
                         return Ok(ArtifactReadTurnReplay::Failed { failure });
+                    }
+
+                    if call.capability_id == ditto_artifact_sort::ID {
+                        if let Some(failure) = self.replay_sort_call(request_index as u8, &call)? {
+                            return Ok(ArtifactReadTurnReplay::Failed { failure });
+                        }
+                        request_index += 1;
+                        continue;
                     }
 
                     let capability_event =
@@ -1154,6 +1191,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             requests: self.requests,
             outputs: self.outputs,
             calls: self.calls,
+            sort_calls: self.sort_calls,
             terminal,
 
             sequence_span: TurnSequenceSpan {
@@ -1363,7 +1401,13 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             && failure.message == "installed artifact.read capability is unavailable"
             && failure.evidence.is_none())
             || (failure.code == TurnFailureCode::CapabilityContract
-                && valid_capability_contract_failure_message(&failure.message)
+                && (valid_capability_contract_failure_message(&failure.message)
+                    || (self.sort.is_some()
+                        && matches!(
+                            failure.message.as_str(),
+                            "sort permission source is unavailable"
+                                | "installed artifact.sort contract is unavailable"
+                        )))
                 && failure.evidence.is_none());
         if !valid || failure.request_index.is_some() || failure.call_id.is_some() {
             return Err(replay_invalid(

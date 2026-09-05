@@ -19,6 +19,8 @@ use crate::{
 pub(crate) struct AgentRunMetadata {
     pub version: u16,
     pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<crate::turn::sort::SortGrant>,
 }
 
 #[derive(Default)]
@@ -102,6 +104,13 @@ impl DittoKernel {
         }
         let text = normalize_input_text(&command.text)
             .map_err(|_| AgentRunError::Invalid("text is empty or invalid"))?;
+        if let Some(permission) = &command.sort {
+            ditto_artifact_sort::validate_input(permission.text.as_bytes()).map_err(|_| {
+                AgentRunError::Invalid(
+                    "sort attachment exceeds 64 KiB / 4096 UTF-8 lines or contains NUL",
+                )
+            })?;
+        }
         // Check the executor before durable acceptance, including non-async callers.
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| AgentRunError::Stopping)?;
         let mut slot = self
@@ -111,6 +120,13 @@ impl DittoKernel {
             .map_err(|_| AgentRunError::Storage)?;
         if let Some((input, last)) = self.run_boundary(&query, &task_id)? {
             validate_agent_input(&input, &query)?;
+            let metadata: AgentRunMetadata =
+                serde_json::from_value(input.payload["agent_run"].clone())
+                    .map_err(|_| AgentRunError::Storage)?;
+            if !crate::turn::sort::permission_matches(metadata.sort.as_ref(), command.sort.as_ref())
+            {
+                return Err(AgentRunError::Conflict);
+            }
             if input
                 .payload
                 .get("text")
@@ -119,7 +135,7 @@ impl DittoKernel {
             {
                 return Err(AgentRunError::Conflict);
             }
-            return status_from_boundary(query, input, last, &slot);
+            return self.agent_status_from_boundary(query, input, last, &slot);
         }
         if slot.stopping {
             return Err(AgentRunError::Stopping);
@@ -127,6 +143,26 @@ impl DittoKernel {
         if slot.active.is_some() {
             return Err(AgentRunError::Busy);
         }
+        let sort = command
+            .sort
+            .map(|permission| {
+                let stored = self.store_artifact(
+                    permission.text.as_bytes(),
+                    crate::ArtifactWriteContext {
+                        session_id: Some(query.session_id.clone()),
+                        task_id: Some(task_id.clone()),
+                        mime: Some("text/plain; charset=utf-8".into()),
+                        purpose: Some("model sort attachment".into()),
+                        ..Default::default()
+                    },
+                )?;
+                Ok::<_, AgentRunError>(crate::turn::sort::SortGrant {
+                    reference: stored.metadata.reference.to_string(),
+                    source_event_id: stored.event.event_id,
+                    allow_deduplicate: permission.allow_deduplicate,
+                })
+            })
+            .transpose()?;
         let admitted = self.admit_read_only_turn(
             SubmitInputCommand {
                 text,
@@ -134,8 +170,9 @@ impl DittoKernel {
                 task_id: Some(task_id),
             },
             Some(AgentRunMetadata {
-                version: 1,
+                version: if sort.is_some() { 2 } else { 1 },
                 request_id: query.request_id.clone(),
+                sort,
             }),
         )?;
         let input = admitted.input().clone();
@@ -171,7 +208,7 @@ impl DittoKernel {
         // The slot's cancellation/completion tokens own the lifetime. Dropping
         // the join handle detaches HTTP ownership, not shutdown accounting.
         drop(task);
-        status_from_boundary(query, input.clone(), input, &slot)
+        self.agent_status_from_boundary(query, input.clone(), input, &slot)
     }
 
     pub fn inspect_agent_run(
@@ -188,7 +225,7 @@ impl DittoKernel {
             .run_boundary(&query, &task_id)?
             .ok_or(AgentRunError::NotFound)?;
         validate_agent_input(&input, &query)?;
-        status_from_boundary(query, input, last, &slot)
+        self.agent_status_from_boundary(query, input, last, &slot)
     }
 
     pub fn cancel_agent_run(
@@ -210,7 +247,7 @@ impl DittoKernel {
         {
             active.cancellation.cancel();
         }
-        status_from_boundary(query, input, last, &slot)
+        self.agent_status_from_boundary(query, input, last, &slot)
     }
 
     /// Close admission and drain the one owned execution, without a heartbeat.
@@ -293,7 +330,7 @@ pub(crate) fn validate_agent_input(
             .ok_or(AgentRunError::Conflict)?,
     )
     .map_err(|_| AgentRunError::Storage)?;
-    if metadata.version != 1
+    if metadata.version != if metadata.sort.is_some() { 2 } else { 1 }
         || metadata.request_id != query.request_id
         || input.actor != EventActor::User
         || input.kind != event_kind::INPUT_RECEIVED
@@ -306,71 +343,84 @@ pub(crate) fn validate_agent_input(
     {
         return Err(AgentRunError::Conflict);
     }
+    if let Some(grant) = &metadata.sort {
+        grant.validate().map_err(|_| AgentRunError::Storage)?;
+    }
     Ok(())
 }
 
-fn status_from_boundary(
-    query: AgentRunQuery,
-    input: EventRecord,
-    last: EventRecord,
-    slot: &RunSlot,
-) -> Result<AgentRunResponse, AgentRunError> {
-    let turn_id = input.correlation_id.ok_or(AgentRunError::Storage)?;
-    let task_id = input.task_id.ok_or(AgentRunError::Storage)?;
-    let active = slot
-        .active
-        .as_ref()
-        .filter(|active| active.input_event_id == input.event_id);
-    let mut response = AgentRunResponse {
-        request_id: query.request_id,
-        session_id: query.session_id,
-        task_id,
-        turn_id,
-        status: if active.is_some() {
-            AgentRunStatus::Running
-        } else {
-            AgentRunStatus::Interrupted
-        },
-        cancellation_requested: active.is_some_and(|active| active.cancellation.is_cancelled()),
-        response: None,
-        failure_code: None,
-    };
-    match last.kind.as_str() {
-        event_kind::TURN_FINISHED => {
-            let terminal: TurnFinishedPayload =
-                serde_json::from_value(last.payload).map_err(|_| AgentRunError::Storage)?;
-            if last.actor != EventActor::System
-                || terminal.event_version != 1
-                || terminal.turn_id != response.turn_id
-                || terminal.outcome.turn_id != response.turn_id
-                || terminal.outcome.session_id != response.session_id
-                || terminal.outcome.task_id != response.task_id
-            {
-                return Err(AgentRunError::Storage);
+impl DittoKernel {
+    fn agent_status_from_boundary(
+        &self,
+        query: AgentRunQuery,
+        input: EventRecord,
+        last: EventRecord,
+        slot: &RunSlot,
+    ) -> Result<AgentRunResponse, AgentRunError> {
+        let sort = self.agent_sort_progress(
+            &input,
+            slot.active
+                .as_ref()
+                .is_some_and(|active| active.input_event_id == input.event_id),
+        )?;
+        let turn_id = input.correlation_id.ok_or(AgentRunError::Storage)?;
+        let task_id = input.task_id.ok_or(AgentRunError::Storage)?;
+        let active = slot
+            .active
+            .as_ref()
+            .filter(|active| active.input_event_id == input.event_id);
+        let mut response = AgentRunResponse {
+            request_id: query.request_id,
+            session_id: query.session_id,
+            task_id,
+            turn_id,
+            status: if active.is_some() {
+                AgentRunStatus::Running
+            } else {
+                AgentRunStatus::Interrupted
+            },
+            cancellation_requested: active.is_some_and(|active| active.cancellation.is_cancelled()),
+            sort,
+            response: None,
+            failure_code: None,
+        };
+        match last.kind.as_str() {
+            event_kind::TURN_FINISHED => {
+                let terminal: TurnFinishedPayload =
+                    serde_json::from_value(last.payload).map_err(|_| AgentRunError::Storage)?;
+                if last.actor != EventActor::System
+                    || terminal.event_version != 1
+                    || terminal.turn_id != response.turn_id
+                    || terminal.outcome.turn_id != response.turn_id
+                    || terminal.outcome.session_id != response.session_id
+                    || terminal.outcome.task_id != response.task_id
+                {
+                    return Err(AgentRunError::Storage);
+                }
+                response.status = AgentRunStatus::Unverified;
+                response.response = Some(terminal.outcome.response);
+                response.cancellation_requested = false;
             }
-            response.status = AgentRunStatus::Unverified;
-            response.response = Some(terminal.outcome.response);
-            response.cancellation_requested = false;
-        }
-        event_kind::TURN_FAILED => {
-            let terminal: TurnFailedPayload =
-                serde_json::from_value(last.payload).map_err(|_| AgentRunError::Storage)?;
-            if last.actor != EventActor::System
-                || terminal.event_version != 1
-                || terminal.turn_id != response.turn_id
-                || terminal.failure.turn_id != response.turn_id
-                || terminal.failure.session_id != response.session_id
-                || terminal.failure.task_id != response.task_id
-            {
-                return Err(AgentRunError::Storage);
+            event_kind::TURN_FAILED => {
+                let terminal: TurnFailedPayload =
+                    serde_json::from_value(last.payload).map_err(|_| AgentRunError::Storage)?;
+                if last.actor != EventActor::System
+                    || terminal.event_version != 1
+                    || terminal.turn_id != response.turn_id
+                    || terminal.failure.turn_id != response.turn_id
+                    || terminal.failure.session_id != response.session_id
+                    || terminal.failure.task_id != response.task_id
+                {
+                    return Err(AgentRunError::Storage);
+                }
+                response.status = AgentRunStatus::Failed;
+                response.failure_code = serde_json::to_value(terminal.failure.code)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned));
+                response.cancellation_requested = false;
             }
-            response.status = AgentRunStatus::Failed;
-            response.failure_code = serde_json::to_value(terminal.failure.code)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned));
-            response.cancellation_requested = false;
+            _ => {}
         }
-        _ => {}
+        Ok(response)
     }
-    Ok(response)
 }
