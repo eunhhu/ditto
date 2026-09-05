@@ -12,6 +12,7 @@ smallest useful working set.
 
 | Task | Read next |
 | --- | --- |
+| Product positioning, priorities, or user-facing performance | [`../product.md`](../product.md) |
 | Long autonomous run | [`OPERATING-MODE.md`](OPERATING-MODE.md) |
 | Tests, CI, release confidence | [`QUALITY-GATES.md`](QUALITY-GATES.md) |
 | Architecture or public contract | [`../architecture.md`](../architecture.md), relevant [`../adr`](../adr), and [`DECISIONS.md`](DECISIONS.md) |

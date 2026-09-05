@@ -1,8 +1,8 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use ditto_retrieval::{
@@ -17,6 +17,15 @@ use thiserror::Error;
 use ulid::Ulid;
 
 mod invocation;
+mod package;
+
+pub use package::{
+    CapabilityHeader, CapabilityLoadMetrics, HeaderEffects, MAX_DISCOVERY_DEPTH,
+    MAX_DISCOVERY_ENTRIES, MAX_PACKAGE_COUNT, MAX_PACKAGE_HEADER_BYTES, MAX_PACKAGE_MANIFEST_BYTES,
+    MAX_PACKAGE_STARTUP_BYTES, MAX_RETAINED_HEADER_BYTES, PACKAGE_HEADER_FILENAME,
+    generate_package_header,
+};
+use package::{LoadCounters, ManifestSource};
 mod schema_instance;
 
 pub use invocation::{
@@ -164,7 +173,34 @@ pub struct CapabilityManifest {
 pub fn capability_retrieval_document(
     manifest: &CapabilityManifest,
 ) -> Result<RetrievalDocument, RetrievalError> {
-    let document_len = capability_retrieval_document_len(manifest)?;
+    retrieval_document(RetrievalFields {
+        id: &manifest.id,
+        namespace: &manifest.namespace,
+        summary: &manifest.summary,
+        retrieval: &manifest.retrieval,
+    })
+}
+
+struct RetrievalFields<'a> {
+    id: &'a str,
+    namespace: &'a str,
+    summary: &'a str,
+    retrieval: &'a RetrievalSpec,
+}
+
+impl CapabilityHeader {
+    fn retrieval_fields(&self) -> RetrievalFields<'_> {
+        RetrievalFields {
+            id: &self.id,
+            namespace: &self.namespace,
+            summary: &self.summary,
+            retrieval: &self.retrieval,
+        }
+    }
+}
+
+fn retrieval_document(manifest: RetrievalFields<'_>) -> Result<RetrievalDocument, RetrievalError> {
+    let document_len = retrieval_document_len(&manifest)?;
     let mut aliases = manifest
         .retrieval
         .aliases
@@ -182,11 +218,11 @@ pub fn capability_retrieval_document(
 
     let mut document = String::with_capacity(document_len);
     document.push_str("id=");
-    document.push_str(&manifest.id);
+    document.push_str(manifest.id);
     document.push_str("\nnamespace=");
-    document.push_str(&manifest.namespace);
+    document.push_str(manifest.namespace);
     document.push_str("\nsummary=");
-    document.push_str(&manifest.summary);
+    document.push_str(manifest.summary);
     for alias in aliases {
         document.push_str("\nalias=");
         document.push_str(alias);
@@ -198,9 +234,7 @@ pub fn capability_retrieval_document(
     RetrievalDocument::new(document)
 }
 
-fn capability_retrieval_document_len(
-    manifest: &CapabilityManifest,
-) -> Result<usize, RetrievalError> {
+fn retrieval_document_len(manifest: &RetrievalFields<'_>) -> Result<usize, RetrievalError> {
     let mut actual = "id="
         .len()
         .saturating_add(manifest.id.len())
@@ -239,7 +273,7 @@ pub struct RuntimeSpec {
     pub idle_ttl_ms: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacementSpec {
     #[serde(default)]
     pub modes: Vec<String>,
@@ -247,7 +281,7 @@ pub struct PlacementSpec {
     pub requires: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrievalSpec {
     #[serde(default)]
     pub intents: Vec<String>,
@@ -994,6 +1028,10 @@ impl<'de> Deserialize<'de> for ExecutionEpochEvidence {
 
 #[derive(Debug, Error)]
 pub enum CapabilityError {
+    #[error("invalid capability package: {0}")]
+    PackageInvalid(&'static str),
+    #[error("capability package {kind} exceeds limit {maximum}")]
+    PackageLimit { kind: &'static str, maximum: usize },
     #[error("capability manifest I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("failed to parse capability manifest {path}: {source}")]
@@ -1029,51 +1067,63 @@ pub enum CapabilitySearchError {
 
 #[derive(Debug, Clone, Default)]
 pub struct CapabilityCatalog {
-    manifests: Vec<CapabilityManifest>,
+    manifests: Vec<CapabilityHeader>,
+    sources: Vec<ManifestSource>,
     positions: HashMap<String, usize>,
+    load_counters: Arc<LoadCounters>,
 }
 
 impl CapabilityCatalog {
     pub fn load(root: impl AsRef<Path>) -> Result<Self, CapabilityError> {
-        let root = root.as_ref();
-        if !root.exists() {
-            return Ok(Self::default());
-        }
-
-        let mut paths = Vec::new();
-        collect_manifests(root, &mut paths)?;
-        paths.sort();
-
-        let mut catalog = Self::default();
-        for path in paths {
-            let content = fs::read_to_string(&path)?;
-            let manifest = toml::from_str::<CapabilityManifest>(&content).map_err(|source| {
-                CapabilityError::Parse {
-                    path: path.clone(),
-                    source,
-                }
-            })?;
-            catalog.insert(manifest)?;
-        }
-        catalog.validate()?;
-        Ok(catalog)
+        package::load(root.as_ref())
     }
 
     pub fn insert(&mut self, manifest: CapabilityManifest) -> Result<(), CapabilityError> {
         validate_manifest(&manifest)?;
-        if self.positions.contains_key(&manifest.id) {
-            return Err(CapabilityError::DuplicateId(manifest.id));
+        let header = CapabilityHeader::project(&manifest, String::new());
+        self.insert_header(header, ManifestSource::Inline(Arc::new(manifest)))
+    }
+
+    fn insert_header(
+        &mut self,
+        header: CapabilityHeader,
+        source: ManifestSource,
+    ) -> Result<(), CapabilityError> {
+        if self.positions.contains_key(&header.id) {
+            return Err(CapabilityError::DuplicateId(header.id));
         }
-        let index = self.manifests.len();
-        self.positions.insert(manifest.id.clone(), index);
-        self.manifests.push(manifest);
+        self.positions
+            .insert(header.id.clone(), self.manifests.len());
+        self.manifests.push(header);
+        self.sources.push(source);
         Ok(())
     }
 
+    pub fn load_metrics(&self) -> CapabilityLoadMetrics {
+        self.load_counters.snapshot()
+    }
+
+    /// Read only the selected active manifest. File-backed values are verified
+    /// against their discovery header and are not cached in the catalogue.
+    pub fn page_manifest(&self, id: &str) -> Result<Option<CapabilityManifest>, CapabilityError> {
+        let Some(&index) = self.positions.get(id) else {
+            return Ok(None);
+        };
+        let header = &self.manifests[index];
+        if header.lifecycle != CapabilityLifecycle::Active {
+            return Ok(None);
+        }
+        package::page(header, &self.sources[index], &self.load_counters).map(Some)
+    }
+
     pub fn validate(&self) -> Result<(), CapabilityError> {
-        for manifest in &self.manifests {
+        for manifest in self
+            .manifests
+            .iter()
+            .filter(|m| m.lifecycle == CapabilityLifecycle::Active)
+        {
             for complement in &manifest.retrieval.complements {
-                if self.get(complement).is_none() {
+                if self.header(complement).is_none() {
                     return Err(CapabilityError::UnknownComplement {
                         id: manifest.id.clone(),
                         complement: complement.clone(),
@@ -1092,7 +1142,7 @@ impl CapabilityCatalog {
         self.manifests.is_empty()
     }
 
-    pub fn get(&self, id: &str) -> Option<&CapabilityManifest> {
+    pub fn header(&self, id: &str) -> Option<&CapabilityHeader> {
         self.positions
             .get(id)
             .and_then(|index| self.manifests.get(*index))
@@ -1150,7 +1200,7 @@ impl CapabilityCatalog {
                 if selected.len() >= limit {
                     break;
                 }
-                let Some(complement) = self.get(complement_id) else {
+                let Some(complement) = self.header(complement_id) else {
                     continue;
                 };
                 if matches_context(complement, context) && seen_ids.insert(complement.id.as_str()) {
@@ -1228,7 +1278,7 @@ impl CapabilityCatalog {
         // Resolve references for every active root before any provider call.
         for manifest in &manifests {
             for complement in &manifest.retrieval.complements {
-                if self.get(complement).is_none() {
+                if self.header(complement).is_none() {
                     return Err(CapabilitySearchError::UnknownComplement {
                         id: manifest.id.clone(),
                         complement: complement.clone(),
@@ -1239,7 +1289,7 @@ impl CapabilityCatalog {
 
         let mut roots = Vec::with_capacity(root_limit.get());
         for manifest in manifests {
-            budget.charge_candidate_bytes(capability_candidate_bytes(manifest))?;
+            budget.charge_candidate_bytes(manifest.candidate_bytes)?;
             if !matches_context(manifest, context) {
                 continue;
             }
@@ -1247,9 +1297,9 @@ impl CapabilityCatalog {
                 continue;
             }
 
-            let document_len = capability_retrieval_document_len(manifest)?;
+            let document_len = retrieval_document_len(&manifest.retrieval_fields())?;
             budget.charge_document_bytes(document_len)?;
-            let document = capability_retrieval_document(manifest)?;
+            let document = retrieval_document(manifest.retrieval_fields())?;
             let exact = exact_capability_match(manifest, query, budget)?;
             let lexical_overlap = query.lexical_overlap_with_budget(&document, budget)?;
             if !exact && lexical_overlap == 0.0 {
@@ -1295,7 +1345,7 @@ impl CapabilityCatalog {
                 if selected.len() >= epoch_capacity {
                     break;
                 }
-                let complement = self.get(complement_id).ok_or_else(|| {
+                let complement = self.header(complement_id).ok_or_else(|| {
                     CapabilitySearchError::UnknownComplement {
                         id: root.manifest.id.clone(),
                         complement: complement_id.clone(),
@@ -1336,7 +1386,7 @@ fn validate_query_provider(
 }
 
 fn denied_by_negative_examples(
-    manifest: &CapabilityManifest,
+    manifest: &CapabilityHeader,
     query: &TaskQuery,
     budget: &mut RetrievalWorkBudget,
 ) -> Result<bool, CapabilitySearchError> {
@@ -1351,7 +1401,7 @@ fn denied_by_negative_examples(
 }
 
 fn exact_capability_match(
-    manifest: &CapabilityManifest,
+    manifest: &CapabilityHeader,
     query: &TaskQuery,
     budget: &mut RetrievalWorkBudget,
 ) -> Result<bool, RetrievalError> {
@@ -1401,7 +1451,7 @@ fn capability_candidate_bytes(manifest: &CapabilityManifest) -> usize {
     bytes
 }
 
-fn preferred_placement_match(manifest: &CapabilityManifest, context: &SearchContext) -> bool {
+fn preferred_placement_match(manifest: &CapabilityHeader, context: &SearchContext) -> bool {
     context
         .preferred_placement
         .as_ref()
@@ -1415,7 +1465,7 @@ fn preferred_placement_match(manifest: &CapabilityManifest, context: &SearchCont
 }
 
 struct V2Root<'a> {
-    manifest: &'a CapabilityManifest,
+    manifest: &'a CapabilityHeader,
     exact: bool,
     lexical_overlap: f32,
     preferred: bool,
@@ -1436,7 +1486,7 @@ fn v2_root_order(left: &V2Root<'_>, right: &V2Root<'_>) -> Ordering {
         .then_with(|| left.manifest.id.cmp(&right.manifest.id))
 }
 
-fn matches_context(manifest: &CapabilityManifest, context: &SearchContext) -> bool {
+fn matches_context(manifest: &CapabilityHeader, context: &SearchContext) -> bool {
     if manifest.lifecycle != CapabilityLifecycle::Active {
         return false;
     }
@@ -1485,7 +1535,7 @@ fn matches_context(manifest: &CapabilityManifest, context: &SearchContext) -> bo
 }
 
 fn lexical_score(
-    manifest: &CapabilityManifest,
+    manifest: &CapabilityHeader,
     normalized_query: &str,
     query_tokens: &HashSet<String>,
     context: &SearchContext,
@@ -1603,22 +1653,6 @@ fn validate_manifest(manifest: &CapabilityManifest) -> Result<(), CapabilityErro
     Ok(())
 }
 
-fn collect_manifests(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_manifests(&path, output)?;
-        } else if path
-            .file_name()
-            .is_some_and(|name| name == "capability.toml")
-        {
-            output.push(path);
-        }
-    }
-    Ok(())
-}
-
 fn valid_capability_id(id: &str) -> bool {
     let mut segments = id.split('.');
     let mut count = 0;
@@ -1683,10 +1717,8 @@ const fn default_idle_ttl_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        sync::{Arc, Mutex},
-    };
+    use std::fs;
+    use std::sync::{Arc, Mutex};
 
     use tempfile::tempdir;
 

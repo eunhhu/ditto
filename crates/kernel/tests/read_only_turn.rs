@@ -516,8 +516,20 @@ async fn run_success(
 #[tokio::test]
 async fn successful_two_request_continuation_persists_exact_epoch_schema_history_and_replays() {
     let fixture = Fixture::new();
+    let loaded = fixture.kernel.capability_load_metrics();
+    assert_eq!(loaded.headers_read, 2);
+    assert_eq!(loaded.legacy_manifests_read, 0);
+    assert_eq!(loaded.manifests_paged, 0);
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));
     let (outcome, driver) = run_success(&fixture, &reference, &["read ", "complete"]).await;
+    assert_eq!(fixture.kernel.capability_load_metrics().manifests_paged, 1);
+    assert_eq!(
+        fixture
+            .kernel
+            .capability_load_metrics()
+            .retained_header_bytes,
+        loaded.retained_header_bytes
+    );
 
     assert_eq!(outcome.response, "read complete");
     assert_eq!(outcome.status, ArtifactReadTurnStatus::Unverified);
@@ -605,6 +617,67 @@ async fn successful_two_request_continuation_persists_exact_epoch_schema_history
             .terminal,
         ArtifactReadTurnReplay::Finished { outcome }
     );
+}
+
+#[tokio::test]
+async fn changed_selected_package_fails_before_model_and_replays_without_package_io() {
+    let directory = tempfile::tempdir().unwrap();
+    let capabilities = directory.path().join("capabilities");
+    std::fs::create_dir(&capabilities).unwrap();
+    let body = include_str!("../../../capabilities/core/artifact-read/capability.toml");
+    std::fs::write(capabilities.join("capability.toml"), body).unwrap();
+    std::fs::write(
+        capabilities.join(ditto_capability::PACKAGE_HEADER_FILENAME),
+        ditto_capability::CapabilityHeader::from_manifest_bytes(body.as_bytes())
+            .unwrap()
+            .to_json()
+            .unwrap(),
+    )
+    .unwrap();
+    let config = KernelConfig::new(directory.path().join("data"), &capabilities);
+    let kernel = DittoKernel::open(config).unwrap();
+    std::fs::write(
+        capabilities.join("capability.toml"),
+        format!("{body}\n# changed"),
+    )
+    .unwrap();
+    let driver = ScriptedDriver::new(Vec::new());
+    let error = kernel
+        .run_artifact_read_turn(
+            command("session-1", "task-1"),
+            Vec::new(),
+            &driver,
+            CancellationToken::new(),
+            ReadOnlyTurnControl::default(),
+        )
+        .await
+        .unwrap_err();
+    let TurnRunError::Failed(failure) = error else {
+        panic!("expected durable package failure")
+    };
+    assert_eq!(failure.code, TurnFailureCode::CapabilityContract);
+    assert_eq!(
+        failure.message,
+        "installed artifact.read package could not be verified"
+    );
+    assert!(driver.requests().is_empty());
+    let snapshot = all_session_events(&kernel, "session-1");
+    assert!(!snapshot.iter().any(|event| matches!(
+        event.kind.as_str(),
+        event_kind::MODEL_REQUESTED | event_kind::EXECUTION_STARTED | event_kind::TASK_COMPLETED
+    )));
+    std::fs::remove_dir_all(capabilities).unwrap();
+    assert_eq!(
+        replay_artifact_read_turn(&snapshot, &failure.turn_id)
+            .unwrap()
+            .terminal,
+        ArtifactReadTurnReplay::Failed {
+            failure: (*failure).clone()
+        }
+    );
+    let mut forged = snapshot;
+    forged.last_mut().unwrap().payload["failure"]["message"] = json!("some other package failure");
+    assert!(replay_artifact_read_turn(&forged, &failure.turn_id).is_err());
 }
 
 #[tokio::test]
