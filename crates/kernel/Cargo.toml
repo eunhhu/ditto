@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 chrono.workspace = true
 ditto-artifact-read = { path = "../artifact-read" }
+ditto-artifact-sort = { path = "../artifact-sort" }
 ditto-artifact-store = { path = "../artifact-store" }
 ditto-capability = { path = "../capability" }
 ditto-context = { path = "../context" }

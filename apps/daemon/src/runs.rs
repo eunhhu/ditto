@@ -84,7 +84,7 @@ async fn cancel(
     Ok(Json(state.kernel.cancel_agent_run(query)?))
 }
 
-enum RunApiError {
+pub(super) enum RunApiError {
     Disabled,
     Run(AgentRunError),
 }
