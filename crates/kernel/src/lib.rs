@@ -20,6 +20,7 @@ use ulid::Ulid;
 
 mod context_admission;
 mod context_retrieval;
+mod memory;
 pub mod turn;
 
 pub use context_admission::{
@@ -93,6 +94,8 @@ pub enum KernelError {
     ContextPayloadSerialization(#[from] serde_json::Error),
     #[error("invalid command: {0}")]
     InvalidCommand(String),
+    #[error("memory conflict: {0}")]
+    MemoryConflict(&'static str),
 }
 
 impl KernelError {

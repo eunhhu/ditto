@@ -87,6 +87,13 @@ honestly lexical-only. An explicitly injected embedding provider is a
 test/explicit-local-composition seam; provider failure is typed and never
 silently falls back to lexical-only or returns a partial working set.
 
+Explicit user memory uses this same context boundary. A narrow command promotes
+the exact text of existing same-session user input; the kernel fixes the node's
+metadata and provenance. Repeated promotion is idempotent, and a correction
+supersedes one active memory under the shared admission gate. The CLI and HTTP
+listing use verified snapshots and exact source checks. This adds no memory
+database, model extraction, embedding work, or background lifetime; see ADR 0015.
+
 ## Capability pager
 
 The complete capability universe is virtual address space; model context is RAM.
