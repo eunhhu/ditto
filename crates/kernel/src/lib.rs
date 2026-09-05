@@ -239,6 +239,10 @@ impl DittoKernel {
         self.inner.event_sender.subscribe()
     }
 
+    pub fn capability_load_metrics(&self) -> ditto_capability::CapabilityLoadMetrics {
+        self.inner.capabilities.load_metrics()
+    }
+
     pub fn capability_cards(&self) -> Vec<CapabilityCard> {
         self.inner.capabilities.cards()
     }

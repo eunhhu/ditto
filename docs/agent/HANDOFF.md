@@ -1,15 +1,43 @@
 # Verified handoff
 
+## Confirmed product intent
+
+- On 2026-09-06, the user confirmed a personal general-purpose agent, with
+  Hermes as a positioning reference. The target problems are process memory
+  overhead, context inefficiency, memory and scheduled-job reliability,
+  long-use self-improvement degradation, task performance, and latency.
+  [Product intent](../product.md) records that clarification and separates
+  proposed measurements from implemented guarantees. This is user-provided
+  positioning, not a benchmark of Hermes or evidence of achieved superiority.
+- The user additionally made zero cost and zero overhead primary premises,
+  including implementation effort and future technical debt converging toward
+  zero. Product guidance now evaluates lifetime development and maintenance
+  burden alongside runtime efficiency. Whether eliminating external model/API
+  charges is included remains an open clarification; no free-inference policy
+  or achieved zero-cost result is asserted.
+- Product framing is now explicit in the root README and agent guidance.
+  Runtime contracts, deferred subsystems, and the Task 006 frontier are
+  unchanged by this documentation clarification.
+- Documentation verification: `rtk ./scripts/agent-check.sh` passed the canary,
+  formatting, strict Clippy, 351 unit/integration tests, and 24 compile-fail
+  doctests. The new product document passed the staged canary and diff checks;
+  all 27 local Markdown link targets across the five changed documents resolve.
+
 ## Canonical state
 
-- Branch: `dev/task-006-session-index`.
+- Branch: `dev/task-007-capability-package-headers`, stacked on Task 006.
 - Runtime: Rust daemon and CLI.
 - Durable stores: SQLite event spine plus local SHA-256 artifact objects.
 - Public mutation ingress: typed user-input command only; arbitrary event append
   is not a public route.
 - Streaming design: subscribe-first, high-water-bounded, paginated durable
   replay with sequence-gap and lag recovery.
-- Capability state: file-backed manifests with default-active
+- Capability state: generated file-backed package headers with selected-only
+  full-manifest paging and explicit bounded headerless compatibility. The
+  catalogue retains headers and source paths; selected bodies must pass exact
+  byte-digest, full validation, and header-projection checks before existing
+  invocation validation. The Rust capability crate is version 0.2.0; event and
+  serialized capability versions are unchanged. It retains default-active
   active/retired/quarantined lifecycle, active-only bounded retrieval,
   validated complements, strict runtime hard filters, append-only bounded
   execution-epoch evidence, and validated provider-neutral level-2 input/output
@@ -71,6 +99,39 @@
   provider completion still is not task completion.
 
 ## Latest verified slice
+
+- Task 007 is complete under
+  [ADR 0014](../adr/0014-capability-package-headers.md). The tracked
+  [verification evidence](tasks/007-evidence.md) maps its exit criteria to
+  implementation and regression tests. Implementation commit:
+  `a2efcd3d073ea6eaa3411712e46eaff5e9d8a796`; tested tree:
+  `47c94e7086b50dc714352300d5534316d9586f8d`.
+- Compact `CapabilityHeader` values are distinct from executable manifests.
+  Startup/search of generated packages reads zero full bodies. Headerless
+  packages read and discard one bounded body at startup, and selected paging
+  reads again. No history-dependent full-manifest cache, daemon header writer,
+  worker, model call, database, or background process was added.
+- Linux/macOS descriptor-relative discovery and paging reject symlinks and
+  non-regular metadata. The configured root's parent is resolved once to allow
+  platform aliases; the root and descendants are opened with no-follow flags.
+  Fixed limits cover depth, entries, packages, file bytes, aggregate startup
+  bytes, and retained header data. Tests cover exact N/N+1 limits and later
+  symlink replacements, missing bodies, digest changes, and contradictory headers.
+- The 1,000-package fixture searches without reading any full body and pages
+  exactly one selected body. A separate fixture keeps a 400,000-byte
+  verification field out of the catalogue, with startup bytes and accounted
+  retained header data each below 4 KiB. Successful artifact turns and all
+  historical replay tests pass; selected-package failures occur before model
+  invocation and replay after package removal using stable path-free evidence.
+- The final local canonical gate passed canaries, formatting, strict Clippy,
+  366 unit/integration tests, and 24 compile-fail doctests across 37 suites.
+  Rust 1.88 workspace/all-target checking and staged/unstaged diff checks passed
+  on aarch64 macOS. PR #12 Linux Actions run `33983282889` passed both `rust`
+  and `msrv` on `50c9474829203a0a05937f94658c8e7368c3bed2`, with the same
+  implementation tree. Devin reported that its full review was skipped because
+  credits were unavailable; no independent model-review approval is claimed.
+  Local counters are not RSS or latency benchmarks and no percentage
+  improvement is asserted.
 
 - Task 006 is complete under
   [ADR 0013](../adr/0013-compact-source-verified-session-index.md). The tracked
@@ -373,10 +434,9 @@
   checkpoint semantics.
 - V2 retrieval supports one injected provider, but production remains lexical
   until the embedding worker slice.
-- Capability lifecycle is cold only at retrieval: catalogue loading still
-  recursively discovers, reads, deserializes, retains, and cross-validates every
-  manifest. Add bounded symlink-safe package headers and cold full-manifest
-  paging before a large or partially quarantined capability ecosystem.
+- Headerless capability packages still incur one bounded startup body read
+  until explicitly packaged with generated headers. Actual RSS and latency
+  measurements remain separate from Task 007's deterministic read/data counters.
 - The injected embedding interface is synchronous and may make up to 513 serial
   calls within its fixed envelope. A production worker needs compact rerank
   pools, batching, and descriptor/hash caching.

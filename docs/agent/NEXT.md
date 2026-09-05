@@ -5,11 +5,18 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-None. Task 006 is complete on its pull-request branch; do not start the bounded
-capability package-header slice in that branch.
+No active implementation task. Task 007 is complete on
+`dev/task-007-capability-package-headers`, stacked on the Task 006 branch.
+See its [verification evidence](tasks/007-evidence.md) before choosing the next
+product slice.
 
 ## Completed
 
+- [`007 Bounded capability package headers`](tasks/007-capability-package-headers.md):
+  generated compact headers keep full bodies out of startup/search and retained
+  catalogue state; bounded descriptor-safe discovery and selected digest/projection
+  verification preserve retrieval and live invocation contracts, with explicit
+  headerless compatibility and deterministic loading counters.
 - [`006 Compact source-verified session index`](tasks/006-compact-session-index.md):
   schema-4 global and per-session digest chains bind a process-verified compact
   identity/provenance/supersession index; normal admission and retrieval use
@@ -63,8 +70,6 @@ capability package-header slice in that branch.
 
 ## Later
 
-- a bounded capability package-header index with symlink-safe discovery and
-  cold full-manifest paging before a large capability ecosystem;
 - batched, compact rerank pools and descriptor/hash caching before a production
   embedding worker;
 - device registry and local process worker;
