@@ -9,6 +9,10 @@ Build Ditto as a local-first personal general-purpose agent, implemented through
 a semantic agent microkernel. [Product intent](docs/product.md) owns its user
 positioning and long-term efficiency goals.
 
+Zero cost and zero overhead are primary design goals, including implementation
+effort and future technical debt converging toward zero. Prefer changes that
+reduce total lifetime work while preserving the required behavior and invariants.
+
 > Context is compiled. Capabilities are paged. Effects are leased. Improvements
 > are promoted.
 

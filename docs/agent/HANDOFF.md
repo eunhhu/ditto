@@ -9,6 +9,12 @@
   [Product intent](../product.md) records that clarification and separates
   proposed measurements from implemented guarantees. This is user-provided
   positioning, not a benchmark of Hermes or evidence of achieved superiority.
+- The user additionally made zero cost and zero overhead primary premises,
+  including implementation effort and future technical debt converging toward
+  zero. Product guidance now evaluates lifetime development and maintenance
+  burden alongside runtime efficiency. Whether eliminating external model/API
+  charges is included remains an open clarification; no free-inference policy
+  or achieved zero-cost result is asserted.
 - Product framing is now explicit in the root README and agent guidance.
   Runtime contracts, deferred subsystems, and the Task 006 frontier are
   unchanged by this documentation clarification.
