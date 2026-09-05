@@ -29,6 +29,11 @@ transcript. Completed runs leave no growing in-memory registry. Unfinished
 durable work without a live owner is `interrupted`, never silently rerun.
 This is at-most-once local admission, not exactly-once provider execution.
 
+Ordinary record-only inputs may share task scope but cannot claim a run's
+kernel-assigned correlation. Boundary indexes contain only `turn_*` correlated events,
+so record-only notes in run tasks neither occupy retry identity nor add boundary-index
+entries. Lookup and admission remain usable when such notes precede a run.
+
 An accepted task owns its execution independently of an HTTP connection.
 Cancellation signals the existing bounded loop; graceful daemon shutdown closes
 admission, cancels the active run, and waits for its terminal. Process crashes or

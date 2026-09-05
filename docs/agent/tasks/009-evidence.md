@@ -8,7 +8,7 @@ The final tested source subtrees, before documentation completion, are:
 
 | Object | Git identity |
 | --- | --- |
-| `crates` tree | `c1e58a839f5a43a299142f2270cb87cfa339ea41` |
+| `crates` tree | `8d6b4841a52b3a5873f9f8962f92b99b3e8b6be2` |
 | `apps` tree | `d24673f06223569832621970722fafe5ae2a4f7d` |
 | `scripts` tree | `1eefe3da885961d505bd081a42afe34696754b84` |
 | `Cargo.lock` blob | `315fa48b93d35d41e506d02c9e9876ef0d6a0e3c` |
@@ -37,7 +37,10 @@ The final tested source subtrees, before documentation completion, are:
   payloads demonstrate the 128-byte event-name retention ceiling.
 - `crates/event-store/src/lib.rs`: schema-2-to-3 migration, indexed boundary
   query plans without transcript scans or temporary sorting, session and turn
-  correlation isolation, reopened results, and append-only triggers.
+  correlation isolation, reopened results, and append-only triggers. A final
+  regression places record-only input before a run in the same task; partial
+  `turn_*` indexes and explicit index selection preserve both retry identity
+  and ordered boundary lookup.
 - `scripts/smoke-agent-run.py`: actual rebuilt daemon/CLI, isolated temporary
   storage and a minimal environment, disabled runs without admission, printed
   recovery identity, missing run inspection/cancellation, record-only input,

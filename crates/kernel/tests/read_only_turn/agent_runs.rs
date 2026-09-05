@@ -190,6 +190,16 @@ async fn agent_read_continues_and_replays_without_repeating_tool_or_model_work()
         final_script(&["Read sample evidence."]),
     ]);
     let command = start_command(&format!("read {reference}"));
+    // Record-only input uses the task ID as correlation, not a kernel turn ID,
+    // and must not steal an explicit run's durable retry identity.
+    fixture
+        .kernel
+        .record_user_input(SubmitInputCommand {
+            text: "uncorrelated task note".into(),
+            session_id: Some("personal".into()),
+            task_id: Some(format!("run_{}", command.request_id)),
+        })
+        .unwrap();
     let accepted = fixture
         .kernel
         .start_agent_run(command.clone(), Arc::new(driver.clone()))
