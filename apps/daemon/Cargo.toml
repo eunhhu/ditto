@@ -13,6 +13,8 @@ axum.workspace = true
 clap.workspace = true
 ditto-capability = { path = "../../crates/capability" }
 ditto-kernel = { path = "../../crates/kernel" }
+ditto-model = { path = "../../crates/model" }
+ditto-model-openai = { path = "../../crates/model-openai" }
 ditto-protocol = { path = "../../crates/protocol" }
 futures-core.workspace = true
 futures-util.workspace = true

@@ -34,6 +34,9 @@ use ditto_protocol::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
+#[path = "read_only_turn/agent_runs.rs"]
+mod agent_runs;
+
 #[derive(Clone)]
 struct ScriptedDriver {
     descriptor: DriverDescriptor,

@@ -77,6 +77,8 @@ mod tests {
         let api = format!("http://{}", listener.local_addr().unwrap());
         let app = routes().with_state(AppState {
             kernel: kernel.clone(),
+            driver: None,
+            shutdown: ditto_model::CancellationToken::new(),
         });
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = reqwest::Client::builder()

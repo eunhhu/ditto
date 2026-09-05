@@ -18,10 +18,12 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use ulid::Ulid;
 
+mod agent_run;
 mod context_admission;
 mod context_retrieval;
 mod memory;
 pub mod turn;
+pub use agent_run::AgentRunError;
 
 pub use context_admission::{
     COMMITTED_BUT_PROJECTION_UNAVAILABLE, ContextProjectionUnavailable, TrustedContextNodeDraft,
@@ -123,6 +125,7 @@ struct KernelInner {
     context_admission_gate: Mutex<()>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     event_sender: broadcast::Sender<EventRecord>,
+    agent_runs: Mutex<agent_run::RunSlot>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +183,7 @@ impl DittoKernel {
                 context_admission_gate: Mutex::new(()),
                 embedding_provider,
                 event_sender,
+                agent_runs: Mutex::new(agent_run::RunSlot::default()),
             }),
         })
     }

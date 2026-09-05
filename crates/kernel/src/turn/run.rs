@@ -53,6 +53,19 @@ struct TurnScope {
     request_count: Cell<u8>,
     tool_call_count: Cell<u8>,
     effective_deadline: Cell<Option<DateTime<Utc>>>,
+    agent_run: bool,
+}
+
+pub(crate) struct AdmittedReadOnlyTurn {
+    scope: TurnScope,
+    text: String,
+    input: EventRecord,
+}
+
+impl AdmittedReadOnlyTurn {
+    pub(crate) fn input(&self) -> &EventRecord {
+        &self.input
+    }
 }
 
 enum ContextProvenanceError {
@@ -71,6 +84,22 @@ impl DittoKernel {
         cancellation: CancellationToken,
         control: ReadOnlyTurnControl,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
+        let admitted = self.admit_read_only_turn(command, None)?;
+        self.continue_read_only_turn(
+            admitted,
+            Some(context_candidates),
+            driver,
+            cancellation,
+            control,
+        )
+        .await
+    }
+
+    pub(crate) fn admit_read_only_turn(
+        &self,
+        command: SubmitInputCommand,
+        agent_run: Option<crate::agent_run::AgentRunMetadata>,
+    ) -> Result<AdmittedReadOnlyTurn, KernelError> {
         let text = normalize_input_text(&command.text)?;
 
         let scope = TurnScope {
@@ -80,12 +109,13 @@ impl DittoKernel {
             request_count: Cell::new(0),
             tool_call_count: Cell::new(0),
             effective_deadline: Cell::new(None),
+            agent_run: agent_run.is_some(),
         };
         if self.task_is_completed(&scope.session_id, &scope.task_id)? {
-            return Err(TurnRunError::Kernel(KernelError::InvalidCommand(format!(
+            return Err(KernelError::InvalidCommand(format!(
                 "task {} is already completed",
                 scope.task_id
-            ))));
+            )));
         }
         let mut input = NewEvent::user_input(
             scope.session_id.clone(),
@@ -93,7 +123,30 @@ impl DittoKernel {
             text.clone(),
         );
         input.correlation_id = Some(scope.turn_id.clone());
+        if let Some(metadata) = agent_run {
+            input.payload["agent_run"] = serde_json::to_value(metadata)?;
+        }
         let input_event = self.append_and_publish(input)?;
+        Ok(AdmittedReadOnlyTurn {
+            scope,
+            text,
+            input: input_event,
+        })
+    }
+
+    pub(crate) async fn continue_read_only_turn(
+        &self,
+        admitted: AdmittedReadOnlyTurn,
+        context_candidates: Option<impl IntoIterator<Item = ContextCandidate>>,
+        driver: &dyn ModelDriver,
+        cancellation: CancellationToken,
+        control: ReadOnlyTurnControl,
+    ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
+        let AdmittedReadOnlyTurn {
+            scope,
+            text,
+            input: input_event,
+        } = admitted;
         // The event store durably records millisecond timestamps. Derive the
         // ceiling from that exact precision so a reopen replay reconstructs
         // the same acceptance basis rather than comparing against lost nanos.
@@ -132,6 +185,25 @@ impl DittoKernel {
             ));
         }
 
+        let context_candidates = match context_candidates {
+            Some(candidates) => candidates.into_iter().collect(),
+            None => {
+                match self.agent_context_candidates(&scope.session_id, &scope.task_id, accepted_at)
+                {
+                    Ok(candidates) => candidates,
+                    Err(_) => {
+                        return Err(self.persist_turn_failure(
+                            &scope,
+                            &cause,
+                            TurnFailureCode::ContextCompilation,
+                            "verified session context is unavailable",
+                            None,
+                            None,
+                        ));
+                    }
+                }
+            }
+        };
         let signature = TaskSignature {
             request: text.clone(),
             active_goal: None,
@@ -1143,7 +1215,7 @@ impl DittoKernel {
                     ready_call.map(|call| call.call_id),
                 ));
             }
-            if tool_call_count == 0 {
+            if tool_call_count == 0 && !scope.agent_run {
                 return Err(self.persist_turn_failure(
                     &scope,
                     &cause,
@@ -1343,29 +1415,11 @@ impl DittoKernel {
     }
 
     fn task_is_completed(&self, session_id: &str, task_id: &str) -> Result<bool, KernelError> {
-        let high_water = self.latest_event_seq()?;
-        let mut query = EventQuery {
-            session_id: Some(session_id.to_owned()),
-            task_id: Some(task_id.to_owned()),
-            limit: Some(1_000),
-            ..EventQuery::default()
-        };
-        loop {
-            let page = self.list_events_through(&query, high_water)?;
-            if page
-                .iter()
-                .any(|event| event.kind == event_kind::TASK_COMPLETED)
-            {
-                return Ok(true);
-            }
-            let Some(last) = page.last() else {
-                return Ok(false);
-            };
-            if last.seq >= high_water || page.len() < 1_000 {
-                return Ok(false);
-            }
-            query.after_seq = Some(last.seq);
-        }
+        Ok(self.inner.events.task_has_event_kind(
+            session_id,
+            task_id,
+            event_kind::TASK_COMPLETED,
+        )?)
     }
 
     fn validate_compiled_context_provenance(
@@ -1388,37 +1442,27 @@ impl DittoKernel {
             return Ok(());
         }
 
-        let mut query = EventQuery {
-            session_id: Some(scope.session_id.clone()),
-            limit: Some(1_000),
-            ..EventQuery::default()
-        };
         let mut found = BTreeSet::new();
-        loop {
-            let page = self
-                .list_events_through(&query, high_water)
+        for id in &required {
+            let event = self
+                .inner
+                .events
+                .get_by_event_id(id)
+                .map_err(KernelError::from)
                 .map_err(ContextProvenanceError::Kernel)?;
-            if page.is_empty() {
-                break;
-            }
-            for event in &page {
-                if required.contains(&event.event_id)
+            if event.is_some_and(|event| {
+                event.seq <= high_water
+                    && event.session_id.as_deref() == Some(&scope.session_id)
                     && event
                         .task_id
                         .as_deref()
-                        .is_none_or(|task_id| task_id == scope.task_id)
-                {
-                    found.insert(event.event_id.clone());
-                }
+                        .is_none_or(|task| task == scope.task_id)
+            }) {
+                found.insert(id.clone());
             }
-            if found.len() == required.len() {
-                return Ok(());
-            }
-            let last_seq = page.last().map_or(0, |event| event.seq);
-            if last_seq >= high_water || page.len() < 1_000 {
-                break;
-            }
-            query.after_seq = Some(last_seq);
+        }
+        if found.len() == required.len() {
+            return Ok(());
         }
         let missing = required.difference(&found).cloned().collect::<Vec<_>>();
         Err(ContextProvenanceError::Invalid(format!(
@@ -1473,7 +1517,7 @@ fn build_model_request(
         reasoning: None,
         prompt_cache: Default::default(),
         tool_use: ToolUsePolicy {
-            choice: if request_index == 0 {
+            choice: if request_index == 0 && !scope.agent_run {
                 ToolChoice::Required
             } else {
                 ToolChoice::Auto

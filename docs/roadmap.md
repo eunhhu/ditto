@@ -4,6 +4,25 @@ Roadmap items are vertical slices with executable completion criteria. Dates are
 omitted until benchmark data exists. The active implementation task is always
 named in `docs/agent/NEXT.md`.
 
+## Product delivery order
+
+Ditto is a personal general-purpose agent. Zero cost and zero overhead include
+development and future maintenance burden; they are targets, not achieved
+results. The user's 2026-09-06 direction prioritizes the following first usable
+path ahead of remote placement and ecosystem expansion:
+
+1. Explicit request → configured model → bounded tool → inspectable answer
+   (Task 009), with scoped current memory and honest interruption/retry state.
+2. Useful local work: structured process execution, bounded authority, cancel,
+   and task-specific evidence. Remote SSH placement is a later expansion.
+3. Reliable future work: durable schedules, event-driven wakeups, and a defined
+   missed/duplicate-run and restart policy. No periodic LLM heartbeat.
+4. Minimum status/approval experience and measured cost, RAM, latency, and
+   repeated-use quality. Use these baselines before promoting improvements.
+
+These are delivery milestones, not equal effort units. Completed infrastructure
+tasks are not a percentage of finished personal-agent functionality.
+
 ## A. Trusted runtime spine — scaffolded
 
 - Rust daemon and CLI
@@ -48,6 +67,11 @@ Exit criterion remains open: with 1,000 synthetic capabilities, the model must
 see only the relevant working set and the UI must explain every selected
 context node and capability.
 
+Tasks 006–008 additionally provide bounded source-index verification, selected-
+only full capability loading, and explicit session memory save/list/correction.
+Automatic memory extraction, cross-session personal scope, and long-use semantic
+recall are not established by those slices.
+
 ## C. Provider-neutral model IR — completed
 
 - stable/volatile request separation
@@ -69,8 +93,10 @@ the same IR, and provider completion never creates task verification.
 - durable turn replay
 - explicit unverified final state
 
-Exit criterion: one real model turn can call `artifact.read`, continue, and be
-fully replayed without process or SSH authority.
+Verified boundary: injected model/transport fixtures call `artifact.read`,
+continue, and replay without process or SSH authority. No live paid model turn
+has been run. Task 009 connects this bounded loop to explicit CLI/HTTP requests;
+it does not complete effectful execution or establish real-model task quality.
 
 ## E. Effectful execution
 
@@ -115,6 +141,10 @@ task state.
 Exit criterion: repeated retrieval failure improves measured Recall@k without
 creating a new permanent skill or regressing unrelated scenarios.
 
+Promotion must also account for creation/evaluation cost, added context and
+runtime work, rule accumulation, expiration, and rollback. A first successful
+trajectory cannot create a permanent improvement.
+
 ## H. Ecosystem
 
 - TypeScript capability SDK
@@ -123,3 +153,28 @@ creating a new permanent skill or regressing unrelated scenarios.
 - signed capability packages
 - benchmark dashboard
 - migration and backup tooling
+
+## I. Reliable scheduled work — not implemented
+
+- durable one-time and recurring intent, next due time, and run identity
+- event/timer wakeup without housekeeping inference
+- defined time zone, missed-run, overlap, and duplicate-delivery behavior
+- restart recovery that distinguishes pending, running, interrupted, and terminal
+- visible cancellation and failure; explicit policy before any automatic retry
+
+Exit criterion: an agreed schedule corpus survives restart before/during/after
+dispatch with no silent missed or repeated work under its declared delivery
+policy. Effects retain the same lease and evidence requirements as manual runs.
+
+## J. Cost and repeated-use performance — baseline pending
+
+- separate necessary model/tool work from Ditto-added work
+- idle/peak RSS, startup cost, and catalogue/history growth
+- first useful progress and end-to-end p50/p95 latency on a fixed workload
+- memory correction/recall, verified task success, user intervention, and cost
+- repeated-use scenarios with interruptions, schedules, and accumulated learning
+
+Exit criterion: a replayable baseline records workload, hardware, model/settings,
+versions, measurements, and quality outcomes; later changes compare the same
+conditions. Deterministic read counters and passing tests alone do not establish
+zero overhead, free inference, or a performance advantage over another agent.

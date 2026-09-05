@@ -37,6 +37,8 @@ use super::types::{
 #[serde(deny_unknown_fields)]
 struct InputPayload {
     text: String,
+    #[serde(default)]
+    agent_run: Option<crate::agent_run::AgentRunMetadata>,
 }
 
 fn validate_compiled_context_payload(
@@ -172,6 +174,7 @@ pub fn replay_artifact_read_turn(
 }
 
 struct ReplayProjector<'turn, 'snapshot> {
+    agent_run: bool,
     events: &'turn [EventRecord],
     snapshot: &'snapshot [EventRecord],
     index: usize,
@@ -270,6 +273,17 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         }
 
         let input: InputPayload = decode_payload(first)?;
+        let agent_run = input.agent_run.is_some();
+        if let Some(metadata) = &input.agent_run {
+            crate::agent_run::validate_agent_input(
+                first,
+                &ditto_protocol::AgentRunQuery {
+                    request_id: metadata.request_id.clone(),
+                    session_id: session_id.clone(),
+                },
+            )
+            .map_err(|_| replay_invalid("agent-run input metadata is invalid"))?;
+        }
         let normalized_input =
             normalize_input_text(&input.text).map_err(|error| replay_invalid(error.to_string()))?;
         if normalized_input != input.text {
@@ -277,6 +291,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         }
         let input_text = input.text;
         Ok(Self {
+            agent_run,
             events,
             snapshot,
             index: 1,
@@ -975,7 +990,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         )?;
                         return Ok(ArtifactReadTurnReplay::Failed { failure });
                     }
-                    if self.tool_call_count == 0 {
+                    if self.tool_call_count == 0 && !self.agent_run {
                         let failure = self.take_exact_failure(
                             TurnFailureCode::Protocol,
                             "turn ended before executing artifact.read",
@@ -1190,7 +1205,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             reasoning: None,
             prompt_cache: Default::default(),
             tool_use: ToolUsePolicy {
-                choice: if request_index == 0 {
+                choice: if request_index == 0 && !self.agent_run {
                     ToolChoice::Required
                 } else {
                     ToolChoice::Auto
@@ -1322,7 +1337,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     && self.valid_deadline_failure(&failure, failure_event_time)
             }
             TurnFailureCode::ContextCompilation => {
-                valid_context_compilation_failure_message(&failure.message)
+                (valid_context_compilation_failure_message(&failure.message)
+                    || (self.agent_run
+                        && failure.message == "verified session context is unavailable"))
                     && failure.evidence.is_none()
             }
             _ => false,
@@ -1381,8 +1398,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     && self.valid_deadline_failure(&failure, failure_event_time)
             }
             TurnFailureCode::DriverContract => {
-                valid_driver_contract_failure_message(&failure.message, request_index)
-                    && failure.evidence.is_none()
+                valid_driver_contract_failure_message(
+                    &failure.message,
+                    request_index,
+                    self.agent_run,
+                ) && failure.evidence.is_none()
             }
             _ => false,
         };
@@ -1623,11 +1643,15 @@ fn valid_capability_contract_failure_message(message: &str) -> bool {
         })
 }
 
-fn valid_driver_contract_failure_message(message: &str, request_index: usize) -> bool {
+fn valid_driver_contract_failure_message(
+    message: &str,
+    request_index: usize,
+    agent_run: bool,
+) -> bool {
     message
         == format!(
             "driver does not support generation control tool_use.choice: {}",
-            if request_index == 0 {
+            if request_index == 0 && !agent_run {
                 "Required"
             } else {
                 "Auto"
