@@ -36,6 +36,8 @@ use tempfile::TempDir;
 
 #[path = "read_only_turn/agent_runs.rs"]
 mod agent_runs;
+#[path = "read_only_turn/model_sort.rs"]
+mod model_sort;
 
 #[derive(Clone)]
 struct ScriptedDriver {

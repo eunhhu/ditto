@@ -42,7 +42,7 @@ pub enum SortError {
     Verification,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SortArguments {
     pub reference: String,
@@ -50,7 +50,15 @@ pub struct SortArguments {
 }
 
 pub fn input_reference(bytes: &[u8]) -> String {
-    format!("artifact:sha256:{:x}", Sha256::digest(bytes))
+    const PREFIX: &str = "artifact:sha256:";
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut reference = String::with_capacity(PREFIX.len() + 64);
+    reference.push_str(PREFIX);
+    for byte in Sha256::digest(bytes) {
+        reference.push(HEX[(byte >> 4) as usize] as char);
+        reference.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    reference
 }
 
 /// LF is the only separator; CR and all other non-NUL UTF-8 bytes are data.

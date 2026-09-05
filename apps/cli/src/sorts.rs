@@ -24,28 +24,7 @@ pub(super) async fn start(
     api: &str,
     args: SortArgs,
 ) -> anyhow::Result<()> {
-    // Read only a bounded regular file through the descriptor actually opened.
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // Opening a FIFO must not block before the descriptor-type check below.
-        options.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = options
-        .open(&args.file)
-        .context("could not open sort input file")?;
-    anyhow::ensure!(
-        file.metadata()?.is_file(),
-        "sort input must be a regular file"
-    );
-    let mut bytes = Vec::new();
-    file.take(64 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .context("could not read sort input")?;
-    anyhow::ensure!(bytes.len() <= 64 * 1024, "sort input exceeds 64 KiB");
-    let text = String::from_utf8(bytes).context("sort input must be UTF-8")?;
+    let text = read_input(&args.file)?;
     let query = AgentRunQuery {
         request_id: args
             .request_id
@@ -190,4 +169,29 @@ async fn follow(
         bail!("sort is still active; inspect the same request ID");
     }
     Ok(result)
+}
+
+pub(super) fn read_input(path: &std::path::Path) -> anyhow::Result<String> {
+    // Read only a bounded regular file through the descriptor actually opened.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Opening a FIFO must not block before the descriptor-type check below.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(path)
+        .context("could not open sort input file")?;
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "sort input must be a regular file"
+    );
+    let mut bytes = Vec::new();
+    file.take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .context("could not read sort input")?;
+    anyhow::ensure!(bytes.len() <= 64 * 1024, "sort input exceeds 64 KiB");
+    String::from_utf8(bytes).context("sort input must be UTF-8")
 }

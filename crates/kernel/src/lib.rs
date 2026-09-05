@@ -19,6 +19,7 @@ use tokio::sync::broadcast;
 use ulid::Ulid;
 
 mod agent_run;
+mod agent_sort;
 mod context_admission;
 mod context_retrieval;
 mod memory;

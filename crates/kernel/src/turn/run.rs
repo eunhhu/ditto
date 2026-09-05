@@ -16,9 +16,9 @@ use ditto_context::{
 };
 use ditto_model::{
     CancellationId, CancellationToken, ContentPart, ConversationItem, ExecutionEpochId,
-    FeatureRequest, FinishReason, GenerationControls, MessageRole, ModelDriver, ModelEvent,
-    ModelFeature, ModelRequest, ModelRequestId, ModelTurn, OutputConstraint, ParallelToolCalls,
-    ProviderCallId, RequestControl, ToolCallBuffer, ToolChoice, ToolUsePolicy,
+    FeatureRequest, FinishReason, GenerationControls, ModelDriver, ModelEvent, ModelFeature,
+    ModelRequest, ModelRequestId, ModelTurn, OutputConstraint, ParallelToolCalls, ProviderCallId,
+    RequestControl, ToolCallBuffer, ToolChoice, ToolUsePolicy,
 };
 use ditto_policy::{AuthorizationOutcome, InvocationAuthorizer, PolicyError, StaticPolicy};
 use ditto_protocol::{
@@ -28,6 +28,9 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
 use ulid::Ulid;
+
+#[path = "sort_run.rs"]
+mod sort_tool;
 
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
@@ -46,7 +49,7 @@ use super::types::{
 };
 
 #[derive(Clone)]
-struct TurnScope {
+pub(super) struct TurnScope {
     turn_id: String,
     session_id: String,
     task_id: String,
@@ -54,6 +57,7 @@ struct TurnScope {
     tool_call_count: Cell<u8>,
     effective_deadline: Cell<Option<DateTime<Utc>>>,
     agent_run: bool,
+    sort: Option<super::sort::SortGrant>,
 }
 
 pub(crate) struct AdmittedReadOnlyTurn {
@@ -110,6 +114,9 @@ impl DittoKernel {
             tool_call_count: Cell::new(0),
             effective_deadline: Cell::new(None),
             agent_run: agent_run.is_some(),
+            sort: agent_run
+                .as_ref()
+                .and_then(|metadata| metadata.sort.clone()),
         };
         if self.task_is_completed(&scope.session_id, &scope.task_id)? {
             return Err(KernelError::InvalidCommand(format!(
@@ -143,7 +150,7 @@ impl DittoKernel {
         control: ReadOnlyTurnControl,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
         let AdmittedReadOnlyTurn {
-            scope,
+            mut scope,
             text,
             input: input_event,
         } = admitted;
@@ -162,7 +169,7 @@ impl DittoKernel {
                 .map_or(hard_deadline, |requested| requested.min(hard_deadline)),
         );
         scope.effective_deadline.set(Some(deadline));
-        let mut cause = input_event.event_id;
+        let mut cause = input_event.event_id.clone();
 
         if cancellation.is_cancelled() {
             return Err(self.persist_turn_failure(
@@ -319,7 +326,7 @@ impl DittoKernel {
         }
 
         let deriver = ArtifactReadDeriver::default();
-        let mut live_epoch = LiveExecutionEpoch::new(1);
+        let mut live_epoch = LiveExecutionEpoch::new(if scope.sort.is_some() { 2 } else { 1 });
         if live_epoch
             .page_in_invocable(&manifest, &schema, deriver.revision().clone())
             .map_err(|error| {
@@ -345,6 +352,57 @@ impl DittoKernel {
                 None,
             ));
         }
+        let sort_manifest = if let Some(grant) = &scope.sort {
+            let root = self
+                .inner
+                .events
+                .get_by_event_id(&grant.source_event_id)
+                .map_err(KernelError::from)?;
+            if !root
+                .as_ref()
+                .is_some_and(|root| grant.matches_root(root, &input_event))
+            {
+                return Err(self.persist_turn_failure(
+                    &scope,
+                    &cause,
+                    TurnFailureCode::CapabilityContract,
+                    "sort permission source is unavailable",
+                    None,
+                    None,
+                ));
+            }
+            let selected = self
+                .inner
+                .capabilities
+                .page_manifest(ditto_artifact_sort::ID)
+                .ok()
+                .flatten();
+            let Some(selected) = selected
+                .filter(|manifest| ditto_artifact_sort::validate_manifest(manifest).is_ok())
+            else {
+                return Err(self.persist_turn_failure(
+                    &scope,
+                    &cause,
+                    TurnFailureCode::CapabilityContract,
+                    "installed artifact.sort contract is unavailable",
+                    None,
+                    None,
+                ));
+            };
+            let sort_deriver = ditto_artifact_sort::SortDeriver::default();
+            live_epoch
+                .page_in_invocable(
+                    &selected,
+                    &ditto_artifact_sort::schema(),
+                    sort_deriver.revision().clone(),
+                )
+                .map_err(|_| {
+                    TurnRunError::Internal("sort capability could not enter the live epoch")
+                })?;
+            Some(selected)
+        } else {
+            None
+        };
         let authorization_ticket = live_epoch.seal_for_authorization().map_err(|error| {
             self.persist_turn_failure(
                 &scope,
@@ -375,7 +433,10 @@ impl DittoKernel {
             }
         };
         let manifest = binding.manifest().clone();
-        let schemas = vec![binding.schema().clone()];
+        let mut schemas = vec![binding.schema().clone()];
+        if scope.sort.is_some() {
+            schemas.push(ditto_artifact_sort::schema());
+        }
         let selected_event = self.append_turn_payload(
             &scope,
             EventActor::System,
@@ -384,6 +445,7 @@ impl DittoKernel {
                 event_version: TURN_PAYLOAD_VERSION,
                 turn_id: scope.turn_id.clone(),
                 manifest: manifest.clone(),
+                sort_manifest,
                 epoch: live_epoch.evidence().clone(),
                 schemas: schemas.clone(),
             },
@@ -395,12 +457,28 @@ impl DittoKernel {
         let invocation_authorizer =
             InvocationAuthorizer::from_ticket(authorization_ticket, deadline)
                 .map_err(|_| TurnRunError::Internal("live epoch authorization setup failed"))?;
+        if let Some(grant) = &scope.sort {
+            invocation_authorizer
+                .register_lease(
+                    ditto_policy::CapabilityLease::new(
+                        "agent-sort",
+                        deadline,
+                        ditto_artifact_sort::effect(),
+                        1,
+                        BTreeSet::from([ditto_artifact_sort::ID.into()]),
+                        vec![ditto_policy::ResourceScope::Exact(
+                            ditto_capability::CanonicalResource::artifact(&grant.reference)
+                                .map_err(|_| TurnRunError::Internal("invalid sort grant"))?,
+                        )],
+                        ditto_policy::ApprovalRequirement::Never,
+                    )
+                    .map_err(|_| TurnRunError::Internal("invalid sort lease"))?,
+                )
+                .map_err(|_| TurnRunError::Internal("sort lease registration failed"))?;
+        }
 
         let authority = ArtifactReadAuthority::new(self.inner.artifacts.clone());
-        let mut conversation = vec![ConversationItem::Message {
-            role: MessageRole::User,
-            content: vec![ContentPart::Text { text }],
-        }];
+        let mut conversation = super::sort::initial_conversation(text, scope.sort.as_ref());
         let mut all_call_ids = BTreeSet::new();
         let mut total_text_bytes = 0_usize;
         let mut tool_call_count = 0_u8;
@@ -739,7 +817,9 @@ impl DittoKernel {
                         call_id,
                         capability_id,
                     } => {
-                        if capability_id != ARTIFACT_READ_ID {
+                        if capability_id != ARTIFACT_READ_ID
+                            && !(scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+                        {
                             return Err(self.persist_turn_failure(
                                 &scope,
                                 &cause,
@@ -789,7 +869,9 @@ impl DittoKernel {
                         capability_id,
                         arguments,
                     } => {
-                        if capability_id != ARTIFACT_READ_ID {
+                        if capability_id != ARTIFACT_READ_ID
+                            && !(scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+                        {
                             return Err(self.persist_turn_failure(
                                 &scope,
                                 &cause,
@@ -957,6 +1039,32 @@ impl DittoKernel {
                         Some(request_index as u8),
                         Some(call.call_id),
                     ));
+                }
+                if call.capability_id == ditto_artifact_sort::ID {
+                    let result = self
+                        .run_sort_tool(
+                            &mut scope,
+                            &mut cause,
+                            request_index as u8,
+                            &call,
+                            live_epoch
+                                .invocable_binding(ditto_artifact_sort::ID)
+                                .ok_or(TurnRunError::Internal("missing sort binding"))?,
+                            &invocation_authorizer,
+                            cancellation.clone(),
+                            deadline,
+                        )
+                        .await?;
+                    conversation.push(ConversationItem::ToolResult {
+                        call_id: call.call_id,
+                        content: vec![ContentPart::Structured {
+                            value: result.model_value(),
+                        }],
+                        is_error: result.is_error(),
+                    });
+                    tool_call_count = tool_call_count.saturating_add(1);
+                    scope.tool_call_count.set(tool_call_count);
+                    continue;
                 }
                 let untrusted_call = match UntrustedToolCall::new(
                     call.call_id.to_string(),
