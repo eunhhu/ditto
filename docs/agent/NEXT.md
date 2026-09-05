@@ -5,11 +5,16 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-- None. Task 005.1 review closure is complete, and this run stops before the
-  compact session-index task.
+None. Task 006 is complete on its pull-request branch; do not start the bounded
+capability package-header slice in that branch.
 
 ## Completed
 
+- [`006 Compact source-verified session index`](tasks/006-compact-session-index.md):
+  schema-4 global and per-session digest chains bind a process-verified compact
+  identity/provenance/supersession index; normal admission and retrieval use
+  bounded exact lookups plus only the checkpoint delta, with fixed N/N+1 work
+  limits and one source rebuild/recheck on cache drift.
 - [`005.1 Live epoch, closed schema profile, and bounded authority lifetime`](tasks/005-1-live-epoch-schema-authority.md):
   replayable evidence is separate from sealed live invocation bindings; one
   affine epoch ticket owns one shared expiring authorization ledger; recursive
@@ -58,8 +63,6 @@ file's exit criteria before moving the marker.
 
 ## Later
 
-- compact source-verified session indexes that remove session-history rescans
-  from context delta verification and admission;
 - a bounded capability package-header index with symlink-safe discovery and
   cold full-manifest paging before a large capability ecosystem;
 - batched, compact rerank pools and descriptor/hash caching before a production
