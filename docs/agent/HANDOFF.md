@@ -120,6 +120,9 @@
   run, and keeps no growing terminal-result cache. Identical retries never
   restart the loop; changed text conflicts, and excess work is rejected without
   a queue. Indexed event boundaries provide terminal or interrupted status.
+  Partial indexes cover `turn_*` correlations and the lookup explicitly selects
+  them; prior record-only input in the same task cannot occupy run identity or
+  turn a boundary lookup into a transcript sort.
 - Current scoped context comes from the existing verified projection with
   supersession filtering and V1 lexical compilation. Selected provenance now
   uses exact event-ID lookups rather than scanning session history. A direct

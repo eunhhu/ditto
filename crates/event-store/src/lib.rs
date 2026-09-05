@@ -13,9 +13,10 @@ use ulid::Ulid;
 const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 const MIGRATION_V3: &str = r#"
-CREATE INDEX IF NOT EXISTS events_session_task_seq ON events(session_id, task_id, seq);
+CREATE INDEX IF NOT EXISTS events_session_task_seq ON events(session_id, task_id, seq)
+    WHERE correlation_id GLOB 'turn_*';
 CREATE INDEX IF NOT EXISTS events_session_task_correlation_seq
-    ON events(session_id, task_id, correlation_id, seq);
+    ON events(session_id, task_id, correlation_id, seq) WHERE correlation_id GLOB 'turn_*';
 "#;
 
 const MIGRATION_V1: &str = r#"
@@ -204,7 +205,7 @@ impl EventStore {
             .query_row(
                 "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
                     payload_json, causation_id, correlation_id, span_id
-             FROM events WHERE session_id = ?1 AND task_id = ?2 ORDER BY seq LIMIT 1",
+             FROM events INDEXED BY events_session_task_seq WHERE session_id = ?1 AND task_id = ?2 AND correlation_id GLOB 'turn_*' ORDER BY seq LIMIT 1",
                 params![session_id, task_id],
                 raw_event_record_from_row,
             )
@@ -214,7 +215,7 @@ impl EventStore {
         let last = connection.query_row(
             "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
                     payload_json, causation_id, correlation_id, span_id
-             FROM events WHERE session_id = ?1 AND task_id = ?2 AND correlation_id IS ?3
+             FROM events INDEXED BY events_session_task_correlation_seq WHERE session_id = ?1 AND task_id = ?2 AND correlation_id = ?3 AND correlation_id GLOB 'turn_*'
              ORDER BY seq DESC LIMIT 1",
             params![session_id, task_id, first.correlation_id],
             raw_event_record_from_row,
@@ -539,11 +540,11 @@ mod tests {
         );
         for (sql, index) in [
             (
-                "SELECT seq FROM events WHERE session_id='s' AND task_id='t' ORDER BY seq LIMIT 1",
+                "SELECT seq FROM events INDEXED BY events_session_task_seq WHERE session_id='s' AND task_id='t' AND correlation_id GLOB 'turn_*' ORDER BY seq LIMIT 1",
                 "events_session_task_seq",
             ),
             (
-                "SELECT seq FROM events WHERE session_id='s' AND task_id='t' AND correlation_id IS 'c' ORDER BY seq DESC LIMIT 1",
+                "SELECT seq FROM events INDEXED BY events_session_task_correlation_seq WHERE session_id='s' AND task_id='t' AND correlation_id = 'turn_c' AND correlation_id GLOB 'turn_*' ORDER BY seq DESC LIMIT 1",
                 "events_session_task_correlation_seq",
             ),
         ] {
@@ -564,13 +565,21 @@ mod tests {
         drop(connection);
         let store = EventStore::open(&path).unwrap();
         assert!(store.task_turn_boundary("s", "t").unwrap().is_none());
+        store
+            .append(NewEvent::user_input(
+                "s",
+                Some("t".into()),
+                "uncorrelated note",
+            ))
+            .unwrap();
+        assert!(store.task_turn_boundary("s", "t").unwrap().is_none());
         let mut draft = NewEvent::user_input("s", Some("t".into()), "first");
-        draft.correlation_id = Some("c".into());
+        draft.correlation_id = Some("turn_c".into());
         let first = store.append(draft.clone()).unwrap();
         draft.kind = event_kind::TURN_FINISHED.into();
         draft.actor = EventActor::System;
         let last = store.append(draft.clone()).unwrap();
-        draft.correlation_id = Some("another".into());
+        draft.correlation_id = Some("turn_another".into());
         store.append(draft.clone()).unwrap();
         draft.session_id = Some("other".into());
         store.append(draft).unwrap();
