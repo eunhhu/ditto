@@ -4,6 +4,7 @@ use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
 mod memory;
 mod runs;
+mod schedules;
 mod sorts;
 
 #[derive(Debug, Parser)]
@@ -17,6 +18,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Schedule one future read-only model request; return after durable acceptance.
+    Schedule(schedules::ScheduleArgs),
+    /// Inspect a schedule and its original execution result.
+    ScheduleStatus(runs::RunIdentity),
+    /// Cancel a pending schedule or its active execution.
+    ScheduleCancel(runs::RunIdentity),
+    /// List pending schedules in a session (maximum 100 per data directory).
+    ScheduleList {
+        #[arg(long, default_value = "personal")]
+        session: String,
+    },
     /// Sort a UTF-8 file locally, optionally removing duplicates. No model call.
     Sort(sorts::SortArgs),
     /// Inspect a local sort request and its verified output.
@@ -72,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
     let api = cli.api.trim_end_matches('/');
 
     match cli.command {
+        Command::Schedule(args) => schedules::create(&client, api, args).await?,
+        Command::ScheduleStatus(identity) => schedules::inspect(&client, api, identity).await?,
+        Command::ScheduleCancel(identity) => schedules::cancel(&client, api, identity).await?,
+        Command::ScheduleList { session } => schedules::pending(&client, api, session).await?,
         Command::Sort(args) => sorts::start(&client, api, args).await?,
         Command::SortStatus(identity) => sorts::inspect(&client, api, identity).await?,
         Command::SortCancel(identity) => sorts::cancel(&client, api, identity).await?,

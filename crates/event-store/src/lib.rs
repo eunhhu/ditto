@@ -10,7 +10,10 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 use ulid::Ulid;
 
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+mod schedule;
+pub use schedule::{ScheduleEntry, ScheduleState};
+
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 const MIGRATION_V4: &str = r#"
 CREATE INDEX IF NOT EXISTS events_agent_sort ON events(session_id, task_id, correlation_id, seq)
@@ -73,6 +76,8 @@ pub enum EventStoreError {
     Timestamp(#[from] chrono::ParseError),
     #[error("event actor is invalid: {0}")]
     InvalidActor(String),
+    #[error("schedule journal or index is invalid")]
+    InvalidSchedule,
     #[error("event store mutex was poisoned")]
     Poisoned,
     #[error("database schema version {found} is newer than supported version {supported}")]
@@ -98,6 +103,7 @@ impl EventStore {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         apply_migrations(&mut connection)?;
+        schedule::rebuild(&mut connection)?;
         enforce_private_sqlite_files(path)?;
 
         Ok(Self {
@@ -106,50 +112,16 @@ impl EventStore {
     }
 
     pub fn append(&self, event: NewEvent) -> Result<EventRecord, EventStoreError> {
-        let recorded_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
-            .expect("a current UTC timestamp is representable at millisecond precision");
-        let record = EventRecord {
-            seq: 0,
-            event_id: Ulid::new().to_string(),
-            recorded_at,
-            session_id: event.session_id,
-            task_id: event.task_id,
-            actor: event.actor,
-            kind: event.kind,
-            payload: event.payload,
-            causation_id: event.causation_id,
-            correlation_id: event.correlation_id,
-            span_id: event.span_id,
-        };
-        let payload_json = serde_json::to_string(&record.payload)?;
-        let recorded_at = record
-            .recorded_at
-            .to_rfc3339_opts(SecondsFormat::Millis, true);
-
-        let connection = self.connection()?;
-        connection.execute(
-            r#"
-            INSERT INTO events (
-                event_id, recorded_at, session_id, task_id, actor, kind,
-                payload_json, causation_id, correlation_id, span_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-            params![
-                &record.event_id,
-                recorded_at,
-                record.session_id.as_deref(),
-                record.task_id.as_deref(),
-                record.actor.as_str(),
-                &record.kind,
-                payload_json,
-                record.causation_id.as_deref(),
-                record.correlation_id.as_deref(),
-                record.span_id.as_deref(),
-            ],
-        )?;
-        let seq = connection.last_insert_rowid();
-
-        Ok(EventRecord { seq, ..record })
+        let mut connection = self.connection()?;
+        if schedule::is_schedule_kind(&event.kind) {
+            let transaction = connection.transaction()?;
+            let record = insert_event(&transaction, event)?;
+            schedule::project(&transaction, &record)?;
+            transaction.commit()?;
+            Ok(record)
+        } else {
+            insert_event(&connection, event)
+        }
     }
 
     pub fn list(&self, query: &EventQuery) -> Result<Vec<EventRecord>, EventStoreError> {
@@ -462,6 +434,52 @@ fn unsafe_path(path: &Path, reason: &str) -> std::io::Error {
     )
 }
 
+fn insert_event(connection: &Connection, event: NewEvent) -> Result<EventRecord, EventStoreError> {
+    let recorded_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+        .expect("a current UTC timestamp is representable at millisecond precision");
+    let record = EventRecord {
+        seq: 0,
+        event_id: Ulid::new().to_string(),
+        recorded_at,
+        session_id: event.session_id,
+        task_id: event.task_id,
+        actor: event.actor,
+        kind: event.kind,
+        payload: event.payload,
+        causation_id: event.causation_id,
+        correlation_id: event.correlation_id,
+        span_id: event.span_id,
+    };
+    let payload_json = serde_json::to_string(&record.payload)?;
+    let recorded_at = record
+        .recorded_at
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
+
+    connection.execute(
+        r#"
+            INSERT INTO events (
+                event_id, recorded_at, session_id, task_id, actor, kind,
+                payload_json, causation_id, correlation_id, span_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+        params![
+            &record.event_id,
+            recorded_at,
+            record.session_id.as_deref(),
+            record.task_id.as_deref(),
+            record.actor.as_str(),
+            &record.kind,
+            payload_json,
+            record.causation_id.as_deref(),
+            record.correlation_id.as_deref(),
+            record.span_id.as_deref(),
+        ],
+    )?;
+    let seq = connection.last_insert_rowid();
+
+    Ok(EventRecord { seq, ..record })
+}
+
 fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version > CURRENT_SCHEMA_VERSION {
@@ -483,6 +501,9 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> 
     }
     if version < 4 {
         transaction.execute_batch(MIGRATION_V4)?;
+    }
+    if version < 5 {
+        transaction.execute_batch(schedule::MIGRATION_V5)?;
     }
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     transaction.commit()?;

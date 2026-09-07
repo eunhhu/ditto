@@ -106,7 +106,9 @@ impl IntoResponse for RunApiError {
                 let status = match error {
                     AgentRunError::Invalid(_) => StatusCode::BAD_REQUEST,
                     AgentRunError::Conflict => StatusCode::CONFLICT,
-                    AgentRunError::Busy => StatusCode::TOO_MANY_REQUESTS,
+                    AgentRunError::Busy | AgentRunError::ScheduleFull => {
+                        StatusCode::TOO_MANY_REQUESTS
+                    }
                     AgentRunError::Stopping => StatusCode::SERVICE_UNAVAILABLE,
                     AgentRunError::NotFound => StatusCode::NOT_FOUND,
                     AgentRunError::Storage => StatusCode::INTERNAL_SERVER_ERROR,
@@ -119,7 +121,7 @@ impl IntoResponse for RunApiError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ditto_kernel::{DittoKernel, KernelConfig};
     use ditto_model::{
@@ -131,7 +133,7 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct HttpDriver {
+    pub(crate) struct HttpDriver {
         descriptor: DriverDescriptor,
         calls: AtomicUsize,
         reference: String,
@@ -139,7 +141,7 @@ mod tests {
     }
 
     impl HttpDriver {
-        fn new(reference: String, block: bool) -> Self {
+        pub(crate) fn new(reference: String, block: bool) -> Self {
             Self {
                 descriptor: DriverDescriptor {
                     id: DriverId::new("http-test").unwrap(),
@@ -221,7 +223,7 @@ mod tests {
         (api, task)
     }
 
-    async fn built_cli(api: &str, args: Vec<&str>) -> std::process::Output {
+    pub(crate) async fn built_cli(api: &str, args: Vec<&str>) -> std::process::Output {
         let cli = std::env::current_exe()
             .unwrap()
             .parent()

@@ -28,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_REPLAY_PAGE_SIZE: usize = 500;
 mod memory;
 mod runs;
+mod schedules;
 mod sorts;
 
 #[derive(Debug, Parser)]
@@ -80,12 +81,13 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = ditto_model::CancellationToken::new();
     let state = AppState {
         kernel: kernel.clone(),
-        driver,
+        driver: driver.clone(),
         shutdown: shutdown.clone(),
     };
     let app = Router::new()
         .merge(memory::routes())
         .merge(runs::routes())
+        .merge(schedules::routes(args.bind.ip().is_loopback()))
         .merge(sorts::routes(args.bind.ip().is_loopback()))
         .route("/health", get(health))
         .route("/v1/commands/input", post(submit_input))
@@ -100,16 +102,36 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {}", args.bind))?;
     info!(address = %args.bind, "Ditto daemon listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            shutdown.cancel();
-            if kernel.shutdown_agent_runs().await.is_err() {
-                error!("failed to drain agent runtime");
-            }
-        })
+    let drain_kernel = kernel.clone();
+    let server_shutdown = shutdown.clone();
+    let server = async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                tokio::select! {
+                    _ = shutdown_signal() => {},
+                    _ = server_shutdown.cancelled() => {},
+                }
+                server_shutdown.cancel();
+                if drain_kernel.shutdown_agent_runs().await.is_err() {
+                    error!("failed to drain agent runtime");
+                }
+            })
+            .await
+    };
+    // Start only after successful bind. A failed scheduler shuts down the server;
+    // it must never leave a healthy-looking daemon silently missing due work.
+    let scheduler = kernel.run_scheduler(driver, shutdown.clone());
+    tokio::pin!(server, scheduler);
+    let (server_result, scheduler_result) = tokio::select! {
+        result = &mut server => { shutdown.cancel(); (result, scheduler.await) },
+        result = &mut scheduler => { shutdown.cancel(); (server.await, result) },
+    };
+    kernel
+        .shutdown_agent_runs()
         .await
-        .context("Ditto daemon stopped unexpectedly")?;
+        .context("failed to drain agent runtime")?;
+    server_result.context("Ditto daemon stopped unexpectedly")?;
+    scheduler_result.context("schedule runtime stopped unexpectedly")?;
     Ok(())
 }
 
