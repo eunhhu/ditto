@@ -254,6 +254,52 @@ HTTP statuses are 202 for running admission, 200 for prior/terminal results,
 429 occupied slot, 503 shutdown and 500 unavailable storage. Non-loopback
 listeners do not mount these routes. See [ADR 0017](../adr/0017-bounded-local-sort.md).
 
+## One-shot scheduled requests
+
+Loopback-only `POST /v1/commands/schedule` accepts exactly `request_id` (canonical
+uppercase ULID), `session_id`, `text` (16 KiB), `due_at`, and `expires_at`. The
+RFC 3339 times require explicit offsets and millisecond precision; the kernel
+normalizes them to UTC. New due times must be future instants within 365 days,
+with an exclusive latest-start time at most 24 hours later. Exact normalized
+retries return the original schedule even after expiry. Changed retries return
+409; the global 100-pending limit returns 429. Unknown authority, provider,
+process-grant, recurrence or internal identity fields are rejected.
+
+`GET /v1/schedules` and `POST /v1/commands/schedule/cancel` use the existing
+session/request query shape. `GET /v1/schedules/pending?session_id=personal`
+returns every pending request in the session, bounded by the global cap. Status
+contains original times, `pending|running|unverified|failed|interrupted|cancelled|missed`,
+durable `cancellation_requested`, optional `waiting_for` (scheduler stopped,
+provider disabled, due time, busy runtime or dispatch), and the original `run`
+result after admission. The CLI prints failed/interrupted/missed JSON and exits
+unsuccessfully. It does not wait for a future schedule or poll in the background.
+
+All schedule events have payload version 1, task `schedule_<request_id>`, the
+user's session, and no correlation/span. The kernel constructs actor and kind:
+
+| Event | Actor | Payload and cause |
+| --- | --- | --- |
+| `schedule.requested` | user | Original normalized `command` and reserved `run_request_id`; no cause |
+| `schedule.claimed` | scheduler | Version only; caused by the request |
+| `schedule.missed` | scheduler | Version only; caused by the request |
+| `schedule.cancelled` | user | Version only; caused by the pending request |
+| `schedule.cancel_requested` | user | Version only; caused by the claim |
+
+Each transition and its derived schedule index update commit atomically. Under
+the shared run gate, claim precedes durable input admission and model dispatch.
+The original request authorizes the later copied user text; its reserved run ID
+links the ordinary version-1 run evidence back to the schedule. Public manual
+admission cannot use a reserved ID. Scheduled runs receive no sort grant and
+retain current source-verified session context and read-only turn semantics.
+
+Pending cancellation prevents future dispatch. Active cancellation is persisted
+before signalling the run token. A crash after claim but before input admission
+is `interrupted` with no run result; no claim is retried automatically. A disabled
+provider can accept future intent but only expires it unless the operator later
+enables the provider. The enabled daemon can dispatch pending due work on startup.
+See [ADR 0019](../adr/0019-one-shot-scheduled-runs.md) for clock-change, power-loss,
+startup replay, recurrence and single-owner limitations.
+
 ## Model-directed sort permission
 
 `POST /v1/commands/run` additionally accepts optional

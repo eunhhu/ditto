@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Built daemon/CLI checks with disposable storage and no provider credentials."""
 import json
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import socket
@@ -92,11 +93,39 @@ def main():
                 start()
                 assert json.loads(run("memory", "list").stdout)["memories"] == saved
                 assert "404" in run("run-status", request, success=False).stderr
+                schedule_id = "01K00000000000000000000024"
+                due = datetime.now(timezone.utc) + timedelta(seconds=1)
+                expires = due + timedelta(seconds=1)
+                schedule_args = ("schedule", "future read-only request", "--request-id", schedule_id,
+                    "--at", due.isoformat(timespec="milliseconds"),
+                    "--expires", expires.isoformat(timespec="milliseconds"))
+                accepted = json.loads(run(*schedule_args).stdout)
+                assert accepted["status"] == "pending"
+                assert accepted["waiting_for"] == "provider_disabled"
+                assert len(json.loads(run("schedule-list").stdout)) == 1
+                stop()
+                time.sleep(max(0, expires.timestamp() - time.time()) + 0.05)
+                start()
+                deadline = time.monotonic() + 5
+                while True:
+                    result = subprocess.run([str(cli), "--api", api, "schedule-status", schedule_id],
+                        env=environment, text=True, capture_output=True, timeout=10)
+                    status = json.loads(result.stdout)
+                    if status["status"] == "missed":
+                        assert result.returncode != 0
+                        break
+                    assert time.monotonic() < deadline, status
+                    time.sleep(0.01)
+                assert json.loads(run(*schedule_args, success=False).stdout)["status"] == "missed"
+                assert json.loads(run("schedule-list").stdout) == []
+                events = json.loads(run("events", "--limit", "1000").stdout)
+                assert not any(event["kind"] == "model.requested" for event in events)
                 stop()
                 print(json.dumps({"result": "passed", "scenarios": [
                     "disabled run has no durable admission", "disabled sort attachment has no artifact or admission", "recoverable CLI request ID",
                     "missing run inspection/cancellation", "record-only input",
-                    "SIGTERM with open SSE follower", "restart preserves memory and does not run rejected work"
+                    "SIGTERM with open SSE follower", "restart preserves memory and does not run rejected work",
+                    "disabled schedule survives downtime and expires without model calls", "expired schedule retry does not requeue"
                 ]}))
             finally:
                 stop()

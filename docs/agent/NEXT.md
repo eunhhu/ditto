@@ -5,9 +5,9 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-Task 011 is complete. Next, specify the observable contract for event-driven
-scheduled work and restart recovery before implementing recurring execution.
-Keep it within the existing runtime/storage and avoid periodic model calls.
+[Task 012: One-shot scheduled requests and restart recovery](tasks/012-scheduled-runs.md)
+is implemented and locally verified. CI and merge are pending before advancing
+the completion marker. See [evidence](tasks/012-evidence.md).
 
 ## Completed
 

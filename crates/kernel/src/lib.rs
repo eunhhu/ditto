@@ -23,6 +23,7 @@ mod agent_sort;
 mod context_admission;
 mod context_retrieval;
 mod memory;
+mod schedule;
 mod sort_run;
 pub mod turn;
 pub use agent_run::AgentRunError;
@@ -128,6 +129,8 @@ struct KernelInner {
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     event_sender: broadcast::Sender<EventRecord>,
     agent_runs: Mutex<agent_run::RunSlot>,
+    scheduler_wake: tokio::sync::Notify,
+    scheduler_state: std::sync::atomic::AtomicU8,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -186,6 +189,8 @@ impl DittoKernel {
                 embedding_provider,
                 event_sender,
                 agent_runs: Mutex::new(agent_run::RunSlot::default()),
+                scheduler_wake: tokio::sync::Notify::new(),
+                scheduler_state: std::sync::atomic::AtomicU8::new(0),
             }),
         })
     }
