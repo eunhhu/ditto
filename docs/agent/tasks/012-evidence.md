@@ -2,7 +2,11 @@
 
 Date: 2026-09-07. Platform: macOS/aarch64, Rust 1.88.0.
 Base: Task 011 main merge `6060e83ab53f04098e96ae2fef8bd140e3aa0183`.
-CI and merge are pending; this file records completed local checks.
+Implementation commit: `7347e0cc33e2fd08cbbc0307326a49f3704f1708`.
+Linux [CI run 34071827827](https://github.com/eunhhu/ditto/actions/runs/34071827827)
+passed both `rust` and `msrv` for that commit. Subsequent completion-document
+changes preserve the source identities below. [PR #17](https://github.com/eunhhu/ditto/pull/17)
+records the final-head checks and merge state.
 
 ## Tested source identity
 
@@ -56,7 +60,7 @@ transcript: `/tmp/ditto-task012-gate.log` (ephemeral, not a repository artifact)
 
 ## Limits
 
-This completes the local implementation of one-time text requests, not recurring
+This completes one-time text requests, not recurring
 cron, notification delivery, scheduled process grants or a proven zero-cost/RAM
 benchmark. Startup work grows with schedule-event history, with bounded live
 materialization; steady-state queue reads are capped at 100 headers. Delivery is

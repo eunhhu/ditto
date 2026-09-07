@@ -5,11 +5,18 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-[Task 012: One-shot scheduled requests and restart recovery](tasks/012-scheduled-runs.md)
-is implemented and locally verified. CI and merge are pending before advancing
-the completion marker. See [evidence](tasks/012-evidence.md).
+Task 012 is complete. Next, define recurring schedule semantics on the verified
+one-shot path: per-occurrence identity, missed occurrences, bounded catch-up and
+cancellation. Keep the existing journal/runtime and avoid periodic model calls.
 
 ## Completed
+
+- [`012 One-shot scheduled requests and restart recovery`](tasks/012-scheduled-runs.md):
+  explicit due/latest-start times, journal-backed bounded pending index, one
+  timer/event-driven scheduler, shared execution-slot ownership, durable
+  cancellation/expiry, at-most-once claims and honest restart inspection. Exact
+  retries never create a second attempt; current scoped context is verified at
+  dispatch. See [verification evidence](tasks/012-evidence.md).
 
 - [`011 Model-directed, explicitly permitted local work`](tasks/011-model-sort.md):
   exact file attachment and deduplication permission, conditional schema paging,
@@ -91,8 +98,7 @@ the completion marker. See [evidence](tasks/012-evidence.md).
 
 ## Later
 
-- event-driven scheduled-work state and restart recovery before recurring
-  autonomous execution;
+- bounded recurring execution using the verified one-shot scheduling foundation;
 - minimum task-status/approval experience and reproducible RAM, latency, cost,
   and repeated-use baselines before claiming the first personal-agent milestone;
 - batched, compact rerank pools and descriptor/hash caching before a production
