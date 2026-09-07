@@ -28,8 +28,9 @@
 - Branch: `dev/task-012-scheduled-runs`, based on main merge
   `6060e83ab53f04098e96ae2fef8bd140e3aa0183` (Task 011, PR #16).
   The user authorized merge and continued implementation and explicitly asked
-  for a Goal through completion. Task 012 local verification has passed; its
-  CI and merge are pending. No live paid-model call was used.
+  for a Goal through completion. Task 012 local and Linux CI verification have
+  passed. [PR #17](https://github.com/eunhhu/ditto/pull/17) records the final head
+  checks and merge status. No live paid-model call was used.
 - Runtime: Rust daemon and CLI.
 - Durable stores: SQLite event spine (schema 5 adds the rebuildable schedule index)
   plus local SHA-256 artifact objects. Context projection remains schema 4.
@@ -110,7 +111,7 @@
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
-## Current slice: Task 012
+## Latest verified slice: Task 012
 
 - [ADR 0019](../adr/0019-one-shot-scheduled-runs.md) defines explicit one-shot
   read-only requests with canonical UTC millisecond due/latest-start times,
@@ -135,9 +136,13 @@
   25 compile-fail doctests, and 4 required actual CLI scenarios. Rust 1.88
   `cargo check --locked --workspace --all-targets` and both production binary
   smoke scripts passed. [Evidence](tasks/012-evidence.md) binds the source trees.
+- Linux CI passed both `rust` and `msrv` on implementation commit
+  `7347e0cc33e2fd08cbbc0307326a49f3704f1708` in
+  [run 34071827827](https://github.com/eunhhu/ditto/actions/runs/34071827827).
+  Subsequent completion-document changes preserve the tested source trees.
 - Local sandbox attempts initially rejected loopback binds; approved reruns of
   the full gate and production smoke scripts passed. There is no remaining
-  unrun local check. CI and merge remain the final gates.
+  unrun local check. The PR requires green final-head checks before merge.
 
 ## Previous verified slice: Task 011
 

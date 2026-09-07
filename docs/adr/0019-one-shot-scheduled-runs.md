@@ -30,6 +30,10 @@ from schedule events at startup. Pending selection and identity reads use indexe
 queries, never rescan completed history during steady-state operation. Recovery
 streams schedule events; it retains no transcript or pending prompt catalogue.
 
+The start window is checked immediately before claim; it bounds the admission
+attempt, not provider response or completion time. The existing turn deadline
+continues to bound an admitted execution.
+
 The kernel reserves a private run identity at admission. Manual admission cannot
 use a reserved identity. Under the existing single-run gate, the scheduler first
 commits `schedule.claimed`, then admits the existing run and dispatches it. Claims
