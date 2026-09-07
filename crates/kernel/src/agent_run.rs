@@ -43,6 +43,8 @@ pub enum AgentRunError {
     Conflict,
     #[error("another run is active; no work was queued")]
     Busy,
+    #[error("pending schedule limit (100) reached; cancel a pending request before adding another")]
+    ScheduleFull,
     #[error("runtime is shutting down")]
     Stopping,
     #[error("run is unavailable in this session")]
@@ -94,6 +96,32 @@ impl DittoKernel {
         command: StartAgentRunCommand,
         driver: Arc<dyn ModelDriver>,
     ) -> Result<AgentRunResponse, AgentRunError> {
+        validate_query(&AgentRunQuery {
+            request_id: command.request_id.clone(),
+            session_id: command.session_id.clone(),
+        })?;
+        let mut slot = self
+            .inner
+            .agent_runs
+            .lock()
+            .map_err(|_| AgentRunError::Storage)?;
+        if self
+            .inner
+            .events
+            .is_scheduled_run(&command.request_id)
+            .map_err(|_| AgentRunError::Storage)?
+        {
+            return Err(AgentRunError::Conflict);
+        }
+        self.start_agent_run_locked(command, driver, &mut slot)
+    }
+
+    pub(crate) fn start_agent_run_locked(
+        &self,
+        command: StartAgentRunCommand,
+        driver: Arc<dyn ModelDriver>,
+        slot: &mut RunSlot,
+    ) -> Result<AgentRunResponse, AgentRunError> {
         let query = AgentRunQuery {
             request_id: command.request_id,
             session_id: command.session_id,
@@ -113,11 +141,6 @@ impl DittoKernel {
         }
         // Check the executor before durable acceptance, including non-async callers.
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| AgentRunError::Stopping)?;
-        let mut slot = self
-            .inner
-            .agent_runs
-            .lock()
-            .map_err(|_| AgentRunError::Storage)?;
         if let Some((input, last)) = self.run_boundary(&query, &task_id)? {
             validate_agent_input(&input, &query)?;
             let metadata: AgentRunMetadata =
@@ -135,7 +158,7 @@ impl DittoKernel {
             {
                 return Err(AgentRunError::Conflict);
             }
-            return self.agent_status_from_boundary(query, input, last, &slot);
+            return self.agent_status_from_boundary(query, input, last, slot);
         }
         if slot.stopping {
             return Err(AgentRunError::Stopping);
@@ -208,24 +231,32 @@ impl DittoKernel {
         // The slot's cancellation/completion tokens own the lifetime. Dropping
         // the join handle detaches HTTP ownership, not shutdown accounting.
         drop(task);
-        self.agent_status_from_boundary(query, input.clone(), input, &slot)
+        self.agent_status_from_boundary(query, input.clone(), input, slot)
     }
 
     pub fn inspect_agent_run(
         &self,
         query: AgentRunQuery,
     ) -> Result<AgentRunResponse, AgentRunError> {
-        let task_id = validate_query(&query)?;
         let slot = self
             .inner
             .agent_runs
             .lock()
             .map_err(|_| AgentRunError::Storage)?;
+        self.inspect_agent_run_locked(query, &slot)
+    }
+
+    pub(crate) fn inspect_agent_run_locked(
+        &self,
+        query: AgentRunQuery,
+        slot: &RunSlot,
+    ) -> Result<AgentRunResponse, AgentRunError> {
+        let task_id = validate_query(&query)?;
         let (input, last) = self
             .run_boundary(&query, &task_id)?
             .ok_or(AgentRunError::NotFound)?;
         validate_agent_input(&input, &query)?;
-        self.agent_status_from_boundary(query, input, last, &slot)
+        self.agent_status_from_boundary(query, input, last, slot)
     }
 
     pub fn cancel_agent_run(
@@ -259,6 +290,7 @@ impl DittoKernel {
                 .lock()
                 .map_err(|_| AgentRunError::Storage)?;
             slot.stopping = true;
+            self.inner.scheduler_wake.notify_one();
             slot.active.as_ref().map(|active| {
                 active.cancellation.cancel();
                 active.finished.clone()
@@ -299,6 +331,7 @@ impl Drop for ActiveGuard {
             slot.active = None;
         }
         self.finished.cancel();
+        self.kernel.inner.scheduler_wake.notify_one();
     }
 }
 
