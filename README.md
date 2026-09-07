@@ -51,9 +51,11 @@ The executable foundation includes:
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - model-directed sorting of one explicitly attached file, with separate permission
   for deduplication and verified output inspection after model failure or restart;
+- one-shot read-only schedules with durable claims, bounded timer/event wakeup,
+  visible expiry/cancellation and restart inspection without automatic retry;
 - repository-native instructions for long-running coding agents.
 
-Scheduled execution, additional model
+Recurring schedules, scheduled effect grants, additional model
 providers, general effectful model-tool continuation, SSH, a production embedding
 worker/cache, authenticated remote gateways, additional completion verifiers, and the
 improvement compiler are still deferred. They are not represented by fake
@@ -92,8 +94,9 @@ authentication; use loopback until an authenticated gateway exists.
 To answer requests, explicitly start the daemon with `--provider openai` and
 provide `OPENAI_API_KEY` through its environment. This selects the existing
 closed `gpt-5.6` adapter and may incur provider charges. The default is
-`--provider disabled`; startup, input recording, memory operations, and recovery
-make no model calls. Enabled model execution requires loopback even with the
+`--provider disabled`; input recording, memory operations, and schedule maintenance
+make no model calls. With an enabled provider, startup can dispatch previously
+accepted due schedules inside their start windows. Model execution requires loopback even with the
 remote escape hatch.
 
 ```bash
@@ -120,7 +123,7 @@ deduplicate without permission, or dispatch twice. `run-status` includes a
 separate `sort` result: verified text remains inspectable even if the subsequent
 model answer fails. Retry identity includes the exact file and permission.
 General file/process tools are not connected yet. One run executes at a time;
-other work is rejected without queuing. An interrupted run is inspectable and
+other immediate requests are rejected without queuing. An interrupted run is inspectable and
 never automatically restarted. A model answer remains `unverified`.
 
 Local file sorting works with the default provider-disabled daemon on Linux and
@@ -144,6 +147,31 @@ This closed profile has no shell or caller-selected executable. Model dispatch
 requires the explicit per-run attachment above; general process profiles remain
 future work.
 
+One-time future requests use the same agent and current session memory. Choose
+future timestamps with explicit offsets; the second timestamp is the exclusive
+latest start, at most 24 hours after the due time:
+
+```bash
+cargo run -p ditto-cli -- schedule "Summarize my meeting preferences" \
+  --at "2026-09-08T09:00:00+09:00" --expires "2026-09-08T10:00:00+09:00"
+cargo run -p ditto-cli -- schedule-list
+cargo run -p ditto-cli -- schedule-status REQUEST_ID
+cargo run -p ditto-cli -- schedule-cancel REQUEST_ID
+```
+
+Scheduling prints the request ID before submission and returns after durable
+acceptance. Identical `--request-id` retries retain the original attempt. Up to
+100 pending requests can wait without loading prompts or calling a model. The
+default disabled provider retains them until expiry; status explains what they
+are waiting for. An enabled provider dispatches due work when the shared run slot
+is free. A missed window becomes `missed`, and an uncertain claimed attempt after
+restart becomes `interrupted`; neither retries automatically. Completed answers
+remain `unverified`, with the original run result available through status.
+
+This first schedule contract supports one-time text requests and scoped artifact
+reads. Recurrence, sort permissions and notification delivery remain future work.
+See [the time, restart and delivery contract](docs/adr/0019-one-shot-scheduled-runs.md).
+
 ## HTTP surface
 
 | Method | Path | Purpose |
@@ -155,6 +183,10 @@ future work.
 | `POST` | `/v1/commands/run` | Admit one model run, optionally permitting one attached-file sort |
 | `GET` | `/v1/runs` | Inspect a run by session and request ID |
 | `POST` | `/v1/commands/run/cancel` | Signal cancellation of the matching live run |
+| `POST` | `/v1/commands/schedule` | Durably schedule one future read-only request; loopback only |
+| `GET` | `/v1/schedules` | Inspect schedule and original run by session/request ID; loopback only |
+| `GET` | `/v1/schedules/pending` | List pending schedules in one session; loopback only |
+| `POST` | `/v1/commands/schedule/cancel` | Cancel pending or active scheduled work; loopback only |
 | `POST` | `/v1/commands/sort` | Explicit local sort with exact request identity; loopback only |
 | `GET` | `/v1/sorts` | Inspect verified sort output by session and request ID; loopback only |
 | `POST` | `/v1/commands/sort/cancel` | Cancel the matching sort; loopback only |

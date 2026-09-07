@@ -56,6 +56,17 @@ The SSE adapter subscribes before capturing a high-water mark, replays the
 bounded snapshot in pages, deduplicates buffered live events, and recovers gaps
 or lag from durable storage.
 
+One-shot scheduled requests use the same event authority. The kernel records an
+explicit future user intent and reserves a private run identity. Schema 5 adds a
+compact schedule index, transactionally projected from journal events and rebuilt
+at startup with a streaming schedule-only scan. An owned scheduler future waits
+on the nearest due/expiry time, queue changes, execution-slot release or shutdown.
+It commits one claim before admitting the existing read-only run; recovery never
+retries a claimed attempt. Status retains terminal evidence or reports interrupted
+ownership. The disabled provider retains/expires pending intent without model
+work. [ADR 0019](adr/0019-one-shot-scheduled-runs.md) defines scope, delivery,
+time windows, cancellation and the one-owner deployment limit.
+
 ## Context compiler
 
 Conversation transcripts are evidence, not the prompt. Ditto builds a task

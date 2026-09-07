@@ -25,13 +25,14 @@
 
 ## Canonical state
 
-- Branch: `dev/task-011-model-sort`, based on main merge
-  `ef65fff624703a7ad886967dc93f27a7bdbd33c5` (Task 010, PR #15), then integrated
-  main `cbc301d57cd5a5b196366fda9999aeef1642def2` with its separate dependency updates.
-  The user authorized merge and continued implementation. Tested ancestry is
-  retained with merge commits; the associated PR records final Linux checks.
+- Branch: `dev/task-012-scheduled-runs`, based on main merge
+  `6060e83ab53f04098e96ae2fef8bd140e3aa0183` (Task 011, PR #16).
+  The user authorized merge and continued implementation and explicitly asked
+  for a Goal through completion. Task 012 local and Linux CI verification have
+  passed. [PR #17](https://github.com/eunhhu/ditto/pull/17) records the final head
+  checks and merge status. No live paid-model call was used.
 - Runtime: Rust daemon and CLI.
-- Durable stores: SQLite event spine (schema 4 adds the bounded model-sort index)
+- Durable stores: SQLite event spine (schema 5 adds the rebuildable schedule index)
   plus local SHA-256 artifact objects. Context projection remains schema 4.
 - Public mutation ingress: typed user-input and explicit input-to-memory
   promotion commands; arbitrary event append and trusted drafts are not public
@@ -110,7 +111,40 @@
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
-## Latest verified slice
+## Latest verified slice: Task 012
+
+- [ADR 0019](../adr/0019-one-shot-scheduled-runs.md) defines explicit one-shot
+  read-only requests with canonical UTC millisecond due/latest-start times,
+  at-most-once durable claims, no automatic retry and a 100-pending cap.
+- CLI/loopback HTTP support schedule, status, pending-list and cancellation.
+  The existing provider-disabled daemon accepts future intent without invoking
+  a model. An enabled provider can dispatch previously accepted due work at
+  startup. Recurrence and scheduled sort grants remain deferred.
+- The authoritative journal and derived schedule index change in one transaction.
+  Startup rebuild streams only schedule events through a dedicated partial index;
+  steady-state selection retains at most 100 headers and no pending prompt pool.
+  Exact run reservations prevent public manual admission from bypassing time or
+  cancellation. The existing slot serializes claim, dispatch and cancellation.
+- One scheduler future waits for due/expiry, queue changes, slot release or
+  shutdown. Empty queues have no timer; disabled/busy paths make no housekeeping
+  model calls. Expiry remains serviced while the execution slot is occupied.
+- Restart before claim retains pending work. A claim without a live owner or
+  durable terminal is interrupted, including the claim/admission crash gap.
+  Original run terminals remain inspectable and are never automatically rerun.
+  Current memory is compiled at execution time through the existing verifier.
+- The canonical gate passed **457 tests across 46 suites**: 428 unit/integration,
+  25 compile-fail doctests, and 4 required actual CLI scenarios. Rust 1.88
+  `cargo check --locked --workspace --all-targets` and both production binary
+  smoke scripts passed. [Evidence](tasks/012-evidence.md) binds the source trees.
+- Linux CI passed both `rust` and `msrv` on implementation commit
+  `7347e0cc33e2fd08cbbc0307326a49f3704f1708` in
+  [run 34071827827](https://github.com/eunhhu/ditto/actions/runs/34071827827).
+  Subsequent completion-document changes preserve the tested source trees.
+- Local sandbox attempts initially rejected loopback binds; approved reruns of
+  the full gate and production smoke scripts passed. There is no remaining
+  unrun local check. The PR requires green final-head checks before merge.
+
+## Previous verified slice: Task 011
 
 - Task 011 is complete under [ADR 0018](../adr/0018-user-scoped-model-sort.md).
   [Evidence](tasks/011-evidence.md) identifies the tested source trees and checks.
@@ -567,7 +601,7 @@
 
 ## Intentionally deferred
 
-- durable scheduled execution and additional effectful tool profiles;
+- recurring schedules, scheduled effect grants and additional effectful tool profiles;
 - additional providers, OpenAI model profiles, reasoning replay, remote cancel,
   and explicit prompt-cache breakpoints;
 - additional capability derivers, durable/cross-process authorization,
