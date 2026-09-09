@@ -23,6 +23,7 @@ mod agent_sort;
 mod context_admission;
 mod context_retrieval;
 mod memory;
+mod recurrence;
 mod schedule;
 mod sort_run;
 pub mod turn;

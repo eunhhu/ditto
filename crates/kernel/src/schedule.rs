@@ -56,14 +56,7 @@ impl DittoKernel {
                 "due time must be in the future and within 365 days",
             ));
         }
-        if self
-            .inner
-            .events
-            .pending_schedules()
-            .map_err(storage)?
-            .len()
-            >= MAX_PENDING_SCHEDULES
-        {
+        if self.inner.events.future_schedule_count().map_err(storage)? >= MAX_PENDING_SCHEDULES {
             return Err(AgentRunError::ScheduleFull);
         }
         let run_request_id = ulid::Ulid::new().to_string();
@@ -219,6 +212,11 @@ impl DittoKernel {
         }
         let now = clock();
         let entries = self.inner.events.pending_schedules().map_err(storage)?;
+        let repeats = self.inner.events.active_repeats().map_err(storage)?;
+        if entries.len() + repeats.len() > MAX_PENDING_SCHEDULES {
+            return Err(AgentRunError::Storage);
+        }
+
         // Expiry is serviced even with a disabled provider or occupied slot.
         if let Some(entry) = entries
             .iter()
@@ -227,6 +225,36 @@ impl DittoKernel {
             self.schedule_source(entry)?;
             self.schedule_transition(entry, ScheduleState::Missed)?;
             return Ok(Step::Again);
+        }
+        for entry in &repeats {
+            if entry
+                .timing
+                .window(entry.next_occurrence)
+                .map_err(storage)?
+                .1
+                <= now.timestamp_millis()
+            {
+                self.skip_repeat(entry, now.timestamp_millis())?;
+                return Ok(Step::Again);
+            }
+        }
+        if let Some(driver) = driver
+            && slot.active.is_none()
+            && let Some(entry) = repeats.first()
+        {
+            let due = entry
+                .timing
+                .window(entry.next_occurrence)
+                .map_err(storage)?
+                .0;
+            if due <= now.timestamp_millis()
+                && entries.first().is_none_or(|one| due < one.due_at_ms)
+            {
+                return match self.dispatch_repeat(entry, driver.clone(), &mut slot, &clock)? {
+                    Some(due) => Ok(Step::Wait(Some(due))),
+                    None => Ok(Step::Again),
+                };
+            }
         }
         if let Some(driver) = driver
             && slot.active.is_none()
@@ -258,22 +286,35 @@ impl DittoKernel {
             )?;
             return Ok(Step::Again);
         }
-        let next = entries
+        let ready = driver.is_some() && slot.active.is_none();
+        let mut next = entries
             .iter()
             .map(|entry| {
-                if driver.is_some() && slot.active.is_none() {
+                if ready {
                     entry.due_at_ms
                 } else {
                     entry.expires_at_ms
                 }
             })
-            .min()
+            .min();
+        for entry in &repeats {
+            let (due, expiry) = entry
+                .timing
+                .window(entry.next_occurrence)
+                .map_err(storage)?;
+            let deadline = if ready { due } else { expiry };
+            next = Some(next.map_or(deadline, |current| current.min(deadline)));
+        }
+        let next = next
             .map(|ms| DateTime::from_timestamp_millis(ms).ok_or(AgentRunError::Storage))
             .transpose()?;
         Ok(Step::Wait(next))
     }
 
-    fn schedule_entry(&self, query: &AgentRunQuery) -> Result<ScheduleEntry, AgentRunError> {
+    pub(crate) fn schedule_entry(
+        &self,
+        query: &AgentRunQuery,
+    ) -> Result<ScheduleEntry, AgentRunError> {
         validate_query(query)?;
         self.inner
             .events
@@ -289,9 +330,16 @@ impl DittoKernel {
             .get_by_event_id(&entry.source_event_id)
             .map_err(storage)?
             .ok_or(AgentRunError::Storage)?;
-        check_event(&source, entry, ScheduleState::Pending, None)?;
-        let command: ScheduleRunCommand =
-            serde_json::from_value(source.payload["command"].clone()).map_err(storage)?;
+        let occurrence = source.kind == ditto_event_store::recurrence::OCCURRENCE_CLAIMED;
+        let command: ScheduleRunCommand = if occurrence {
+            self.inner
+                .events
+                .occurrence_source(entry, &source)
+                .map_err(storage)?
+        } else {
+            check_event(&source, entry, ScheduleState::Pending, None)?;
+            serde_json::from_value(source.payload["command"].clone()).map_err(storage)?
+        };
         if command.session_id != entry.session_id
             || command.request_id != entry.request_id
             || command.due_at.timestamp_millis() != entry.due_at_ms
@@ -309,7 +357,26 @@ impl DittoKernel {
         })
         .map_err(storage)?;
         validate_times(&command).map_err(storage)?;
-        if entry.state != ScheduleState::Pending {
+        if occurrence {
+            match entry.state {
+                ScheduleState::Claimed if entry.last_event_id == entry.source_event_id => {}
+                ScheduleState::CancelRequested => {
+                    let last = self
+                        .inner
+                        .events
+                        .get_by_event_id(&entry.last_event_id)
+                        .map_err(storage)?
+                        .ok_or(AgentRunError::Storage)?;
+                    check_event(
+                        &last,
+                        entry,
+                        ScheduleState::CancelRequested,
+                        Some(&entry.source_event_id),
+                    )?;
+                }
+                _ => return Err(AgentRunError::Storage),
+            }
+        } else if entry.state != ScheduleState::Pending {
             let last = self
                 .inner
                 .events
@@ -357,7 +424,21 @@ impl DittoKernel {
         Ok(())
     }
 
-    fn schedule_status(
+    pub(crate) fn schedule_wait_reason(
+        &self,
+        due: DateTime<Utc>,
+        slot: &RunSlot,
+    ) -> ScheduleWaitReason {
+        match self.inner.scheduler_state.load(Ordering::SeqCst) {
+            0 => ScheduleWaitReason::SchedulerStopped,
+            1 => ScheduleWaitReason::ProviderDisabled,
+            _ if Utc::now() < due => ScheduleWaitReason::DueTime,
+            _ if slot.active.is_some() => ScheduleWaitReason::RuntimeBusy,
+            _ => ScheduleWaitReason::Dispatch,
+        }
+    }
+
+    pub(crate) fn schedule_status(
         &self,
         entry: &ScheduleEntry,
         slot: &RunSlot,
@@ -394,15 +475,8 @@ impl DittoKernel {
                 }
             }
         };
-        let waiting_for = (status == ScheduleStatus::Pending).then(|| {
-            match self.inner.scheduler_state.load(Ordering::SeqCst) {
-                0 => ScheduleWaitReason::SchedulerStopped,
-                1 => ScheduleWaitReason::ProviderDisabled,
-                _ if Utc::now() < command.due_at => ScheduleWaitReason::DueTime,
-                _ if slot.active.is_some() => ScheduleWaitReason::RuntimeBusy,
-                _ => ScheduleWaitReason::Dispatch,
-            }
-        });
+        let waiting_for = (status == ScheduleStatus::Pending)
+            .then(|| self.schedule_wait_reason(command.due_at, slot));
         Ok(ScheduleResponse {
             request_id: command.request_id,
             session_id: command.session_id,

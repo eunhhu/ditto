@@ -25,14 +25,17 @@
 
 ## Canonical state
 
-- Branch: `dev/task-012-scheduled-runs`, based on main merge
-  `6060e83ab53f04098e96ae2fef8bd140e3aa0183` (Task 011, PR #16).
+- Branch: `dev/task-013-recurring-schedules`, based on main merge
+  `e1771763fbd82ba60b830827cfed0cd436e99ad5` (Task 012, PR #17).
   The user authorized merge and continued implementation and explicitly asked
-  for a Goal through completion. Task 012 local and Linux CI verification have
-  passed. [PR #17](https://github.com/eunhhu/ditto/pull/17) records the final head
-  checks and merge status. No live paid-model call was used.
+  for a Goal through completion. On 2026-09-09 the Goal was recreated for Task
+  013 implementation, verification, PR and merge. Task 012 is merged and its
+  final head passed [Linux CI](https://github.com/eunhhu/ditto/actions/runs/34072060758).
+  Task 013 passed local verification; PR/Linux CI remain before completion. No
+  live paid-model call was used.
 - Runtime: Rust daemon and CLI.
-- Durable stores: SQLite event spine (schema 5 adds the rebuildable schedule index)
+- Durable stores: SQLite event spine (schema 6 extends rebuildable schedule indexes
+  with finite-repeat progress)
   plus local SHA-256 artifact objects. Context projection remains schema 4.
 - Public mutation ingress: typed user-input and explicit input-to-memory
   promotion commands; arbitrary event append and trusted drafts are not public
@@ -110,6 +113,25 @@
   ephemeral or provider-managed remote response state. The kernel now owns an
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
+
+## Current slice: Task 013 (verification in progress)
+
+- [ADR 0020](../adr/0020-bounded-recurring-schedules.md) and
+  [Task 013](tasks/013-recurring-schedules.md) define finite fixed-interval
+  read-only repeats, shared future-work capacity and aggregate missed ranges.
+- The event-store projection atomically advances parent progress and creates
+  each claimed child. Existing run identities, context verification, single-slot
+  admission and scheduler wakeup handle execution and cancellation.
+- The canonical gate passed **476 tests across 47 suites**: 446 unit/integration,
+  25 compile-fail doctests and five required actual CLI scenarios. Eleven new
+  kernel tests and six storage tests cover recurrence; the HTTP boundary and
+  actual repeat CLI add two further regression scenarios.
+- Rust 1.88 workspace/all-target check and both production daemon/CLI smoke
+  scripts passed. Disabled-provider repeat expiry creates no child/model work;
+  cancellation survives reopen. [Evidence](tasks/013-evidence.md) binds the
+  tested source trees. Linux CI remains pending.
+- No dependency or service was added. Existing untracked `.omo/` and `.surf/`
+  directories were preserved and are outside this change.
 
 ## Latest verified slice: Task 012
 

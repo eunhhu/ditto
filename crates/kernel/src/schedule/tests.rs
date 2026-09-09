@@ -6,6 +6,8 @@ use ditto_model::{
 };
 use std::sync::{Mutex, atomic::AtomicUsize};
 
+mod repeats;
+
 struct Driver {
     descriptor: DriverDescriptor,
     calls: AtomicUsize,

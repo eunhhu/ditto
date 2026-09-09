@@ -5,9 +5,11 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-Task 012 is complete. Next, define recurring schedule semantics on the verified
-one-shot path: per-occurrence identity, missed occurrences, bounded catch-up and
-cancellation. Keep the existing journal/runtime and avoid periodic model calls.
+[`013 Bounded recurring schedules`](tasks/013-recurring-schedules.md) is in
+progress under [ADR 0020](../adr/0020-bounded-recurring-schedules.md). Implementation,
+actual CLI, canonical gate and production smoke checks passed locally; Linux CI
+remains before completion. [Evidence](tasks/013-evidence.md) identifies the tested
+source trees. Keep the existing journal/runtime and avoid periodic model calls.
 
 ## Completed
 

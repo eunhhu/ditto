@@ -67,6 +67,18 @@ ownership. The disabled provider retains/expires pending intent without model
 work. [ADR 0019](adr/0019-one-shot-scheduled-runs.md) defines scope, delivery,
 time windows, cancellation and the one-owner deployment limit.
 
+Schema 6 extends the same journal projection with compact finite-repeat headers.
+An occurrence claim atomically advances the parent cursor and creates a claimed
+child schedule with its own run reservation. Child time, text and scope derive
+from the original repeat event; future children are never precreated. Expired
+ordinal ranges advance in one arithmetic step and one event, without provider
+work. One scheduler merges both queues under a shared 100-future-intent limit.
+Each cached repeat cursor and count is checked against the original command and
+latest immutable progress checkpoint. Both indexes rebuild through the same
+streaming schedule-event sequence index. [ADR 0020](adr/0020-bounded-recurring-schedules.md)
+defines fixed anchors, finite bounds, skipped work, parent/child cancellation and
+at-most-once recovery. Exhausting a repeat is separate from verifying its work.
+
 ## Context compiler
 
 Conversation transcripts are evidence, not the prompt. Ditto builds a task

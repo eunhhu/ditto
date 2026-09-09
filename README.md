@@ -53,9 +53,11 @@ The executable foundation includes:
   for deduplication and verified output inspection after model failure or restart;
 - one-shot read-only schedules with durable claims, bounded timer/event wakeup,
   visible expiry/cancellation and restart inspection without automatic retry;
+- finite fixed-interval repeats with independent occurrence identities, aggregate
+  missed ranges and durable parent cancellation through the same scheduler;
 - repository-native instructions for long-running coding agents.
 
-Recurring schedules, scheduled effect grants, additional model
+Calendar cron, indefinite repeats, scheduled effect grants, additional model
 providers, general effectful model-tool continuation, SSH, a production embedding
 worker/cache, authenticated remote gateways, additional completion verifiers, and the
 improvement compiler are still deferred. They are not represented by fake
@@ -153,7 +155,7 @@ latest start, at most 24 hours after the due time:
 
 ```bash
 cargo run -p ditto-cli -- schedule "Summarize my meeting preferences" \
-  --at "2026-09-08T09:00:00+09:00" --expires "2026-09-08T10:00:00+09:00"
+  --at "2026-09-10T09:00:00+09:00" --expires "2026-09-10T10:00:00+09:00"
 cargo run -p ditto-cli -- schedule-list
 cargo run -p ditto-cli -- schedule-status REQUEST_ID
 cargo run -p ditto-cli -- schedule-cancel REQUEST_ID
@@ -161,16 +163,41 @@ cargo run -p ditto-cli -- schedule-cancel REQUEST_ID
 
 Scheduling prints the request ID before submission and returns after durable
 acceptance. Identical `--request-id` retries retain the original attempt. Up to
-100 pending requests can wait without loading prompts or calling a model. The
+100 pending one-shot requests and active repeats can wait in total without
+loading a prompt pool or calling a model. The
 default disabled provider retains them until expiry; status explains what they
 are waiting for. An enabled provider dispatches due work when the shared run slot
 is free. A missed window becomes `missed`, and an uncertain claimed attempt after
 restart becomes `interrupted`; neither retries automatically. Completed answers
 remain `unverified`, with the original run result available through status.
 
-This first schedule contract supports one-time text requests and scoped artifact
-reads. Recurrence, sort permissions and notification delivery remain future work.
+Scheduled work supports text requests and scoped artifact reads. Scheduled sort
+permissions and notification delivery remain future work.
 See [the time, restart and delivery contract](docs/adr/0019-one-shot-scheduled-runs.md).
+
+To repeat the request daily for seven occurrences, give the first start window,
+an elapsed-time interval and a finite count:
+
+```bash
+cargo run -p ditto-cli -- repeat "Summarize my meeting preferences" \
+  --at "2026-09-10T09:00:00+09:00" --expires "2026-09-10T10:00:00+09:00" \
+  --every-seconds 86400 --occurrences 7
+cargo run -p ditto-cli -- repeat-list
+cargo run -p ditto-cli -- repeat-status REQUEST_ID
+cargo run -p ditto-cli -- repeat-cancel REQUEST_ID
+```
+
+Intervals range from 60 seconds to 31 days; counts range from 2 to 1000 and the
+last due time must fall within one year. Each start window is anchored to the
+first, without shifting after a slow run. Expired occurrences become a visible
+missed count; only the currently eligible occurrence can run after downtime.
+`repeat-status` includes the latest child's schedule ID and original result.
+`schedule-status CHILD_ID` also inspects that occurrence, and `schedule-cancel
+CHILD_ID` cancels only that occurrence. `repeat-cancel` stops future occurrences
+and signals the series' active child. Parent `exhausted` means all timetable
+entries were consumed; inspect the child result for work outcome. These are fixed
+intervals, without named-time-zone or daylight-saving calendar adjustments. See
+[the repeat contract](docs/adr/0020-bounded-recurring-schedules.md).
 
 ## HTTP surface
 
@@ -187,6 +214,10 @@ See [the time, restart and delivery contract](docs/adr/0019-one-shot-scheduled-r
 | `GET` | `/v1/schedules` | Inspect schedule and original run by session/request ID; loopback only |
 | `GET` | `/v1/schedules/pending` | List pending schedules in one session; loopback only |
 | `POST` | `/v1/commands/schedule/cancel` | Cancel pending or active scheduled work; loopback only |
+| `POST` | `/v1/commands/repeat` | Accept a finite repeat with explicit interval/count; loopback only |
+| `GET` | `/v1/repeats` | Inspect repeat progress and latest child result; loopback only |
+| `GET` | `/v1/repeats/active` | List active repeats in one session; loopback only |
+| `POST` | `/v1/commands/repeat/cancel` | Cancel future occurrences and signal the active child; loopback only |
 | `POST` | `/v1/commands/sort` | Explicit local sort with exact request identity; loopback only |
 | `GET` | `/v1/sorts` | Inspect verified sort output by session and request ID; loopback only |
 | `POST` | `/v1/commands/sort/cancel` | Cancel the matching sort; loopback only |
