@@ -25,14 +25,14 @@
 
 ## Canonical state
 
-- Branch: `dev/task-013-recurring-schedules`, based on main merge
+- Latest slice branch: `dev/task-013-recurring-schedules`, based on main merge
   `e1771763fbd82ba60b830827cfed0cd436e99ad5` (Task 012, PR #17).
   The user authorized merge and continued implementation and explicitly asked
   for a Goal through completion. On 2026-09-09 the Goal was recreated for Task
   013 implementation, verification, PR and merge. Task 012 is merged and its
   final head passed [Linux CI](https://github.com/eunhhu/ditto/actions/runs/34072060758).
-  Task 013 passed local verification; PR/Linux CI remain before completion. No
-  live paid-model call was used.
+  Task 013 passed local and Linux CI verification. [PR #18](https://github.com/eunhhu/ditto/pull/18)
+  records final-head checks and merge status. No live paid-model call was used.
 - Runtime: Rust daemon and CLI.
 - Durable stores: SQLite event spine (schema 6 extends rebuildable schedule indexes
   with finite-repeat progress)
@@ -114,7 +114,7 @@
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
-## Current slice: Task 013 (verification in progress)
+## Latest verified slice: Task 013
 
 - [ADR 0020](../adr/0020-bounded-recurring-schedules.md) and
   [Task 013](tasks/013-recurring-schedules.md) define finite fixed-interval
@@ -129,11 +129,15 @@
 - Rust 1.88 workspace/all-target check and both production daemon/CLI smoke
   scripts passed. Disabled-provider repeat expiry creates no child/model work;
   cancellation survives reopen. [Evidence](tasks/013-evidence.md) binds the
-  tested source trees. Linux CI remains pending.
+  tested source trees. Linux `rust` and `msrv` both passed on implementation
+  commit `5e0416c6e67d235753b4f61ae26a5593b30092a7` in
+  [run 34333966097](https://github.com/eunhhu/ditto/actions/runs/34333966097).
+  Completion-document changes preserve those source trees; the PR requires
+  successful final-head checks before merge.
 - No dependency or service was added. Existing untracked `.omo/` and `.surf/`
   directories were preserved and are outside this change.
 
-## Latest verified slice: Task 012
+## Previous verified slice: Task 012
 
 - [ADR 0019](../adr/0019-one-shot-scheduled-runs.md) defines explicit one-shot
   read-only requests with canonical UTC millisecond due/latest-start times,

@@ -24,6 +24,7 @@ delivery remain deferred. Existing single-owner and process-restart limits apply
 
 ## Verification state
 
-Local canonical gate, MSRV check and both production smoke scripts passed.
-[Evidence](013-evidence.md) records the source identities and scenarios. Linux
-CI remains pending before the completion marker moves.
+Complete. Local canonical gate, MSRV check, both production smoke scripts and
+Linux CI passed. [Evidence](013-evidence.md) records the immutable implementation,
+source identities, CI run and scenarios. This completes the finite read-only
+repeat slice within the scope above.

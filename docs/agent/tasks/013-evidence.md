@@ -2,7 +2,11 @@
 
 Date: 2026-09-09. Platform: macOS/aarch64, Rust 1.88.0.
 Base: Task 012 main merge `e1771763fbd82ba60b830827cfed0cd436e99ad5`.
-Local checks passed. PR/Linux CI are pending; Task 013 is not yet marked complete.
+Implementation commit: `5e0416c6e67d235753b4f61ae26a5593b30092a7`.
+Linux [CI run 34333966097](https://github.com/eunhhu/ditto/actions/runs/34333966097)
+passed both `rust` and `msrv` for that commit. Subsequent completion-document
+changes preserve the source identities below. [PR #18](https://github.com/eunhhu/ditto/pull/18)
+records final-head checks and merge state.
 
 ## Tested source identity
 
