@@ -153,7 +153,7 @@ in that session. Listing adds no event and invokes no model/embedding provider.
 
 `personal` is the CLI's default session name, not a new global scope. Other
 sessions remain isolated. Deletion, automatic extraction, cross-session recall,
-and recurring model scheduling remain deferred. [ADR 0015](../adr/0015-explicit-user-memory.md)
+and model-driven memory housekeeping remain deferred. [ADR 0015](../adr/0015-explicit-user-memory.md)
 owns this command and retry contract.
 
 ## Explicit agent runs
@@ -262,7 +262,8 @@ RFC 3339 times require explicit offsets and millisecond precision; the kernel
 normalizes them to UTC. New due times must be future instants within 365 days,
 with an exclusive latest-start time at most 24 hours later. Exact normalized
 retries return the original schedule even after expiry. Changed retries return
-409; the global 100-pending limit returns 429. Unknown authority, provider,
+409; the shared global limit of 100 pending one-shots plus active repeats returns
+429. Unknown authority, provider,
 process-grant, recurrence or internal identity fields are rejected.
 
 `GET /v1/schedules` and `POST /v1/commands/schedule/cancel` use the existing
@@ -274,7 +275,7 @@ provider disabled, due time, busy runtime or dispatch), and the original `run`
 result after admission. The CLI prints failed/interrupted/missed JSON and exits
 unsuccessfully. It does not wait for a future schedule or poll in the background.
 
-All schedule events have payload version 1, task `schedule_<request_id>`, the
+These one-shot events have payload version 1, task `schedule_<request_id>`, the
 user's session, and no correlation/span. The kernel constructs actor and kind:
 
 | Event | Actor | Payload and cause |
@@ -298,7 +299,65 @@ is `interrupted` with no run result; no claim is retried automatically. A disabl
 provider can accept future intent but only expires it unless the operator later
 enables the provider. The enabled daemon can dispatch pending due work on startup.
 See [ADR 0019](../adr/0019-one-shot-scheduled-runs.md) for clock-change, power-loss,
-startup replay, recurrence and single-owner limitations.
+startup replay and single-owner limitations.
+
+## Finite recurring requests
+
+Loopback-only `POST /v1/commands/repeat` accepts the same five one-shot command
+fields plus required `every_seconds` and `occurrences`. Unknown fields are
+rejected, including authority, provider, internal progress and sort grants.
+Intervals are whole seconds from 60 through 2678400 (31 days); counts are 2
+through 1000. The first due instant must be future and the final due instant
+within 365 days of admission. Canonical millisecond start windows are positive,
+no longer than the interval or 24 hours, and never overlap. Occurrence `n` is due
+at `due_at + (n - 1) * every_seconds`, with the same anchored expiry. The fixed
+miss policy skips expired ordinals in one range and runs at most the one current
+eligible ordinal. Calendar time zones, indefinite repeats and automatic retry
+policies are not accepted inputs.
+
+`GET /v1/repeats` and `POST /v1/commands/repeat/cancel` use the existing
+session/request query. `GET /v1/repeats/active?session_id=personal` returns compact
+active headers without expanding run output. Responses contain original times,
+interval/count, `active|exhausted|cancelled`, `claimed_occurrences`,
+`missed_occurrences`, optional `next_occurrence`, `next_due_at`, `waiting_for`,
+`last_occurrence_id` and (on exact inspection) `last_occurrence`. The latter uses
+the existing `ScheduleResponse`; historical children retain their original
+schedule IDs. Exhausted means the timetable was consumed, including claims and
+misses, and can coexist with a still-running final child. It is not a work
+completion result. Repeat CLI exit success means the command/inspection succeeded;
+the nested child has the actual work status. Child status CLI retains its existing
+failed/interrupted/missed exit behavior.
+
+All repeat event payloads have version 1 and no correlation/span. Roots have
+task `repeat_<request_id>`, user actor and no cause. Transitions reference the
+original `source_event_id`, are caused by the previous parent transition, and
+carry a checkpoint `progress: {next_occurrence, claimed, missed, last_child_id}`.
+The event-store transaction verifies the derived checkpoint before commit.
+Before using cached parent progress, an exact indexed lookup verifies that no
+newer parent transition follows that checkpoint. A unique journal successor
+constraint independently rejects duplicate branches after a cache rewind.
+The original session/request identity is also unique in the journal, even if
+its derived parent row is deleted.
+
+| Event | Actor / task | Additional payload |
+| --- | --- | --- |
+| `schedule.repeat.requested` | user / parent | Original normalized `command` |
+| `schedule.repeat.skipped` | scheduler / parent | `observed_at_ms`, inclusive `from_occurrence` and `through_occurrence` |
+| `schedule.occurrence.claimed` | scheduler / `schedule_<child_id>` | `parent_request_id`, `occurrence`, private `run_request_id`, `observed_at_ms` |
+| `schedule.repeat.cancelled` | user / parent | No extra fields beyond version, source and checkpoint |
+
+An occurrence claim is also its child schedule's immutable source and claimed
+state. It references the original repeat command instead of copying its prompt.
+Parent advancement, child creation and permanent run reservation share one event
+transaction. Dispatch follows that commit. A crash in the gap leaves that child
+interrupted and never rearms it; later distinct ordinals remain authorized.
+Parent cancellation commits before signalling its active child and prevents
+future claims. Child-only cancellation uses `schedule.cancel_requested` caused by
+its occurrence claim and leaves the parent active. Identical normalized retries
+return the original series, including cancelled/exhausted state. Changed retries
+return 409; new work beyond shared capacity returns 429. Schema-6 migration and
+rebuild preserve schema-5 one-shot events. See
+[ADR 0020](../adr/0020-bounded-recurring-schedules.md).
 
 ## Model-directed sort permission
 

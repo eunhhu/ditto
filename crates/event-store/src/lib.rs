@@ -10,10 +10,11 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use thiserror::Error;
 use ulid::Ulid;
 
+pub mod recurrence;
 mod schedule;
 pub use schedule::{ScheduleEntry, ScheduleState};
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 const MIGRATION_V4: &str = r#"
 CREATE INDEX IF NOT EXISTS events_agent_sort ON events(session_id, task_id, correlation_id, seq)
@@ -503,7 +504,13 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> 
         transaction.execute_batch(MIGRATION_V4)?;
     }
     if version < 5 {
+        transaction.execute_batch(schedule::TABLE_SCHEMA)?;
         transaction.execute_batch(schedule::MIGRATION_V5)?;
+    }
+    if version < 6 {
+        transaction.execute_batch(recurrence::SCHEMA)?;
+        transaction.execute("DROP INDEX IF EXISTS events_schedules", [])?;
+        transaction.execute_batch(recurrence::SOURCE_INDEX)?;
     }
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     transaction.commit()?;

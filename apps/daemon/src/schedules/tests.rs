@@ -9,6 +9,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod repeats;
+
 fn command(delay_ms: u64) -> ScheduleRunCommand {
     let due = SystemTime::now()
         .duration_since(UNIX_EPOCH)

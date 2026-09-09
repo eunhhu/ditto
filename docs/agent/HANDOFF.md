@@ -25,14 +25,18 @@
 
 ## Canonical state
 
-- Branch: `dev/task-012-scheduled-runs`, based on main merge
-  `6060e83ab53f04098e96ae2fef8bd140e3aa0183` (Task 011, PR #16).
+- Latest slice branch: `dev/task-013-recurring-schedules`, based on main merge
+  `e1771763fbd82ba60b830827cfed0cd436e99ad5` (Task 012, PR #17).
   The user authorized merge and continued implementation and explicitly asked
-  for a Goal through completion. Task 012 local and Linux CI verification have
-  passed. [PR #17](https://github.com/eunhhu/ditto/pull/17) records the final head
-  checks and merge status. No live paid-model call was used.
+  for a Goal through completion. On 2026-09-09 the Goal was recreated for Task
+  013 implementation, verification, PR and merge. Task 012 is merged and its
+  final head passed [Linux CI](https://github.com/eunhhu/ditto/actions/runs/34072060758).
+  Task 013, including its final cache guard, passed local and Linux CI
+  verification. [PR #18](https://github.com/eunhhu/ditto/pull/18) records final-head
+  checks and merge state. No live paid-model call was used.
 - Runtime: Rust daemon and CLI.
-- Durable stores: SQLite event spine (schema 5 adds the rebuildable schedule index)
+- Durable stores: SQLite event spine (schema 6 extends rebuildable schedule indexes
+  with finite-repeat progress)
   plus local SHA-256 artifact objects. Context projection remains schema 4.
 - Public mutation ingress: typed user-input and explicit input-to-memory
   promotion commands; arbitrary event append and trusted drafts are not public
@@ -111,7 +115,36 @@
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
-## Latest verified slice: Task 012
+## Latest verified slice: Task 013
+
+- A final local review found that internally consistent old repeat checkpoints
+  could be accepted after cache rewind. A regression reproduced the stale-read
+  gap; an immutable-chain tip check and unique successor/identity constraints
+  now reject a stale checkpoint, a second branch or re-admission after deleting
+  a parent cache. The final source passed local regression and canonical checks.
+
+- [ADR 0020](../adr/0020-bounded-recurring-schedules.md) and
+  [Task 013](tasks/013-recurring-schedules.md) define finite fixed-interval
+  read-only repeats, shared future-work capacity and aggregate missed ranges.
+- The event-store projection atomically advances parent progress and creates
+  each claimed child. Existing run identities, context verification, single-slot
+  admission and scheduler wakeup handle execution and cancellation.
+- The canonical gate passed **478 tests across 47 suites**: 448 unit/integration,
+  25 compile-fail doctests and five required actual CLI scenarios. Twelve new
+  kernel tests and seven storage tests cover recurrence; the HTTP boundary and
+  actual repeat CLI add two further regression scenarios.
+- Rust 1.88 workspace/all-target check and both production daemon/CLI smoke
+  scripts passed. Disabled-provider repeat expiry creates no child/model work;
+  cancellation survives reopen. [Evidence](tasks/013-evidence.md) binds the
+  tested source trees. Linux `rust` and `msrv` passed on final implementation
+  commit `2304e81f952bb5bc536b0f83c9c389efa43b1c4d` in
+  [run 34335704096](https://github.com/eunhhu/ditto/actions/runs/34335704096).
+  Completion-document changes preserve those source trees; the PR requires
+  successful final-head checks before merge.
+- No dependency or service was added. Existing untracked `.omo/` and `.surf/`
+  directories were preserved and are outside this change.
+
+## Previous verified slice: Task 012
 
 - [ADR 0019](../adr/0019-one-shot-scheduled-runs.md) defines explicit one-shot
   read-only requests with canonical UTC millisecond due/latest-start times,

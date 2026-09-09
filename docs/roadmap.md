@@ -154,15 +154,20 @@ trajectory cannot create a permanent improvement.
 - benchmark dashboard
 - migration and backup tooling
 
-## I. Reliable scheduled work — one-shot slice implemented, recurrence pending
+## I. Reliable scheduled work — one-shot and finite repeats implemented
 
 Task 012 implements one-shot read-only requests with explicit UTC start windows,
 an indexed journal-backed queue, no housekeeping model calls, visible
 cancellation/expiry, and at-most-once restart inspection. Its local corpus covers
 restart before/during/after dispatch and the claim/admission gap. See
 [the contract](adr/0019-one-shot-scheduled-runs.md) and
-[verification evidence](agent/tasks/012-evidence.md). Recurrence and scheduled
-effect grants still require explicit contracts and their own evidence.
+[verification evidence](agent/tasks/012-evidence.md). Task 013 extends that path
+with [finite fixed-interval repeats](adr/0020-bounded-recurring-schedules.md),
+atomic occurrence claims, aggregate missed ranges and parent/child cancellation.
+Its [verification evidence](agent/tasks/013-evidence.md) includes the full local
+gate, production smoke checks and Linux CI including the final cache-rewind
+guard. Calendar cron, indefinite repetition,
+notification delivery and scheduled effect grants remain deferred.
 
 - durable one-time and recurring intent, next due time, and run identity
 - event/timer wakeup without housekeeping inference
