@@ -333,6 +333,11 @@ task `repeat_<request_id>`, user actor and no cause. Transitions reference the
 original `source_event_id`, are caused by the previous parent transition, and
 carry a checkpoint `progress: {next_occurrence, claimed, missed, last_child_id}`.
 The event-store transaction verifies the derived checkpoint before commit.
+Before using cached parent progress, an exact indexed lookup verifies that no
+newer parent transition follows that checkpoint. A unique journal successor
+constraint independently rejects duplicate branches after a cache rewind.
+The original session/request identity is also unique in the journal, even if
+its derived parent row is deleted.
 
 | Event | Actor / task | Additional payload |
 | --- | --- | --- |

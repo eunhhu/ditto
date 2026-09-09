@@ -24,7 +24,6 @@ delivery remain deferred. Existing single-owner and process-restart limits apply
 
 ## Verification state
 
-Complete. Local canonical gate, MSRV check, both production smoke scripts and
-Linux CI passed. [Evidence](013-evidence.md) records the immutable implementation,
-source identities, CI run and scenarios. This completes the finite read-only
-repeat slice within the scope above.
+The final cache-rewind guard passed the local canonical gate; fresh Linux CI is
+required before completion. [Evidence](013-evidence.md) records the tested
+source identities and scenarios for this finite read-only repeat slice.

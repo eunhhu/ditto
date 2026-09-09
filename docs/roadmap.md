@@ -165,7 +165,8 @@ restart before/during/after dispatch and the claim/admission gap. See
 with [finite fixed-interval repeats](adr/0020-bounded-recurring-schedules.md),
 atomic occurrence claims, aggregate missed ranges and parent/child cancellation.
 Its [verification evidence](agent/tasks/013-evidence.md) includes the full local
-gate, production smoke checks and Linux CI. Calendar cron, indefinite repetition,
+gate and production smoke checks; final guard changes need fresh Linux CI.
+Calendar cron, indefinite repetition,
 notification delivery and scheduled effect grants remain deferred.
 
 - durable one-time and recurring intent, next due time, and run identity

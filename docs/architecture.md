@@ -75,7 +75,10 @@ ordinal ranges advance in one arithmetic step and one event, without provider
 work. One scheduler merges both queues under a shared 100-future-intent limit.
 Each cached repeat cursor and count is checked against the original command and
 latest immutable progress checkpoint. Both indexes rebuild through the same
-streaming schedule-event sequence index. [ADR 0020](adr/0020-bounded-recurring-schedules.md)
+streaming schedule-event sequence index. An indexed journal-successor check
+requires that checkpoint to be the current chain tip, and a unique source
+constraint prevents an old cache from authorizing a second branch.
+[ADR 0020](adr/0020-bounded-recurring-schedules.md)
 defines fixed anchors, finite bounds, skipped work, parent/child cancellation and
 at-most-once recovery. Exhausting a repeat is separate from verifying its work.
 
