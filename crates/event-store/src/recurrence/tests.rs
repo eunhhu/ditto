@@ -238,6 +238,56 @@ fn cached_progress_and_child_scope_are_bound_to_immutable_records() {
 }
 
 #[test]
+fn coherent_cache_rewind_cannot_fork_the_parent_journal_chain() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("events.db");
+    let store = EventStore::open(&path).unwrap();
+    let request = requested();
+    let source = store.append(request.clone()).unwrap();
+    let initial = entry(&store, &source);
+    let child = ulid::Ulid::new().to_string();
+    let first = store
+        .append(claim(&initial, &child, &ulid::Ulid::new().to_string()))
+        .unwrap();
+    // Every field in this snapshot has valid provenance, but the snapshot is stale.
+    assert!(store.verified_repeat(&initial).is_err());
+    store.connection().unwrap().execute(
+        "UPDATE repeat_index SET last_event_id = source_event_id,next_occurrence = 1,claimed = 0,missed = 0,last_child_id = NULL,state = 'active'", []
+    ).unwrap();
+    let duplicate = ulid::Ulid::new().to_string();
+    // The journal itself also rejects a fork, even if a trusted append caller
+    // supplies the stale cache without passing through kernel verification.
+    assert!(
+        store
+            .append(claim(&initial, &duplicate, &ulid::Ulid::new().to_string()))
+            .is_err()
+    );
+    assert_eq!(store.count().unwrap(), 2);
+    assert!(
+        store
+            .schedule_entry("personal", &duplicate)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .connection()
+        .unwrap()
+        .execute("DELETE FROM repeat_index", [])
+        .unwrap();
+    // Losing the derived root must not allow the same public identity to be
+    // admitted as a second independent series either.
+    assert!(store.append(request).is_err());
+    assert_eq!(store.count().unwrap(), 2);
+    drop(store);
+    let store = EventStore::open(path).unwrap();
+    let restored = entry(&store, &source);
+    assert_eq!(restored.last_event_id, first.event_id);
+    assert_eq!(restored.claimed, 1);
+    assert_eq!(restored.next_occurrence, 2);
+    store.verified_repeat(&restored).unwrap();
+}
+
+#[test]
 fn old_schema_five_one_shots_migrate_without_rewriting_source_or_reservations() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("events.db");
@@ -313,6 +363,14 @@ fn active_headers_capacity_and_streamed_rebuild_use_indexes_without_temporary_so
         (
             "SELECT seq FROM events INDEXED BY events_schedules WHERE kind GLOB 'schedule.*' ORDER BY seq",
             vec!["events_schedules"],
+        ),
+        (
+            "SELECT 1 FROM events INDEXED BY events_repeat_successor WHERE causation_id = 'id' AND kind IN ('schedule.repeat.skipped','schedule.repeat.cancelled','schedule.occurrence.claimed')",
+            vec!["SEARCH events USING INDEX events_repeat_successor"],
+        ),
+        (
+            "SELECT 1 FROM events INDEXED BY events_repeat_identity WHERE session_id = 'personal' AND task_id = 'repeat_id' AND kind = 'schedule.repeat.requested'",
+            vec!["events_repeat_identity"],
         ),
     ] {
         let plan = db

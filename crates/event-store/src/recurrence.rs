@@ -37,6 +37,10 @@ CREATE INDEX IF NOT EXISTS repeat_active_due
 
 pub(super) const SOURCE_INDEX: &str = r#"
 CREATE INDEX IF NOT EXISTS events_schedules ON events(seq) WHERE kind GLOB 'schedule.*';
+CREATE UNIQUE INDEX IF NOT EXISTS events_repeat_identity ON events(session_id,task_id)
+    WHERE kind = 'schedule.repeat.requested';
+CREATE UNIQUE INDEX IF NOT EXISTS events_repeat_successor ON events(causation_id)
+    WHERE kind IN ('schedule.repeat.skipped','schedule.repeat.cancelled','schedule.occurrence.claimed');
 "#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,6 +292,16 @@ impl EventStore {
             {
                 return Err(EventStoreError::InvalidSchedule);
             }
+        }
+        // A consistent checkpoint can still be an old checkpoint. Only the
+        // actual tip of the immutable parent chain may authorize more work.
+        let has_successor: bool = self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events INDEXED BY events_repeat_successor
+             WHERE causation_id = ?1 AND kind IN ('schedule.repeat.skipped','schedule.repeat.cancelled','schedule.occurrence.claimed'))",
+            [&entry.last_event_id], |row| row.get(0),
+        )?;
+        if has_successor {
+            return Err(EventStoreError::InvalidSchedule);
         }
         Ok(command)
     }

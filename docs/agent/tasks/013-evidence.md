@@ -2,17 +2,15 @@
 
 Date: 2026-09-09. Platform: macOS/aarch64, Rust 1.88.0.
 Base: Task 012 main merge `e1771763fbd82ba60b830827cfed0cd436e99ad5`.
-Implementation commit: `5e0416c6e67d235753b4f61ae26a5593b30092a7`.
-Linux [CI run 34333966097](https://github.com/eunhhu/ditto/actions/runs/34333966097)
-passed both `rust` and `msrv` for that commit. Subsequent completion-document
-changes preserve the source identities below. [PR #18](https://github.com/eunhhu/ditto/pull/18)
-records final-head checks and merge state.
+Local verification below includes the final cache-rewind guard. Linux CI for
+that additional source change is pending. [PR #18](https://github.com/eunhhu/ditto/pull/18)
+records the implementation and final-head checks.
 
 ## Tested source identity
 
 | Path | Git object |
 | --- | --- |
-| `crates` | `91af4c116de4b9145ca9f3b4f4a4f102522b3f53` |
+| `crates` | `c6800efff7bc8d8795368a0f330c2ac9a978c35e` |
 | `apps` | `aadeae4e262a315cb6d56a1981fbd69f38d92852` |
 | `scripts` | `02eb437858daec7355cfdd9587317e3faa21a19d` |
 | `capabilities` | `587656a7bdb5587e2402e2e5227da23f7d7e2935` |
@@ -22,8 +20,8 @@ No dependency, service, runtime language or model adapter was added.
 
 ## Commands and results
 
-- `./scripts/agent-check.sh`: passed canary, format, strict Clippy and **476 tests
-  across 47 suites**: 446 unit/integration, 25 compile-fail doctests and five
+- `./scripts/agent-check.sh`: passed canary, format, strict Clippy and **478 tests
+  across 47 suites**: 448 unit/integration, 25 compile-fail doctests and five
   required actual CLI scenarios. The workspace run ignores those five CLI
   scenarios, then the script explicitly runs each after building the executable.
 - `cargo check --locked --workspace --all-targets`: passed with Rust 1.88.0.
@@ -36,7 +34,10 @@ No dependency, service, runtime language or model adapter was added.
 
 Commands were invoked through RTK with disposable local storage. No credentials
 or live paid-provider calls were used. The initial strict gate found an unused
-test import; it was removed and the entire gate then passed. Local transcript:
+test import; it was removed. Final review then reproduced acceptance of a
+coherent but stale parent checkpoint. The source-tip and unique journal identity/
+successor guards fix that case; the entire gate passed again on the source trees
+above. Local transcript:
 `/tmp/ditto-task013-gate.log` (ephemeral, not a repository artifact).
 
 ## Inspectable scenarios
@@ -50,13 +51,17 @@ test import; it was removed and the entire gate then passed. Local transcript:
   normalized retry identity and scope rejection; invalid time/count/index state;
   late eligibility recheck; the existing timer/slot-release wakeup; and earliest
   due selection across both queue types with repeat expiry while occupied.
+  A coherent cache rewind is rejected before any event/model admission, and
+  reopen recovers the consumed occurrence before running a distinct later one.
 - [Storage tests](../../../crates/event-store/src/recurrence/tests.rs) prove
   journal/child/cursor rollback together on rejected claims, including failure
   after the child insert; run reservation collision without cursor advance;
   source/checkpoint drift rejection; deleted-index reconstruction of claims,
   aggregate misses and cancellation; schema-5 one-shot migration without source
   rewriting; exclusive expiry arithmetic with extreme timestamps; and query
-  plans using exact/active/source indexes without a temporary sort.
+  plans using exact/active/source indexes without a temporary sort. Immutable
+  journal constraints independently reject a fork from a rewound checkpoint or
+  a second series with the same identity after deleting its parent cache.
 - [HTTP/CLI tests](../../../apps/daemon/src/schedules/tests/repeats.rs) reject
   injected authority/progress/process fields, cross-session access, changed
   retries and every repeat route on a non-loopback listener. The required actual

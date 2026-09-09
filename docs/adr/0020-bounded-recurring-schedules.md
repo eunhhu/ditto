@@ -66,6 +66,14 @@ reject malformed repeat histories; older binaries reject the newer schema. Stop
 the daemon and restore a complete compatible backup for downgrade. Never delete
 claims or decrement the schema version to make a rollback appear safe.
 
+Cached progress must also be the actual tip of the immutable parent chain. A
+unique partial source index on transition causation permits at most one successor
+per checkpoint. An exact indexed successor lookup rejects a coherent but stale
+cache before dispatch, while the journal constraint independently prevents a
+second branch even if the cache is rewound. Reopen reconstructs the current tip.
+A unique source identity index also prevents a deleted parent cache from
+admitting the same session/request as a second series.
+
 Precreating every occurrence would scale retained work with the full timetable;
 replaying every missed interval would create a restart workload and surprise
 provider charges. A separate cron service or calendar library adds maintenance

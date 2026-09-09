@@ -557,6 +557,49 @@ async fn scheduler_rechecks_repeat_window_after_verification_and_skips_when_late
 }
 
 #[tokio::test]
+async fn coherent_repeat_cache_rewind_fails_before_reexecution_and_reopen_recovers() {
+    let root = tempfile::tempdir().unwrap();
+    let cfg = config(root.path());
+    let kernel = DittoKernel::open(cfg.clone()).unwrap();
+    let repeat = repeated(2);
+    kernel.repeat_schedule(repeat.clone()).unwrap();
+    claim_without_admission(&kernel, &repeat);
+    let count = kernel.event_count().unwrap();
+    let db = rusqlite::Connection::open(cfg.data_dir.join("state.db")).unwrap();
+    db.execute("UPDATE repeat_index SET last_event_id = source_event_id,next_occurrence = 1,claimed = 0,missed = 0,last_child_id = NULL,state = 'active'", []).unwrap();
+    drop(db);
+    let driver = Driver::new(false);
+    let dyn_driver: Arc<dyn ModelDriver> = driver.clone();
+    assert!(matches!(
+        kernel.inspect_repeat(query(&repeat)),
+        Err(AgentRunError::Storage)
+    ));
+    assert!(matches!(
+        kernel.scheduler_step(Some(&dyn_driver), || due(&repeat, 1)),
+        Err(AgentRunError::Storage)
+    ));
+    assert_eq!(kernel.event_count().unwrap(), count);
+    assert_eq!(driver.calls.load(Ordering::SeqCst), 0);
+    drop(kernel);
+    let kernel = DittoKernel::open(cfg).unwrap();
+    let restored = kernel.inspect_repeat(query(&repeat)).unwrap();
+    assert_eq!(restored.claimed_occurrences, 1);
+    assert_eq!(restored.next_occurrence, Some(2));
+    assert_eq!(
+        restored.last_occurrence.unwrap().status,
+        ScheduleStatus::Interrupted
+    );
+    kernel
+        .scheduler_step(Some(&dyn_driver), || due(&repeat, 2))
+        .unwrap();
+    assert_eq!(
+        last_terminal(&kernel, &repeat).await.status,
+        ScheduleStatus::Unverified
+    );
+    assert_eq!(driver.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn existing_owner_timer_and_slot_release_drive_repeats_without_a_second_loop() {
     let root = tempfile::tempdir().unwrap();
     let kernel = DittoKernel::open(config(root.path())).unwrap();
