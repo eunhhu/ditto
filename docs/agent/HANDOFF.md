@@ -31,10 +31,9 @@
   for a Goal through completion. On 2026-09-09 the Goal was recreated for Task
   013 implementation, verification, PR and merge. Task 012 is merged and its
   final head passed [Linux CI](https://github.com/eunhhu/ditto/actions/runs/34072060758).
-  Task 013's original implementation passed local/Linux CI. Its final cache
-  guard passed local verification and needs fresh Linux CI before merge.
-  [PR #18](https://github.com/eunhhu/ditto/pull/18) records those checks. No live
-  paid-model call was used.
+  Task 013, including its final cache guard, passed local and Linux CI
+  verification. [PR #18](https://github.com/eunhhu/ditto/pull/18) records final-head
+  checks and merge state. No live paid-model call was used.
 - Runtime: Rust daemon and CLI.
 - Durable stores: SQLite event spine (schema 6 extends rebuildable schedule indexes
   with finite-repeat progress)
@@ -116,7 +115,7 @@
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
-## Current slice: Task 013 (final guard awaiting Linux CI)
+## Latest verified slice: Task 013
 
 - A final local review found that internally consistent old repeat checkpoints
   could be accepted after cache rewind. A regression reproduced the stale-read
@@ -137,7 +136,10 @@
 - Rust 1.88 workspace/all-target check and both production daemon/CLI smoke
   scripts passed. Disabled-provider repeat expiry creates no child/model work;
   cancellation survives reopen. [Evidence](tasks/013-evidence.md) binds the
-  tested source trees. Linux CI for the final guard is pending; the PR requires
+  tested source trees. Linux `rust` and `msrv` passed on final implementation
+  commit `2304e81f952bb5bc536b0f83c9c389efa43b1c4d` in
+  [run 34335704096](https://github.com/eunhhu/ditto/actions/runs/34335704096).
+  Completion-document changes preserve those source trees; the PR requires
   successful final-head checks before merge.
 - No dependency or service was added. Existing untracked `.omo/` and `.surf/`
   directories were preserved and are outside this change.

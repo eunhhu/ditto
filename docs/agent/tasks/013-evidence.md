@@ -2,9 +2,12 @@
 
 Date: 2026-09-09. Platform: macOS/aarch64, Rust 1.88.0.
 Base: Task 012 main merge `e1771763fbd82ba60b830827cfed0cd436e99ad5`.
-Local verification below includes the final cache-rewind guard. Linux CI for
-that additional source change is pending. [PR #18](https://github.com/eunhhu/ditto/pull/18)
-records the implementation and final-head checks.
+Final implementation commit: `2304e81f952bb5bc536b0f83c9c389efa43b1c4d`.
+Linux [CI run 34335704096](https://github.com/eunhhu/ditto/actions/runs/34335704096)
+passed both `rust` and `msrv` for that commit, including the final cache-rewind
+guard. Subsequent completion-document changes preserve the source identities
+below. [PR #18](https://github.com/eunhhu/ditto/pull/18) records final-head checks
+and merge state.
 
 ## Tested source identity
 
