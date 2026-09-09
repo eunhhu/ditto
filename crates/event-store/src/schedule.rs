@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{EventStore, EventStoreError, raw_event_record_from_row};
 
-pub(super) const MIGRATION_V5: &str = r#"
+pub(super) const TABLE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schedule_index (
     session_id TEXT NOT NULL,
     request_id TEXT NOT NULL,
@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS schedule_index (
 );
 CREATE INDEX IF NOT EXISTS schedule_pending ON schedule_index(due_at_ms,session_id,request_id)
     WHERE state = 'pending';
+"#;
+
+pub(super) const MIGRATION_V5: &str = r#"
 CREATE INDEX IF NOT EXISTS events_schedules ON events(seq)
     WHERE kind IN ('schedule.requested','schedule.claimed','schedule.cancel_requested',
                    'schedule.cancelled','schedule.missed');
@@ -136,17 +139,19 @@ fn lookup(
 }
 
 pub(super) fn is_schedule_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "schedule.requested"
-            | "schedule.claimed"
-            | "schedule.cancel_requested"
-            | "schedule.cancelled"
-            | "schedule.missed"
-    )
+    kind.starts_with("schedule.")
 }
 
 pub(super) fn project(db: &Connection, event: &EventRecord) -> Result<(), EventStoreError> {
+    if matches!(
+        event.kind.as_str(),
+        crate::recurrence::REPEAT_REQUESTED
+            | crate::recurrence::REPEAT_SKIPPED
+            | crate::recurrence::REPEAT_CANCELLED
+            | crate::recurrence::OCCURRENCE_CLAIMED
+    ) {
+        return crate::recurrence::project(db, event);
+    }
     let invalid = || EventStoreError::InvalidSchedule;
     let session = event.session_id.as_deref().ok_or_else(invalid)?;
     let request = event
@@ -176,12 +181,7 @@ pub(super) fn project(db: &Connection, event: &EventRecord) -> Result<(), EventS
         {
             return Err(invalid());
         }
-        let pending: i64 = db.query_row(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM schedule_index WHERE state = 'pending' LIMIT ?1)",
-            [MAX_PENDING_SCHEDULES as i64],
-            |row| row.get(0),
-        )?;
-        if pending >= MAX_PENDING_SCHEDULES as i64 {
+        if crate::recurrence::future_count(db)? >= MAX_PENDING_SCHEDULES {
             return Err(invalid());
         }
         db.execute(
@@ -224,12 +224,15 @@ pub(super) fn project(db: &Connection, event: &EventRecord) -> Result<(), EventS
 /// Event history is the authority even when this compact index is lost.
 pub(super) fn rebuild(db: &mut Connection) -> Result<(), EventStoreError> {
     let tx = db.transaction()?;
-    tx.execute_batch(MIGRATION_V5)?;
+    tx.execute_batch(TABLE_SCHEMA)?;
+    tx.execute_batch(crate::recurrence::SCHEMA)?;
+    tx.execute_batch(crate::recurrence::SOURCE_INDEX)?;
+    tx.execute("DELETE FROM repeat_index", [])?;
     tx.execute("DELETE FROM schedule_index", [])?;
     {
         let mut stmt = tx.prepare(
             "SELECT seq,event_id,recorded_at,session_id,task_id,actor,kind,payload_json,causation_id,correlation_id,span_id
-             FROM events INDEXED BY events_schedules WHERE kind IN ('schedule.requested','schedule.claimed','schedule.cancel_requested','schedule.cancelled','schedule.missed') ORDER BY seq",
+             FROM events INDEXED BY events_schedules WHERE kind GLOB 'schedule.*' ORDER BY seq",
         )?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -305,7 +308,7 @@ mod tests {
                     "SEARCH schedule_index",
                 ),
                 (
-                    "EXPLAIN QUERY PLAN SELECT seq FROM events INDEXED BY events_schedules WHERE kind IN ('schedule.requested','schedule.claimed','schedule.cancel_requested','schedule.cancelled','schedule.missed') ORDER BY seq",
+                    "EXPLAIN QUERY PLAN SELECT seq FROM events INDEXED BY events_schedules WHERE kind GLOB 'schedule.*' ORDER BY seq",
                     "events_schedules",
                 ),
             ] {

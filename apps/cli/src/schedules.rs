@@ -22,15 +22,7 @@ pub(super) async fn create(
     api: &str,
     args: ScheduleArgs,
 ) -> anyhow::Result<()> {
-    let request_id = args
-        .request_id
-        .unwrap_or_else(|| ulid::Ulid::new().to_string());
-    // Decode through the wire contract without adding another date parser.
-    let command: ditto_protocol::ScheduleRunCommand = serde_json::from_value(serde_json::json!({
-        "request_id":request_id,"session_id":args.session,"text":args.text,
-        "due_at":args.at,"expires_at":args.expires,
-    }))
-    .context("--at and --expires require RFC 3339 timestamps with an explicit offset")?;
+    let command = command(args)?;
     eprintln!(
         "Schedule request: {} (session: {}). Execution requires an explicitly enabled daemon provider.",
         command.request_id, command.session_id
@@ -40,6 +32,19 @@ pub(super) async fn create(
         .json(&command);
     show(response).await
 }
+pub(super) fn command(args: ScheduleArgs) -> anyhow::Result<ditto_protocol::ScheduleRunCommand> {
+    let request_id = args
+        .request_id
+        .unwrap_or_else(|| ulid::Ulid::new().to_string());
+    // Decode through the wire contract without adding another date parser.
+    let command: ditto_protocol::ScheduleRunCommand = serde_json::from_value(serde_json::json!({
+        "request_id":request_id,"session_id":args.session,"text":args.text,
+        "due_at":args.at,"expires_at":args.expires,
+    }))
+    .context("--at and --expires require RFC 3339 timestamps with an explicit offset")?;
+    Ok(command)
+}
+
 pub(super) async fn inspect(
     client: &reqwest::Client,
     api: &str,
@@ -73,7 +78,7 @@ pub(super) async fn pending(
     ))
     .await
 }
-async fn show(request: reqwest::RequestBuilder) -> anyhow::Result<()> {
+pub(super) async fn show(request: reqwest::RequestBuilder) -> anyhow::Result<()> {
     let response = request
         .timeout(Duration::from_secs(30))
         .send()
