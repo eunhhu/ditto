@@ -5,11 +5,21 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-Task 012 is complete. Next, define recurring schedule semantics on the verified
-one-shot path: per-occurrence identity, missed occurrences, bounded catch-up and
-cancellation. Keep the existing journal/runtime and avoid periodic model calls.
+Task 013 is complete. Next, establish the minimum task-status/approval experience
+and reproducible RAM, latency, cost and repeated-use baselines before claiming the
+first personal-agent milestone. Start with the existing CLI/status and explicit
+permission paths; close observed usability gaps and measure required work versus
+Ditto-added work before adding another runtime surface or infrastructure.
 
 ## Completed
+
+- [`013 Bounded recurring schedules`](tasks/013-recurring-schedules.md): finite
+  anchored intervals, independent occurrence identities, atomic parent/child
+  claims, aggregate missed ranges, shared queue/slot ownership and durable
+  parent/child cancellation. Immutable identity/successor constraints reject
+  cache rewind and duplicate roots. Reopen never retries a consumed occurrence;
+  original child results remain inspectable. No new dependency, service or
+  housekeeping model call. See [verification evidence](tasks/013-evidence.md).
 
 - [`012 One-shot scheduled requests and restart recovery`](tasks/012-scheduled-runs.md):
   explicit due/latest-start times, journal-backed bounded pending index, one
@@ -98,9 +108,8 @@ cancellation. Keep the existing journal/runtime and avoid periodic model calls.
 
 ## Later
 
-- bounded recurring execution using the verified one-shot scheduling foundation;
-- minimum task-status/approval experience and reproducible RAM, latency, cost,
-  and repeated-use baselines before claiming the first personal-agent milestone;
+- calendar recurrence, notification delivery and scheduled effect grants only
+  after their product need and policy contracts are defined;
 - batched, compact rerank pools and descriptor/hash caching before a production
   embedding worker;
 - device registry, SSH placement, and expanded gateway integrations after the

@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
 mod memory;
+mod repeats;
 mod runs;
 mod schedules;
 mod sorts;
@@ -18,6 +19,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Repeat a read-only request at a fixed interval for a finite number of occurrences.
+    Repeat(repeats::RepeatArgs),
+    /// Inspect repeat progress and the latest occurrence result.
+    RepeatStatus(runs::RunIdentity),
+    /// Stop future occurrences and cancel this repeat's active execution.
+    RepeatCancel(runs::RunIdentity),
+    /// List active repeat definitions without loading their run outputs.
+    RepeatList {
+        #[arg(long, default_value = "personal")]
+        session: String,
+    },
     /// Schedule one future read-only model request; return after durable acceptance.
     Schedule(schedules::ScheduleArgs),
     /// Inspect a schedule and its original execution result.
@@ -84,6 +96,10 @@ async fn main() -> anyhow::Result<()> {
     let api = cli.api.trim_end_matches('/');
 
     match cli.command {
+        Command::Repeat(args) => repeats::create(&client, api, args).await?,
+        Command::RepeatStatus(identity) => repeats::inspect(&client, api, identity).await?,
+        Command::RepeatCancel(identity) => repeats::cancel(&client, api, identity).await?,
+        Command::RepeatList { session } => repeats::active(&client, api, session).await?,
         Command::Schedule(args) => schedules::create(&client, api, args).await?,
         Command::ScheduleStatus(identity) => schedules::inspect(&client, api, identity).await?,
         Command::ScheduleCancel(identity) => schedules::cancel(&client, api, identity).await?,

@@ -43,7 +43,9 @@ pub enum AgentRunError {
     Conflict,
     #[error("another run is active; no work was queued")]
     Busy,
-    #[error("pending schedule limit (100) reached; cancel a pending request before adding another")]
+    #[error(
+        "future schedule limit (100) reached; cancel a pending request or active repeat before adding another"
+    )]
     ScheduleFull,
     #[error("runtime is shutting down")]
     Stopping,

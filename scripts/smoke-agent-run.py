@@ -103,6 +103,14 @@ def main():
                 assert accepted["status"] == "pending"
                 assert accepted["waiting_for"] == "provider_disabled"
                 assert len(json.loads(run("schedule-list").stdout)) == 1
+                repeat_id = "01K00000000000000000000025"
+                repeat_args = ("repeat", "repeated read-only request", "--request-id", repeat_id,
+                    "--at", due.isoformat(timespec="milliseconds"),
+                    "--expires", expires.isoformat(timespec="milliseconds"),
+                    "--every-seconds", "60", "--occurrences", "1000")
+                repeated = json.loads(run(*repeat_args).stdout)
+                assert repeated["status"] == "active" and repeated["claimed_occurrences"] == 0
+                assert repeated["waiting_for"] == "provider_disabled"
                 stop()
                 time.sleep(max(0, expires.timestamp() - time.time()) + 0.05)
                 start()
@@ -118,14 +126,38 @@ def main():
                     time.sleep(0.01)
                 assert json.loads(run(*schedule_args, success=False).stdout)["status"] == "missed"
                 assert json.loads(run("schedule-list").stdout) == []
+                deadline = time.monotonic() + 5
+                while True:
+                    repeated = json.loads(run("repeat-status", repeat_id).stdout)
+                    if repeated["missed_occurrences"] == 1:
+                        break
+                    assert time.monotonic() < deadline, repeated
+                    time.sleep(0.01)
+                assert repeated["status"] == "active" and repeated["next_occurrence"] == 2
+                assert repeated["claimed_occurrences"] == 0 and "last_occurrence_id" not in repeated
+                before_retry = health()["durable_events"]
+                assert json.loads(run(*repeat_args).stdout) == repeated
+                assert health()["durable_events"] == before_retry
+                assert len(json.loads(run("repeat-list").stdout)) == 1
+                cancelled = json.loads(run("repeat-cancel", repeat_id).stdout)
+                assert cancelled["status"] == "cancelled" and "next_due_at" not in cancelled
+                assert json.loads(run("repeat-list").stdout) == []
+                stop()
+                start()
+                assert json.loads(run("repeat-status", repeat_id).stdout) == cancelled
                 events = json.loads(run("events", "--limit", "1000").stdout)
                 assert not any(event["kind"] == "model.requested" for event in events)
+                assert not any(event["kind"] == "schedule.occurrence.claimed" for event in events)
+                skipped = [event for event in events if event["kind"] == "schedule.repeat.skipped"]
+                assert len(skipped) == 1
+                assert skipped[0]["payload"]["from_occurrence"] == skipped[0]["payload"]["through_occurrence"] == 1
                 stop()
                 print(json.dumps({"result": "passed", "scenarios": [
                     "disabled run has no durable admission", "disabled sort attachment has no artifact or admission", "recoverable CLI request ID",
                     "missing run inspection/cancellation", "record-only input",
                     "SIGTERM with open SSE follower", "restart preserves memory and does not run rejected work",
-                    "disabled schedule survives downtime and expires without model calls", "expired schedule retry does not requeue"
+                    "disabled schedule survives downtime and expires without model calls", "expired schedule retry does not requeue",
+                    "repeat skips expired work without child creation or model calls", "repeat cancellation survives restart"
                 ]}))
             finally:
                 stop()
