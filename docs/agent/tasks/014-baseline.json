@@ -1,0 +1,583 @@
+{
+  "binary_resolution": "exact named compiler-artifact executables from Cargo JSON; inherited target configuration",
+  "binary_sha256": {
+    "cli": "cef0664c5ac84e53d6331035ff25e8e483f87596dced23bccdc26176d1a3676d",
+    "fixture_test_executable": "29fa00184a68afd058d3b2ef78f7d6a97e1f279008e8598df3761ca1da19b903",
+    "production_daemon": "a76bb95855912e074e958abe94eccafddc6c8ed77ee5b131c5af9de0e7ce09e5"
+  },
+  "build_profile": "debug, default features, offline locked",
+  "capability_packages": 3,
+  "cpu_count": 4,
+  "git_head": "786a0587bdfed175579289309f9a938bb63f7424",
+  "hardware": {
+    "cpu_description": "0xd0b",
+    "memory_total_bytes": 8454029312
+  },
+  "limits": "small fixed catalogue/history; no long-use quality, learning, live-provider, child-process peak RAM or comparative performance claim",
+  "machine": "aarch64",
+  "model_settings": "disabled production / deterministic injected zero-delay sort-then-answer fixture; usage absent; no credentials",
+  "platform": "Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41",
+  "python": "3.13.5",
+  "results": [
+    {
+      "ditto_only_overhead_ms": null,
+      "final_ram": {
+        "peak_rss_bytes": 19677184,
+        "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+        "rss_bytes": 19677184
+      },
+      "first_useful_progress_ms": null,
+      "idle_model_calls": 0,
+      "idle_ram": {
+        "peak_rss_bytes": 18939904,
+        "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+        "rss_bytes": 18939904
+      },
+      "idle_seconds": 1.0,
+      "idle_tool_calls": 0,
+      "isolated_model_time_ms": null,
+      "isolated_tool_time_ms": null,
+      "label": "production daemon; provider disabled",
+      "latency": {
+        "exact_retry_cli_ms": {
+          "method": "nearest rank; CLI spawn through terminal output; no warmup discarded",
+          "p50_ms": 5.6616420042701066,
+          "p95_ms": 5.6616420042701066,
+          "samples_ms": [
+            5.6616420042701066
+          ]
+        },
+        "recovered_status_cli_ms": {
+          "method": "nearest rank; CLI spawn through terminal output; no warmup discarded",
+          "p50_ms": 5.345883022528142,
+          "p95_ms": 5.345883022528142,
+          "samples_ms": [
+            5.345883022528142
+          ]
+        },
+        "sort_cli_ms": {
+          "method": "nearest rank; CLI spawn through terminal output; no warmup discarded",
+          "p50_ms": 55.013181001413614,
+          "p95_ms": 59.63062000228092,
+          "samples_ms": [
+            59.63062000228092,
+            54.66094001894817,
+            55.013181001413614,
+            54.36984804691747,
+            58.728139963932335,
+            58.67193598533049,
+            58.79565799841657,
+            54.550255998037755,
+            58.43412195099518,
+            54.84145897207782,
+            54.4644589535892,
+            58.70886199409142
+          ]
+        }
+      },
+      "model_answer_quality": null,
+      "recovery_evidence": {
+        "disabled_schedule_expired_without_model": true,
+        "exact_retry_no_new_events": true,
+        "repeat_cancellation_survives_restart": true,
+        "terminal_result_survives_restart": true
+      },
+      "repeated_use_ram": [
+        {
+          "completed_requests": 1,
+          "durable_events": 6,
+          "peak_rss_bytes": 20758528,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 20758528
+        },
+        {
+          "completed_requests": 2,
+          "durable_events": 11,
+          "peak_rss_bytes": 21168128,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21168128
+        },
+        {
+          "completed_requests": 3,
+          "durable_events": 16,
+          "peak_rss_bytes": 21331968,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21331968
+        },
+        {
+          "completed_requests": 4,
+          "durable_events": 21,
+          "peak_rss_bytes": 21397504,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21397504
+        },
+        {
+          "completed_requests": 5,
+          "durable_events": 26,
+          "peak_rss_bytes": 21479424,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21479424
+        },
+        {
+          "completed_requests": 6,
+          "durable_events": 31,
+          "peak_rss_bytes": 21512192,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21512192
+        },
+        {
+          "completed_requests": 7,
+          "durable_events": 36,
+          "peak_rss_bytes": 21528576,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21528576
+        },
+        {
+          "completed_requests": 8,
+          "durable_events": 41,
+          "peak_rss_bytes": 21544960,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21544960
+        },
+        {
+          "completed_requests": 9,
+          "durable_events": 46,
+          "peak_rss_bytes": 21561344,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21561344
+        },
+        {
+          "completed_requests": 10,
+          "durable_events": 51,
+          "peak_rss_bytes": 21577728,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21577728
+        },
+        {
+          "completed_requests": 11,
+          "durable_events": 56,
+          "peak_rss_bytes": 21594112,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21594112
+        },
+        {
+          "completed_requests": 12,
+          "durable_events": 61,
+          "peak_rss_bytes": 21610496,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21610496
+        }
+      ],
+      "repeated_work_accounting": {
+        "cost_basis": "offline disabled/injected drivers; no external provider calls; no live pricing or usage assumed",
+        "event_counts": {
+          "artifact.created": 24,
+          "runtime.started": 1,
+          "sort.requested": 12,
+          "sort.started": 12,
+          "task.completed": 12
+        },
+        "external_provider_spend_usd": 0,
+        "live_equivalent_cost_usd": 0,
+        "model_requests": 0,
+        "model_tokens": 0,
+        "token_basis": "fixture emits no usage; tokens unavailable for model requests",
+        "tool_count_basis": "durable dispatch records, not model intent or OS syscall tracing",
+        "tool_executions": 12,
+        "total_operating_cost_usd": null
+      },
+      "startup_and_recovery_ms": [
+        23.65977002773434,
+        22.254272014833987,
+        22.23269798560068
+      ],
+      "startup_model_calls": 0,
+      "startup_ram": {
+        "peak_rss_bytes": 18726912,
+        "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+        "rss_bytes": 18726912
+      },
+      "startup_timing_basis": "spawn to first successful health; 10 ms polling; includes HTTP readiness probe",
+      "startup_tool_calls": 0,
+      "storage_bytes": 2884142,
+      "unavailable_basis": "no live model/usage/prices or isolated timing instrumentation; CLI exposes terminal answers; no quality inference",
+      "verified_sort_requests": 12,
+      "whole_workload_accounting": {
+        "cost_basis": "offline disabled/injected drivers; no external provider calls; no live pricing or usage assumed",
+        "event_counts": {
+          "artifact.created": 26,
+          "runtime.started": 3,
+          "schedule.missed": 1,
+          "schedule.repeat.cancelled": 1,
+          "schedule.repeat.requested": 1,
+          "schedule.repeat.skipped": 1,
+          "schedule.requested": 1,
+          "sort.requested": 13,
+          "sort.started": 13,
+          "task.completed": 13
+        },
+        "external_provider_spend_usd": 0,
+        "live_equivalent_cost_usd": 0,
+        "model_requests": 0,
+        "model_tokens": 0,
+        "token_basis": "fixture emits no usage; tokens unavailable for model requests",
+        "tool_count_basis": "durable dispatch records, not model intent or OS syscall tracing",
+        "tool_executions": 13,
+        "total_operating_cost_usd": null
+      }
+    },
+    {
+      "ditto_only_overhead_ms": null,
+      "final_ram": {
+        "peak_rss_bytes": 23461888,
+        "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+        "rss_bytes": 23461888
+      },
+      "first_useful_progress_ms": null,
+      "idle_model_calls": 0,
+      "idle_ram": {
+        "peak_rss_bytes": 18726912,
+        "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+        "rss_bytes": 18726912
+      },
+      "idle_seconds": 1.0,
+      "idle_tool_calls": 0,
+      "isolated_model_time_ms": null,
+      "isolated_tool_time_ms": null,
+      "label": "fixture-backed test server",
+      "latency": {
+        "exact_retry_cli_ms": {
+          "method": "nearest rank; CLI spawn through terminal output; no warmup discarded",
+          "p50_ms": 10.48254402121529,
+          "p95_ms": 10.48254402121529,
+          "samples_ms": [
+            10.48254402121529
+          ]
+        },
+        "model_sort_cli_ms": {
+          "method": "nearest rank; CLI spawn through terminal output; no warmup discarded",
+          "p50_ms": 74.99014103086665,
+          "p95_ms": 142.78190000914037,
+          "samples_ms": [
+            88.10475596692413,
+            85.98833199357614,
+            80.44370799325407,
+            75.04626997979358,
+            74.35852999333292,
+            74.99014103086665,
+            74.82176995836198,
+            74.424548947718,
+            74.71612200606614,
+            78.53511796565726,
+            142.78190000914037,
+            74.77323297644034
+          ]
+        },
+        "recovered_status_cli_ms": {
+          "method": "nearest rank; CLI spawn through terminal output; no warmup discarded",
+          "p50_ms": 10.544580989517272,
+          "p95_ms": 10.544580989517272,
+          "samples_ms": [
+            10.544580989517272
+          ]
+        }
+      },
+      "model_answer_quality": null,
+      "recovery_evidence": {
+        "active_owner_loss_interrupted_without_retry": true,
+        "exact_retry_no_new_events": true,
+        "pending_work_dispatched_after_restart": true,
+        "repeat_cancellation_survives_restart": true,
+        "scheduled_restart_boundary": {
+          "claims_after_restart": 2,
+          "claims_before_shutdown": 0,
+          "first_process_scheduler_driver": "disabled (test-only)",
+          "injected_driver_calls_after_restart": 2,
+          "last_seq_before_shutdown": 228,
+          "model_requests_after_restart": 2,
+          "work_event_sequences_after_restart": [
+            229,
+            233,
+            237,
+            241
+          ]
+        },
+        "terminal_result_survives_restart": true
+      },
+      "repeated_use_ram": [
+        {
+          "completed_requests": 1,
+          "durable_events": 17,
+          "peak_rss_bytes": 21741568,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21741568
+        },
+        {
+          "completed_requests": 2,
+          "durable_events": 34,
+          "peak_rss_bytes": 21807104,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21807104
+        },
+        {
+          "completed_requests": 3,
+          "durable_events": 51,
+          "peak_rss_bytes": 21872640,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21872640
+        },
+        {
+          "completed_requests": 4,
+          "durable_events": 68,
+          "peak_rss_bytes": 21921792,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21921792
+        },
+        {
+          "completed_requests": 5,
+          "durable_events": 85,
+          "peak_rss_bytes": 21987328,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 21987328
+        },
+        {
+          "completed_requests": 6,
+          "durable_events": 102,
+          "peak_rss_bytes": 22036480,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 22036480
+        },
+        {
+          "completed_requests": 7,
+          "durable_events": 119,
+          "peak_rss_bytes": 22085632,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 22085632
+        },
+        {
+          "completed_requests": 8,
+          "durable_events": 136,
+          "peak_rss_bytes": 22134784,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 22134784
+        },
+        {
+          "completed_requests": 9,
+          "durable_events": 153,
+          "peak_rss_bytes": 22167552,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 22167552
+        },
+        {
+          "completed_requests": 10,
+          "durable_events": 170,
+          "peak_rss_bytes": 22200320,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 22200320
+        },
+        {
+          "completed_requests": 11,
+          "durable_events": 187,
+          "peak_rss_bytes": 22249472,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 22249472
+        },
+        {
+          "completed_requests": 12,
+          "durable_events": 204,
+          "peak_rss_bytes": 22282240,
+          "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+          "rss_bytes": 22282240
+        }
+      ],
+      "repeated_work_accounting": {
+        "cost_basis": "offline disabled/injected drivers; no external provider calls; no live pricing or usage assumed",
+        "event_counts": {
+          "agent.sort.output": 12,
+          "agent.sort.requested": 12,
+          "agent.sort.started": 12,
+          "artifact.created": 24,
+          "capabilities.selected": 12,
+          "context.compiled": 12,
+          "input.received": 12,
+          "model.output": 72,
+          "model.requested": 24,
+          "turn.finished": 12
+        },
+        "external_provider_spend_usd": 0,
+        "live_equivalent_cost_usd": null,
+        "model_requests": 24,
+        "model_tokens": null,
+        "token_basis": "fixture emits no usage; tokens unavailable for model requests",
+        "tool_count_basis": "durable dispatch records, not model intent or OS syscall tracing",
+        "tool_executions": 12,
+        "total_operating_cost_usd": null
+      },
+      "startup_and_recovery_ms": [
+        22.254401992540807,
+        43.103897012770176,
+        43.08528604451567
+      ],
+      "startup_model_calls": 0,
+      "startup_ram": {
+        "peak_rss_bytes": 18661376,
+        "reason": "Linux VmRSS/VmHWM; server process only, excludes CLI and sort children",
+        "rss_bytes": 18661376
+      },
+      "startup_timing_basis": "spawn to first successful health; 10 ms polling; includes HTTP readiness probe",
+      "startup_tool_calls": 0,
+      "storage_bytes": 5111395,
+      "unavailable_basis": "no live model/usage/prices or isolated timing instrumentation; CLI exposes terminal answers; no quality inference",
+      "verified_sort_requests": 12,
+      "whole_workload_accounting": {
+        "cost_basis": "offline disabled/injected drivers; no external provider calls; no live pricing or usage assumed",
+        "event_counts": {
+          "agent.sort.output": 13,
+          "agent.sort.requested": 13,
+          "agent.sort.started": 13,
+          "artifact.created": 28,
+          "capabilities.selected": 16,
+          "context.compiled": 16,
+          "input.received": 16,
+          "model.output": 82,
+          "model.requested": 29,
+          "schedule.claimed": 1,
+          "schedule.occurrence.claimed": 1,
+          "schedule.repeat.cancelled": 1,
+          "schedule.repeat.requested": 1,
+          "schedule.requested": 1,
+          "sort.requested": 1,
+          "sort.started": 1,
+          "task.completed": 1,
+          "turn.finished": 15
+        },
+        "external_provider_spend_usd": 0,
+        "injected_driver_calls": 29,
+        "live_equivalent_cost_usd": null,
+        "model_requests": 29,
+        "model_tokens": null,
+        "token_basis": "fixture emits no usage; tokens unavailable for model requests",
+        "tool_count_basis": "durable dispatch records, not model intent or OS syscall tracing",
+        "tool_executions": 14,
+        "total_operating_cost_usd": null
+      }
+    }
+  ],
+  "rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)",
+  "samples": 12,
+  "schema": 1,
+  "source_sha256": {
+    "Cargo.lock": "bfba995201b9dbb9b835033f5fbd33005b65a272cd008d5d3a45cf423e274ee6",
+    "Cargo.toml": "8b42043d81d40db26145bda284d03fe8e03cc609af777c5b360e4b9f7fc6e76b",
+    "apps/cli/Cargo.toml": "66eb39bd10d4ba5590d2c8cf891c45699cd4793428f91fbd95067b8aca9d5301",
+    "apps/cli/src/main.rs": "e59c344d0ae80564c5c816c14b098c053d7acf10ede3471a85f23ffb4e81f44b",
+    "apps/cli/src/memory.rs": "52698d64a8c92ea8d635c3994b8f63eabaf3e8cec828c831d45a6a9aa79a4ed4",
+    "apps/cli/src/presentation.rs": "00dfa9c76ad298384524660b6e5a3513af81603614eb1c1316a982821fc1c42a",
+    "apps/cli/src/repeats.rs": "847d163ba714e90f038ca6027961dcbaa03352114c0259757a80b97db46420a6",
+    "apps/cli/src/runs.rs": "f430b94c23b1598680c51baa9e0f746ee0841485d87e4fa15057f249b471fbd7",
+    "apps/cli/src/schedules.rs": "c7f3c2bdaf9b3deb4654914beba3fc22575284078a4c8430746ce9adeaf5e135",
+    "apps/cli/src/sorts.rs": "efcc34d97b0483e70eb6b2b7ae829533197b03ed0c001686fa76071e74b2a958",
+    "apps/cli/tests/human.rs": "bf88fcd0b6e4444abcaa85244daa09fcca52739dc9159fbb46fc12b8e5893ed9",
+    "apps/daemon/Cargo.toml": "ca9da98e452f5c88debec14d0dec935e57e467b3eddb85ce2551052f8a72d3ca",
+    "apps/daemon/src/baseline.rs": "02cb36f5dc3e9de47c777c95830b9580a0130f5d5b7285b36fe5ab51232b240c",
+    "apps/daemon/src/main.rs": "4a4a694276dd75c61efb897ee2b30d7ef84aea20cff5cdaffb3b65f645d603ab",
+    "apps/daemon/src/memory.rs": "f5ffdc473cf6904b1f6d788f67e757c262dd8752908a444f95de08b801f9936f",
+    "apps/daemon/src/runs.rs": "415d420b099c4386cf81307dcb53a4e0c99f7aeb500972669fe501d5e686fcc6",
+    "apps/daemon/src/schedules.rs": "05acf2a941070032cfc7a0ed3b322b456a673aed678e08a1f5f493842c6caeba",
+    "apps/daemon/src/schedules/tests.rs": "ccbc13c460b26aa1b2176eaf41522af1f77170d27faabfa3761e6545e70501ae",
+    "apps/daemon/src/schedules/tests/repeats.rs": "0ae8a41ba7676512822117659a109c1c3fe8d12ed050a1b0c60f8cdff89ecfe8",
+    "apps/daemon/src/sorts.rs": "c37a997e950023ec34281d0562c4c1bf1884d574846b12baf704d9ae73bb5598",
+    "capabilities/core/artifact-read/capability.header.json": "82f0d1c3e2273dcf5f59b0a6cd67a3ea9fb0dce0a47de5ec7c8b9b763167275f",
+    "capabilities/core/artifact-read/capability.toml": "9687f14b7059c5707ed5be8bdbf09beb5546293536885e41333672b9f2f11ffb",
+    "capabilities/core/artifact-sort/capability.header.json": "dfd62b89561446bfe15b031086216c59081446e7033c08ec46fd0b93d7a07f04",
+    "capabilities/core/artifact-sort/capability.toml": "959ea052b73a514a006acda3887d474190ccfbc9ede3f5a91bcd0a78db25789b",
+    "capabilities/core/device-process-run/capability.header.json": "7dab9e93ba5eeff5f2c9c8263c0c13a1f5825ca72c651c2abc17151a043bfc0f",
+    "capabilities/core/device-process-run/capability.toml": "c4729a7fe177a708c6dfa1978b6e71fee5b17077303f5d72f1431ef26b43217b",
+    "crates/artifact-read/Cargo.toml": "4aadc5941de70d5c2a3c45b76d42d5b765909a439c710677cd4368c2de1f1526",
+    "crates/artifact-read/src/lib.rs": "57db6b581846a9602e6feabccda2f55fe04af5767edf43357a263975eec59fe3",
+    "crates/artifact-read/tests/artifact_read.rs": "47b832d4a6c5eac3016b1df74381408ae9f55d8a81ac62b82379e3efdb385550",
+    "crates/artifact-sort/Cargo.toml": "2ba3f8736d45b9781ddfaebdc353e962e39283d6df54bd67bfe08a16a3beb2f8",
+    "crates/artifact-sort/src/lib.rs": "e15f3d7e1e64d213ae11edcbc75dbd291914e106184af633e3dd728fae21970d",
+    "crates/artifact-sort/src/process.rs": "dddf21422dbb55b0dfc715a70f6ef155db8ff036359955e98839b502873c74df",
+    "crates/artifact-sort/tests/contract.rs": "63a0570d461fe649f4bfd5060413694be2decd212de8c13fce76be384d677a39",
+    "crates/artifact-store/Cargo.toml": "e9b8211eb6e9009ee216fc1de1991a644dfaa8757f78a2b41c42bc455926cfe4",
+    "crates/artifact-store/src/lib.rs": "cc50c3793a9e06e6c60e4643f04459c80fbc073196104faf8754ffc153084053",
+    "crates/capability/Cargo.toml": "9a85dc252ba908fed1e9840a8dc3628b93efcea5822478c85995ad0c38faf512",
+    "crates/capability/examples/package_header.rs": "d2905ddb0c4e39c183417ddf022b356e2ccf54841c8bfe062c857cdb08dcac0a",
+    "crates/capability/src/invocation.rs": "0b1b90a10fce45199422be0888f9ef27f1f764550078172bf3e176b47a87d4e3",
+    "crates/capability/src/lib.rs": "dc3ceec054feb1cb5b31ed364cd7fa2f096ac01fc64a3dcc49ce4119a0a640f5",
+    "crates/capability/src/package.rs": "ab55e5a9343ffa39ed6a5b20019aa29d7e67c3bb422a651f07325703f05124a9",
+    "crates/capability/src/package/filesystem.rs": "57455227f8ba1bf93348d3ef98bcee03171d81f20cb4150539b8195f503ac240",
+    "crates/capability/src/schema_instance.rs": "68be70750e5e2001401cb1bbee9edb17b8cc3aa14a6efe7578e40c0bf8a4d268",
+    "crates/capability/tests/package_headers.rs": "74515cc558acad08f8d26d96c4af1d0e071b557dec1bbd0cbf5267fcb60373dc",
+    "crates/context-projection/Cargo.toml": "3b4197d2f014d87e8dcd01b18ab0a0d6817d660982626da821d4c1cadd0175d0",
+    "crates/context-projection/src/lib.rs": "8eb07a622f425f7a1afa2f9feaaf9c34fd114e6e4de64d31c5b8cf6db857b42d",
+    "crates/context-projection/tests/projection.rs": "c74ead1f6cdaef24784e09a5e90cc73868faef557600792c4898d6edaa1751c5",
+    "crates/context/Cargo.toml": "439efadab4fbb1a1d1c4f2f82aa143c93c20da9ba8436c4db32a8e30e2a0d0f5",
+    "crates/context/src/lib.rs": "06a1e183f4cb9134c34598486f280280f043a4260f3b82f68098929b26b2b64b",
+    "crates/event-store/Cargo.toml": "1502660f722c8eba86155cfd0acb4a4fb474754d8302b02c34ee8f8cd2ac1b8e",
+    "crates/event-store/src/lib.rs": "9cb0c64a1f2733de46545e724ba3590b7e3de6d21e3b58b0e73626a652b4bd32",
+    "crates/event-store/src/recurrence.rs": "8b55a432c6a926d0c88644b875308722fc7fc42464e06c783e30e00f6b83b8c0",
+    "crates/event-store/src/recurrence/tests.rs": "dc8fd2795c9e6b859465500e245638fc9ba3c46b84cffe551d4b9f74c533cc04",
+    "crates/event-store/src/schedule.rs": "01e3d09b59e4023c089a4116d7b47dee4fdcb047e8345c5a71e48f25e317d048",
+    "crates/kernel/Cargo.toml": "930c801d9b4cf1b0f08e59541911fd272c55100338059fe36f3d72004222f887",
+    "crates/kernel/src/agent_run.rs": "d39ab501d401a9e9f8620c57e5078a6832398c2793140fd86f9a6435902a862a",
+    "crates/kernel/src/agent_sort.rs": "57cc885de869fc27d4192a8086a1fa4614d46bfdd0000a4d5ec470ead9fb9bf0",
+    "crates/kernel/src/context_admission.rs": "6291db0f71b65a041f7544acfc417249a10347f3332d1cd77f0c14acc5e3f098",
+    "crates/kernel/src/context_retrieval.rs": "521fedefeba6f387bd051e012ab510fd4655812ecd53953e27e3f132b847f2b1",
+    "crates/kernel/src/lib.rs": "7c0a901391265b7c56fea93626f54495f360121493fae969e7e3956e3ee389c5",
+    "crates/kernel/src/memory.rs": "82e02bb1ec8b71811aec919c1a52f5e1587c36b057af4b35ee8ab87c1d9a9e94",
+    "crates/kernel/src/recurrence.rs": "bbced50d52759a628683bb3be25e1f147707df9b64bc2b410983d2e9fda5b94f",
+    "crates/kernel/src/schedule.rs": "95d09926c2bb27e5d3181bede0223743530d5a978821a3cf525f3b484651e7ba",
+    "crates/kernel/src/schedule/tests.rs": "143731371032b39bf853c7243f66edb014858fab719742626fc7ad05aae7627b",
+    "crates/kernel/src/schedule/tests/repeats.rs": "b3f0308fc13349ba574dfdf61917109a14c264309e5303065f05e95ee4a035ab",
+    "crates/kernel/src/sort_run.rs": "a5a04d81670c192fc1b1f2306220a7dc87b31f7a744e92524a9d0f43cda2269f",
+    "crates/kernel/src/turn/mod.rs": "32a9dfd8911c3036a882c78b6c236ff89a2a97ddd8204590183a5d55564b6b65",
+    "crates/kernel/src/turn/replay.rs": "7643a018ddda29a1578bdbd82fc35838626f740e459387a83aaabdbf60df95ea",
+    "crates/kernel/src/turn/run.rs": "511d94ec850a99f115f363db683e6bdae827e4bac2afeab56e1d8844505bc799",
+    "crates/kernel/src/turn/shared.rs": "eca55653411fba263a40e2ed59dded22361e958784ff527bc1c07cd74bf5a3d9",
+    "crates/kernel/src/turn/sort.rs": "244225b145a6daa68c96d5b56cd115b6693a83735f3afb4e9e779b2576083665",
+    "crates/kernel/src/turn/sort_replay.rs": "8e7d623646df35849199e46add8a4d7668c2f5a2b489c355616992f03d0f2193",
+    "crates/kernel/src/turn/sort_run.rs": "dffddfb511716b0582a964bad3cb08712497712a4ee546489e6f76d454b1ff3d",
+    "crates/kernel/src/turn/types.rs": "1b912c67559bf7465830030302c31508f2fc303017b54b6a14015905c16ea997",
+    "crates/kernel/tests/durable_context_projection.rs": "5e4424a9a5b70283d19bcb3fdc662d9a8acb98e0b4891c8ded00f04c59364bb8",
+    "crates/kernel/tests/durable_context_projection/working_set.rs": "f956189c530b030513c761e55adc309257b33a95228d0f3b69af64fb7b978f7e",
+    "crates/kernel/tests/read_only_turn.rs": "b7bb62391221fbbd0e271bc76abcde1759f02a7adebb41d1ffcbd31585265e4f",
+    "crates/kernel/tests/read_only_turn/agent_runs.rs": "15d3cebfab36b9d9942748c1396f91fce0b86fac3ae02603f3a9f435c4a3c02a",
+    "crates/kernel/tests/read_only_turn/model_sort.rs": "e83c245ac10e82b226c42b7cfac8e25882eeb4947a935bbec0fc8f19956d98b6",
+    "crates/kernel/tests/sort_runs.rs": "71eecdd8de7fff9cf5d1936e7e17e37ad90a2acdf37f441308ec12c85285a3fc",
+    "crates/kernel/tests/user_memory.rs": "e5f096b2ba2ef9b4d3138f28f9032c8c3e8e5f60405a5f04e71f746a1bf3f66a",
+    "crates/model-openai/Cargo.toml": "122eaa190b71485b53556463d2349211cf4b70f923234ac8ecfd355d3b627856",
+    "crates/model-openai/src/compile.rs": "a3a33bd8f02e5cb95a37065eceab57035f955a5f07367fe25e3aeecc682186cc",
+    "crates/model-openai/src/driver.rs": "32a7348233ab90460da4cd7254b1830c5945b959025f59ec245480ce452e0432",
+    "crates/model-openai/src/lib.rs": "3467fa2cffe179253350ae057d5d8ea1cb2039f3cae5feb4a8e607fb5af25eb8",
+    "crates/model-openai/src/sse.rs": "b12804b7cd9b7f71b474cf77f83aa176637dfbbeffe9b0de28eadeb8e6e2f849",
+    "crates/model-openai/src/transport.rs": "7b6e5ba732e7cda6d7b89944820f39397235e7f0270b482e3c9d8edf44f2f0e9",
+    "crates/model-openai/tests/adapter_contract.rs": "0c31cb385350fa8ec5c36c95d84c3f5660af5c377888da7c50c8ddad6a41f433",
+    "crates/model/Cargo.toml": "730f026613dddeeef62c6ba5c4bf1a17995cf7f0fca7a44d2733cb80f4ffc1f3",
+    "crates/model/src/fixture.rs": "138ea140a9b5dd87f7e1b0966e34efe7e6a94fca83b25101b64ba6b367815c2e",
+    "crates/model/src/lib.rs": "04d44df1441c78d0545dcdeef290be22057d596b1c1b1de0476b7b5d1ed5b05a",
+    "crates/model/src/stream.rs": "6b555c746fa7d35f63436f6999f44758d4e9c4752968a23778eca5f9ea42b94e",
+    "crates/model/tests/model_ir.rs": "56c7a3e1e6a8e456993c37631b03e9b3b8aa18f7e9d7f2f288a57d9c3445ccc2",
+    "crates/model/tests/provider_shapes.rs": "2b36453978d6002f7d87446f0dfec37a546d156994534b5da9bc065b0fa37740",
+    "crates/model/tests/stream_contract.rs": "f0fe266103fe8cdae6069a234ff04d75e057628fca4d549fd05ca9389fae3d35",
+    "crates/policy/Cargo.toml": "78b0e953574f8690978d2d8c57fe46359ea2b0109aadfde9038125995ab1c51c",
+    "crates/policy/src/lib.rs": "064a3458ae92829417089f2d15664bf4b5d7ae1a8c0950e5346d696d5c893e3b",
+    "crates/policy/tests/authorization.rs": "9be6188ed7e799a71c1ad2989f50619f3bf3fdfc997e4ea11c765dc67cb709cf",
+    "crates/protocol/Cargo.toml": "6e7786916a1f6589a0586fec8983e8be554ee72d936dd898e34d47c01365c7f9",
+    "crates/protocol/src/lib.rs": "56db489be735cedd19587ebc82e320a81123f0a228b46df9b8c7077eef7f862a",
+    "crates/protocol/src/schedule.rs": "53a010ce5c0236ff2106057581e1a3950f92587e71f790b44494449f7bbdbab9",
+    "crates/retrieval/Cargo.toml": "b1c14f4a556b3cedd9ac6a91dce4c0007f8f094151791beddfd7fffff041ef30",
+    "crates/retrieval/src/lib.rs": "2766143ab40afb63fadac408abc346f9a247b188242453f010fba8a02b460408",
+    "crates/retrieval/tests/retrieval.rs": "8353845b70ce1152b8e7e79ec08daec2e3489387b0174a6f544351267fc57ece",
+    "scripts/agent-canary.sh": "9dea1341bf3c7420d47736a57542a6417f7bbcdd72474c8ece2aee3399652aee",
+    "scripts/agent-check.sh": "e97f35b70d0d67e4ad1f158884a9c8a5bc50cff62716ee2f1c4864330f2de83e",
+    "scripts/personal-baseline.py": "12822214f10a1959b34068c6ccbf4333be891de995bbab530d87ad2b466cb169",
+    "scripts/smoke-agent-run.py": "f5f13e4a6504b38cbfde2a042a3afff15a488dbbc65247dc4b536352bb9f158b",
+    "scripts/smoke-local-sort.py": "fcfcc84f8636404e2535500f9eaf6500fd6429e14eee27f5a99270034443ad45",
+    "scripts/smoke-user-memory.py": "659ab585d1156434a0e3d3bf55d20a9b67be8e7074fee03f369f7cc35596ebeb",
+    "scripts/test-personal-baseline.py": "6039fbe12be328c54907761330d7952dd4958e0d8230b09f4962261fae611a2b"
+  },
+  "utc": "2026-09-17T13:56:39.870496+00:00",
+  "workload": "task014-offline-personal-v1"
+}

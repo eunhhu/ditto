@@ -1,3 +1,4 @@
+use super::presentation::{Kind, View, safe};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -44,9 +45,10 @@ impl From<RunIdentity> for AgentRunQuery {
 
 pub(super) async fn start(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     args: RunArgs,
 ) -> anyhow::Result<()> {
+    let api = view.api;
     let sort = args
         .sort_file
         .as_ref()
@@ -60,6 +62,11 @@ pub(super) async fn start(
                     "not allowed"
                 }
             );
+            eprintln!(
+                "Exact file: {} ({} UTF-8 bytes); original file unchanged; no durable grant.",
+                safe(&path.to_string_lossy()),
+                text.len()
+            );
             Ok::<_, anyhow::Error>(AgentSortPermission {
                 text,
                 allow_deduplicate: args.allow_deduplicate,
@@ -71,7 +78,7 @@ pub(super) async fn start(
         .unwrap_or_else(|| ulid::Ulid::new().to_string());
     // Print before transport: an uncertain POST must be recoverable without
     // guessing a new identity or automatically repeating potentially paid work.
-    eprintln!("Run request: {request_id} (session: {})", args.session);
+    view.submitting(Kind::Run, &request_id, &args.session);
     let query = AgentRunQuery {
         request_id: request_id.clone(),
         session_id: args.session.clone(),
@@ -92,35 +99,37 @@ pub(super) async fn start(
     )
     .await?;
     if args.detach || result.status != AgentRunStatus::Running {
-        return print_result(result);
+        return print_result(result, view);
     }
     let wait = wait_for_terminal(client, api, &query, &result.task_id);
     tokio::pin!(wait);
     tokio::select! {
-        result = &mut wait => print_result(result?),
+        result = &mut wait => print_result(result?, view),
         signal = tokio::signal::ctrl_c() => {
             signal.context("could not listen for Ctrl+C")?;
             let result = request_cancel(client, api, &query).await?;
             eprintln!("Cancellation requested; inspect the same request ID for the terminal state.");
-            print_result(result)
+            print_result(result, view)
         }
     }
 }
 
 pub(super) async fn inspect(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     identity: RunIdentity,
 ) -> anyhow::Result<()> {
-    print_result(get_status(client, api, &identity.into()).await?)
+    let api = view.api;
+    print_result(get_status(client, api, &identity.into()).await?, view)
 }
 
 pub(super) async fn cancel(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     identity: RunIdentity,
 ) -> anyhow::Result<()> {
-    print_result(request_cancel(client, api, &identity.into()).await?)
+    let api = view.api;
+    print_result(request_cancel(client, api, &identity.into()).await?, view)
 }
 
 async fn request_cancel(
@@ -167,10 +176,12 @@ async fn decode(response: reqwest::Response) -> anyhow::Result<AgentRunResponse>
             .context("invalid run error response")?;
         bail!(
             "run command failed ({status}): {}",
-            value
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("invalid command")
+            safe(
+                value
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("invalid command")
+            )
         );
     }
     response
@@ -179,12 +190,12 @@ async fn decode(response: reqwest::Response) -> anyhow::Result<AgentRunResponse>
         .context("invalid run response; inspect the same request ID")
 }
 
-fn print_result(result: AgentRunResponse) -> anyhow::Result<()> {
+fn print_result(result: AgentRunResponse, view: View<'_>) -> anyhow::Result<()> {
     let failed = matches!(
         result.status,
         AgentRunStatus::Failed | AgentRunStatus::Interrupted
     );
-    super::print_json(&serde_json::to_value(&result)?)?;
+    view.print(Kind::Run, &serde_json::to_value(&result)?)?;
     if failed {
         bail!("run ended without a model answer; see status above");
     }

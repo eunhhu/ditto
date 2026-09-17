@@ -8,7 +8,12 @@ Run the canonical gate from the repository root:
 
 The script checks tracked-artifact, developer-path, and credential-shaped
 canaries before formatting, strict Clippy, workspace tests, and required agent
-control files. CI additionally verifies the declared MSRV.
+control files. It also runs the five existing actual-CLI fixture scenarios,
+baseline accounting regressions and a small offline baseline scenario (two
+repeated requests per server). Python 3 uses only its standard library; the
+measurement script builds with cached dependencies via `--offline --locked`.
+Loopback binding and the existing `/usr/bin/sort` profile must be available.
+CI additionally verifies the declared MSRV.
 
 ## Evidence by change type
 
@@ -22,6 +27,24 @@ control files. CI additionally verifies the declared MSRV.
 | Artifact store | deduplication, size limit, tamper detection, symlink/no-follow behavior, range read |
 | Model driver | every emitted event variant, malformed stream, usage, tool calls, continuation, provider cancellation |
 | Completion | verifier-specific positive and negative evidence; stream closure is insufficient |
+| Human task views | default JSON compatibility, independent model/sort/parent/child outcomes, unverified answers, requested/terminal cancellation, exhausted/missed repeats, recoverable identity and terminal-control escaping |
+| Personal-agent baseline | separate production-disabled and injected-fixture results; raw samples/settings/source identity; idle/repeated RSS and latency; model/tool accounting; known versus unavailable cost; exact retry and restart evidence |
+
+## Offline baseline evidence
+
+`python3 scripts/personal-baseline.py --output /tmp/ditto-baseline.json` runs the
+full default 12-request sample. `--samples` (2–100) and `--idle-seconds` (.05–60)
+are explicit workload parameters. The canonical gate uses a disposable report;
+recorded baseline evidence belongs with the task evidence, not an unlabelled
+performance claim. There are no machine-dependent latency/RAM pass thresholds.
+
+The production daemon always has its provider disabled; fixture execution is
+compiled only into the daemon test executable. Both use the existing HTTP
+surface and real CLI. No live provider, download, pricing lookup or quality
+inference is permitted. Offline external provider spend is known zero, while
+unavailable usage, live-equivalent cost and isolated timing are null with reasons.
+Server RSS excludes CLI/sort children and a short fixed-catalogue sample is not
+evidence of long-use quality or a comparison with another agent.
 
 ## Review questions
 

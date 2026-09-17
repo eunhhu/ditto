@@ -5,13 +5,26 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-Task 013 is complete. Next, establish the minimum task-status/approval experience
-and reproducible RAM, latency, cost and repeated-use baselines before claiming the
-first personal-agent milestone. Start with the existing CLI/status and explicit
-permission paths; close observed usability gaps and measure required work versus
-Ditto-added work before adding another runtime surface or infrastructure.
+Task 014 is complete as a minimum pre-v0.1 slice: readable CLI task inspection,
+visible existing exact-file permission, and a reproducible offline baseline.
+Next, define representative personal-agent quality and longer-history workloads
+against that baseline before claiming the first personal-agent milestone.
+Live-model quality, first useful progress and isolated model/tool versus
+Ditto-added latency remain unmeasured. General approval fulfillment remains
+deferred; the human view does not add a grant or approval service. Use observed
+workflow gaps and measurements before adding another runtime surface or
+infrastructure.
 
 ## Completed
+
+- [`014 Human task inspection and offline personal-agent baseline`](tasks/014-status-baselines.md):
+  opt-in human run/sort/schedule/repeat views, independent outcomes, explicit
+  permission/recovery and control escaping, unchanged default JSON, and separate
+  production-disabled/fixture measurements of startup, idle/repeated RAM,
+  latency, call accounting and restart/recovery. The canonical gate (489 Rust
+  tests), eight Python regressions and regenerated full offline baseline passed;
+  unknown cost/quality/timing stays unknown. See
+  [verification and measured evidence](tasks/014-evidence.md).
 
 - [`013 Bounded recurring schedules`](tasks/013-recurring-schedules.md): finite
   anchored intervals, independent occurrence identities, atomic parent/child
