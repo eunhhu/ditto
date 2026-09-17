@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
 mod memory;
+mod presentation;
 mod repeats;
 mod runs;
 mod schedules;
@@ -11,8 +12,16 @@ mod sorts;
 #[derive(Debug, Parser)]
 #[command(name = "ditto", version, about = "Operate the local Ditto daemon")]
 struct Cli {
-    #[arg(long, env = "DITTO_API", default_value = "http://127.0.0.1:8787")]
+    #[arg(
+        long,
+        env = "DITTO_API",
+        hide_env_values = true,
+        default_value = "http://127.0.0.1:8787"
+    )]
     api: String,
+    /// Human-readable run/sort/schedule/repeat output (JSON remains the default).
+    #[arg(long, global = true)]
+    human: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -88,28 +97,54 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+async fn main() -> std::process::ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if error.use_stderr() {
+                eprintln!("{}", presentation::safe(&error.to_string()));
+            } else {
+                // Help/version text contains only the static command definition.
+                print!("{error}");
+            }
+            return std::process::ExitCode::from(error.exit_code() as u8);
+        }
+    };
+    match run(cli).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // Transport/decoding diagnostics can contain untrusted server text.
+            eprintln!("Error: {}", presentation::safe(&format!("{error:#}")));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let api = cli.api.trim_end_matches('/');
 
+    let view = presentation::View {
+        api,
+        human: cli.human,
+    };
     match cli.command {
-        Command::Repeat(args) => repeats::create(&client, api, args).await?,
-        Command::RepeatStatus(identity) => repeats::inspect(&client, api, identity).await?,
-        Command::RepeatCancel(identity) => repeats::cancel(&client, api, identity).await?,
-        Command::RepeatList { session } => repeats::active(&client, api, session).await?,
-        Command::Schedule(args) => schedules::create(&client, api, args).await?,
-        Command::ScheduleStatus(identity) => schedules::inspect(&client, api, identity).await?,
-        Command::ScheduleCancel(identity) => schedules::cancel(&client, api, identity).await?,
-        Command::ScheduleList { session } => schedules::pending(&client, api, session).await?,
-        Command::Sort(args) => sorts::start(&client, api, args).await?,
-        Command::SortStatus(identity) => sorts::inspect(&client, api, identity).await?,
-        Command::SortCancel(identity) => sorts::cancel(&client, api, identity).await?,
-        Command::Run(args) => runs::start(&client, api, args).await?,
-        Command::RunStatus(identity) => runs::inspect(&client, api, identity).await?,
-        Command::RunCancel(identity) => runs::cancel(&client, api, identity).await?,
+        Command::Repeat(args) => repeats::create(&client, view, args).await?,
+        Command::RepeatStatus(identity) => repeats::inspect(&client, view, identity).await?,
+        Command::RepeatCancel(identity) => repeats::cancel(&client, view, identity).await?,
+        Command::RepeatList { session } => repeats::active(&client, view, session).await?,
+        Command::Schedule(args) => schedules::create(&client, view, args).await?,
+        Command::ScheduleStatus(identity) => schedules::inspect(&client, view, identity).await?,
+        Command::ScheduleCancel(identity) => schedules::cancel(&client, view, identity).await?,
+        Command::ScheduleList { session } => schedules::pending(&client, view, session).await?,
+        Command::Sort(args) => sorts::start(&client, view, args).await?,
+        Command::SortStatus(identity) => sorts::inspect(&client, view, identity).await?,
+        Command::SortCancel(identity) => sorts::cancel(&client, view, identity).await?,
+        Command::Run(args) => runs::start(&client, view, args).await?,
+        Command::RunStatus(identity) => runs::inspect(&client, view, identity).await?,
+        Command::RunCancel(identity) => runs::cancel(&client, view, identity).await?,
         Command::Memory { command } => memory::run(&client, api, command).await?,
         Command::Ping => {
             let value = client
