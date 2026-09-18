@@ -11,7 +11,8 @@ canaries before formatting, strict Clippy, workspace tests, and required agent
 control files. It also runs the five existing actual-CLI fixture scenarios,
 baseline accounting regressions and a small offline baseline scenario (two
 repeated requests per server), plus context-assessment/process regressions and
-an offline history smoke (zero versus four unrelated memories, two queries each).
+a five-case offline corpus smoke (zero versus four unrelated memories, two
+repetitions per query: ten runs per profile, twenty total).
 Python 3 uses only its standard library; the measurement scripts build with
 cached dependencies via `--offline --locked`.
 Loopback binding and the existing `/usr/bin/sort` profile must be available.
@@ -31,7 +32,7 @@ CI additionally verifies the declared MSRV.
 | Completion | verifier-specific positive and negative evidence; stream closure is insufficient |
 | Human task views | default JSON compatibility, independent model/sort/parent/child outcomes, unverified answers, requested/terminal cancellation, exhausted/missed repeats, recoverable identity and terminal-control escaping |
 | Personal-agent baseline | separate production-disabled and injected-fixture results; raw samples/settings/source identity; idle/repeated RSS and latency; model/tool accounting; known versus unavailable cost; exact retry and restart evidence |
-| Context/history workload | actual CLI saves/correction/restart/queries; exact driver capsules reconciled with durable request identities and independent calls; corrected inclusion and stale/irrelevant/noise/other-session exclusion for every request; raw measurements/source hashes; no fixture-answer quality inference |
+| Personal-task context corpus | actual CLI saves/correction/restart/list/five-query rounds; frozen expectations independent of observations; exact nodes/order/metadata/provenance; durable input/query/task/turn/event/call/observation reconciliation; raw metrics with null empty denominators; leak adversaries and signal/failure cleanup; source/artifact/corpus hashes; no fixture-answer quality inference |
 
 ## Offline baseline evidence
 
@@ -49,25 +50,47 @@ unavailable usage, live-equivalent cost and isolated timing are null with reason
 Server RSS excludes CLI/sort children and a short fixed-catalogue sample is not
 evidence of long-use quality or a comparison with another agent.
 
-## Offline context/history evidence
+## Offline personal-task corpus evidence
 
-`python3 scripts/personal-quality.py --output docs/agent/tasks/015-quality-history.json`
-runs fresh minimal and longer histories with zero and 1,000 unrelated memories
-and five unique queries per profile. `--history-size` (1–5000) and `--samples`
-(2–100) bound the workload. The canonical gate uses four unrelated memories and
-two queries each, with a disposable report. Python optimization (`-O`) is
-rejected because it would disable assertions. Set `TMPDIR` and `CARGO_TARGET_DIR`
-inside the repository when all generated files must remain local to it.
+```bash
+python3 scripts/test-personal-quality.py
+python3 scripts/test-personal-baseline.py
+python3 scripts/personal-quality.py --history-size 4 --samples 2 --output target/task016/smoke.json
+./scripts/agent-check.sh
+cargo +1.88.0 check --offline --locked --workspace --all-targets
+python3 scripts/personal-quality.py --output docs/agent/tasks/016-personal-task-corpus.json
+```
 
-The cfg(test) driver can opt into a separate structured capsule log. Every
-request must retain the corrected fact and exclude stale, irrelevant, noise and
-other-session values after restart. Observations must match durable request
-IDs/payloads and the independent call log. Default fixture call counting and
-production behavior remain unchanged. Report raw timing, RSS/storage/event/call
-counts, selected capsule nodes/bytes and source/binary hashes. Recheck hashes
-after recording; regenerate measurements if any measured source changes.
-The [recorded evidence](tasks/015-evidence.md) is one synthetic V1 lexical
-selection workload; broader quality and v0.1 criteria remain open.
+Use cached dependencies/toolchains only. Set `CARGO_NET_OFFLINE=true`,
+`CARGO_TARGET_DIR="$PWD/target"`, `TMPDIR="$PWD/target/task016/tmp"` and
+`PYTHONDONTWRITEBYTECODE=1`; create the temporary directory first. Local loopback
+must be available. Python optimization (`-O`) is rejected because shared
+measurement helpers use assertions.
+
+The [Task 016 contract](tasks/016-personal-task-corpus.md) freezes seven seeds
+and five lexical queries before observation. Schema 2 embeds that definition and
+its digest. `--history-size` (1..5000, default 1000) selects the longer profile's
+noise; zero-noise is always included. `--samples` (2..100, default 5) means
+**repetitions per query**: the default has 25 runs per profile, 50 total. The
+unchanged canonical integration uses N=4 and samples=2, now 20 total runs.
+
+Exact set/order, nontrivial ordering, Recall@2, returned precision, all four leak
+categories and durable identity reconciliation must pass each request. Keep raw
+numerators/denominators/contributors; zero denominators are null with reasons.
+Retain exact capsules, durable input/request and source provenance evidence.
+Check actual query, session/task/turn/event identity and independent calls;
+reject malformed, missing, extra, duplicate, reordered or swapped records.
+Fixture answers are never assessed. Normal, failure, SIGTERM and SIGINT cleanup
+must reap children and remove temporary stores. Publish atomically after final
+source/artifact hash verification; independently audit the recorded report.
+
+[Task 016 evidence](tasks/016-evidence.md) supports only five-case synthetic
+lexical ContextCapsule conformance after restart. Model-answer quality, task
+completion, semantic recall, tool-task success, live cost, first useful progress,
+general agent quality and v0.1 readiness remain unavailable/open.
+Task 015's [report and commands](tasks/015-evidence.md) are historical and are
+**not reproduced** by the new corpus/sample semantics. Task 014 compatibility
+remains tested; no production observer or runtime change is introduced here.
 
 ## Review questions
 

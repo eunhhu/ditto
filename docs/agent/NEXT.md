@@ -5,18 +5,28 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-Task 015 is complete as a narrow measurement slice: an offline synthetic
-correction/exclusion workload compares minimal history with 1,000 unrelated
-memories through the actual CLI/HTTP/kernel path after restart. All ten model
-capsules passed; this is one lexical scenario, not general personal-agent quality.
-Next, define a representative multi-query personal-task corpus and its expected
-outcomes before claiming the first personal-agent milestone. Live-model answer
-quality, first useful progress, isolated model/tool versus Ditto-added latency,
-growing catalogues and learning remain unmeasured. General approval fulfillment
-remains deferred. Use observed workflow gaps and measurements before adding
-another runtime surface or infrastructure.
+Task 016 is complete as a bounded corpus measurement: five fixed synthetic
+lexical ContextCapsule cases pass after restart at zero and 1,000 unrelated
+memories, with exact ordered expectations and durable query/identity evidence.
+This does not establish the first personal-agent milestone. Next, define broader
+personal-task outcomes and representative evaluation needs before claiming that
+milestone or adding another runtime surface. Model-answer quality, task
+completion, semantic recall, tool-task success, live cost, first useful progress,
+general agent quality and v0.1 readiness remain unavailable/open. General
+approval fulfillment remains deferred.
 
 ## Completed
+
+- [`016 Offline personal-task context corpus`](tasks/016-personal-task-corpus.md):
+  schema-2 extension of Task 015's harness; frozen five-query rounds, zero/N
+  history, exact set/order/metadata/provenance and query/event/call identity
+  reconciliation, explicit raw metric denominators/nulls, and atomic report
+  publication after final hashes. Eighteen Python regressions, Task 014
+  compatibility, the unchanged canonical gate (490 Rust tests), cached Rust 1.88
+  check and the fifty-run default report passed. All source/artifact/corpus
+  hashes and raw aggregates were independently recomputed. Claims remain five-case
+  synthetic lexical context conformance; the broader milestone is open. See
+  [evidence](tasks/016-evidence.md) and [raw report](tasks/016-personal-task-corpus.json).
 
 - [`015 Offline context-quality and longer-history workloads`](tasks/015-quality-history-workloads.md):
   bounded standard-library harness, exact correction and session isolation after
