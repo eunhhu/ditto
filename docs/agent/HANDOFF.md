@@ -25,12 +25,20 @@
 
 ## Canonical state
 
-- Current slice branch: `dev/task-014-status-baselines`, base
-  `786a0587bdfed175579289309f9a938bb63f7424`. Task 014 is locally verified. Remote
-  PR and CI state are intentionally read from GitHub rather than frozen here. The
-  [evidence](tasks/014-evidence.md) and
-  [raw baseline](tasks/014-baseline.json) identify the measured source/binaries.
-- Previous slice branch: `dev/task-013-recurring-schedules`, based on main merge
+- Current slice: Task 015 on `dev/task-015-quality-workloads`, based on
+  `d1575bfd0f018bdfdee8dcccbdbd2b674d5026dd`. Implementation commit
+  `0a272936c722409cb635d39e814b97ce4cd38b7f` is published in
+  [PR #20](https://github.com/eunhhu/ditto/pull/20); the final implementation
+  head passed local verification, independent fail-closed review, and Linux
+  `rust`/`msrv` CI. The PR was `CLEAN` and `MERGEABLE` at the last readback.
+  [Evidence](tasks/015-evidence.md) and the
+  [raw report](tasks/015-quality-history.json) identify the measured source
+  digests and exact Cargo artifacts.
+- Previous slice: Task 014 on `dev/task-014-status-baselines`, base
+  `786a0587bdfed175579289309f9a938bb63f7424`; its
+  [evidence](tasks/014-evidence.md) and [raw baseline](tasks/014-baseline.json)
+  remain historical measurements of that source.
+- Earlier slice branch: `dev/task-013-recurring-schedules`, based on main merge
   `e1771763fbd82ba60b830827cfed0cd436e99ad5` (Task 012, PR #17).
   The user authorized merge and continued implementation and explicitly asked
   for a Goal through completion. On 2026-09-09 the Goal was recreated for Task
@@ -120,7 +128,38 @@
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
-## Latest verified slice: Task 014
+## Latest verified slice: Task 015
+
+- The standard-library offline workload compares identical synthetic facts with
+  zero versus 1,000 unrelated same-session memories, then queries five unique
+  requests per profile after process restart and source-verified memory listing.
+  Actual CLI/HTTP/kernel paths perform every save, exact correction and run.
+- An opt-in `cfg(test)` driver JSONL log captures the exact ContextCapsule and
+  request ID separately from the unchanged call counter. Every observation is
+  reconciled with a durable model-request payload and the originating run.
+  All ten capsules contained exactly the corrected memory (one node, 227 bytes),
+  excluding superseded/irrelevant/other-session/noise memories. Seed/recovery
+  made no model call; queries made five driver calls per profile and no tool call.
+- Five assessment/argument tests and three real-process tests pass, including
+  opt-in compatibility and SIGTERM cleanup. RED evidence preceded implementation:
+  four missing-harness errors and, after allowing loopback access, an actual
+  save/correct/restart/query failure at the absent context log. Both Task 014 and
+  Task 015 eight-test Python suites passed. The canonical gate passed canaries,
+  format, strict Clippy, 490 Rust tests (460 unit/integration, 25 compile-fail
+  doctests, five actual-CLI tests), both Python suites and both smoke workloads.
+- The default 1,000-memory/five-query recorded workload passed. Exact values,
+  raw samples and limitations live in the [evidence](tasks/015-evidence.md) and
+  [report](tasks/015-quality-history.json); 113 source hashes and three artifact
+  hashes bind the measurement. Capsule assessment measures one V1 lexical
+  scenario, not model-answer quality or semantic/cross-session recall.
+- No production runtime surface, context logging, wire/policy/authority
+  contract, dependency or architecture changed. The workload itself used no
+  live provider, credential or download; publication happened only after the
+  measured source passed local checks and independent review. External provider
+  spend is zero; model-answer quality, live tokens/cost, first useful progress
+  and isolated timing remain unavailable. Broader v0.1 criteria remain open.
+
+## Previous verified slice: Task 014
 
 - `--human` presents existing run/sort/schedule/repeat start, status, cancel and
   list responses. JSON stdout and exit semantics remain the default. Model
