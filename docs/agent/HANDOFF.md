@@ -25,7 +25,12 @@
 
 ## Canonical state
 
-- Latest slice branch: `dev/task-013-recurring-schedules`, based on main merge
+- Current slice branch: `dev/task-014-status-baselines`, base
+  `786a0587bdfed175579289309f9a938bb63f7424`. Task 014 is locally verified. Remote
+  PR and CI state are intentionally read from GitHub rather than frozen here. The
+  [evidence](tasks/014-evidence.md) and
+  [raw baseline](tasks/014-baseline.json) identify the measured source/binaries.
+- Previous slice branch: `dev/task-013-recurring-schedules`, based on main merge
   `e1771763fbd82ba60b830827cfed0cd436e99ad5` (Task 012, PR #17).
   The user authorized merge and continued implementation and explicitly asked
   for a Goal through completion. On 2026-09-09 the Goal was recreated for Task
@@ -115,7 +120,49 @@
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
-## Latest verified slice: Task 013
+## Latest verified slice: Task 014
+
+- `--human` presents existing run/sort/schedule/repeat start, status, cancel and
+  list responses. JSON stdout and exit semantics remain the default. Model
+  answers are explicitly unverified; model/sort/schedule/repeat outcomes stay
+  independent. Requested cancellation is distinct from terminal cancellation,
+  and timetable exhaustion is not a success claim.
+- Submission prints exact-file/deduplication scope and recoverable identity plus
+  inspection instructions. Run inspection shows the attached artifact and
+  original permission. Standalone sort status honestly reports that its current
+  response omits input/mode. Human text and diagnostics escape terminal controls,
+  including CR/LF, ANSI/OSC/C1 and bidi formatting.
+- The standard-library offline harness runs production-disabled and injected
+  fixture test servers separately through the actual CLI. It records raw
+  samples, hardware/build/source identity, process RAM, latency, call accounting
+  and restart evidence. No core crate, wire/policy/event/kernel contract,
+  production provider, dependency or endpoint changed.
+- The Rust 1.88 canonical gate passed 489 Rust tests (459 unit/integration,
+  25 compile-fail doctests, five actual-CLI scenarios), eight Python
+  accounting/artifact/process tests and the two-server offline smoke workload.
+  The new focused CLI target passed eleven tests after RED; Clippy's initial unchecked test read was fixed.
+- The full 12-request Linux/aarch64 debug baseline passed. Canonical measured
+  values live in the [evidence table](tasks/014-evidence.md) and
+  [raw report](tasks/014-baseline.json) rather than being duplicated here.
+  Repeated-phase model/tool counts were 0/12 and 24/12; both had zero
+  startup/idle model/tool calls. Full-workload fixture driver calls independently
+  matched all 29 durable model requests.
+- Independent-review fixes redact API userinfo from every recovery command,
+  use shell-safe `--session=` assignments, and execute/hash exact named Cargo
+  artifacts. Regressions first reproduced all blockers. A test-only disabled
+  scheduler driver prevents pre-shutdown scheduled claims; recorded sequence
+  boundaries and independent driver counts prove work starts after restart.
+  SIGTERM exits through cleanup; subprocess tests prove both server types are
+  reaped and temporary stores removed.
+- Exact retry, terminal-result recovery, disabled expiry, fixture scheduled
+  dispatch, durable repeat cancellation and abrupt active owner-loss inspection
+  passed without automatic re-execution. No live provider, credential use or
+  download occurred. Offline external provider spend is known zero; fixture
+  usage/live-equivalent cost, quality, isolated model/tool timing and Ditto-only
+  overhead remain unavailable. A short fixed-catalogue sample is not v0.1
+  readiness or a long-use performance/quality claim.
+
+## Previous verified slice: Task 013
 
 - A final local review found that internally consistent old repeat checkpoints
   could be accepted after cache rewind. A regression reproduced the stale-read
@@ -634,7 +681,7 @@
 
 ## Intentionally deferred
 
-- recurring schedules, scheduled effect grants and additional effectful tool profiles;
+- calendar recurrence, scheduled effect grants and additional effectful tool profiles;
 - additional providers, OpenAI model profiles, reasoning replay, remote cancel,
   and explicit prompt-cache breakpoints;
 - additional capability derivers, durable/cross-process authorization,

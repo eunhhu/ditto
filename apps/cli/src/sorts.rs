@@ -1,3 +1,4 @@
+use super::presentation::{Kind, View, safe};
 use std::{io::Read, path::PathBuf, time::Duration};
 
 use anyhow::{Context, bail};
@@ -21,9 +22,10 @@ pub(super) struct SortArgs {
 
 pub(super) async fn start(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     args: SortArgs,
 ) -> anyhow::Result<()> {
+    let api = view.api;
     let text = read_input(&args.file)?;
     let query = AgentRunQuery {
         request_id: args
@@ -31,9 +33,16 @@ pub(super) async fn start(
             .unwrap_or_else(|| ulid::Ulid::new().to_string()),
         session_id: args.session,
     };
+    view.submitting(Kind::Sort, &query.request_id, &query.session_id);
     eprintln!(
-        "Sort request: {} (session: {})",
-        query.request_id, query.session_id
+        "Permission: sort exact file {} once ({} UTF-8 bytes); deduplication {}; original file unchanged; expires with this request; no durable grant.",
+        safe(&args.file.to_string_lossy()),
+        text.len(),
+        if args.unique {
+            "requested"
+        } else {
+            "not requested"
+        }
     );
     let result = decode(
         client
@@ -51,35 +60,37 @@ pub(super) async fn start(
     )
     .await?;
     if args.detach || result.status != SortRunStatus::Running {
-        return print_result(result);
+        return print_result(result, view);
     }
     let wait = follow(client, api, &query, &result.task_id);
     tokio::pin!(wait);
     tokio::select! {
-        result = &mut wait => print_result(result?),
+        result = &mut wait => print_result(result?, view),
         signal = tokio::signal::ctrl_c() => {
             signal.context("could not listen for Ctrl+C")?;
             let result = request(client, api, &query, true).await?;
             eprintln!("Cancellation requested; inspect the same request ID for the terminal state.");
-            print_result(result)
+            print_result(result, view)
         }
     }
 }
 
 pub(super) async fn inspect(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     identity: RunIdentity,
 ) -> anyhow::Result<()> {
-    print_result(request(client, api, &identity.into(), false).await?)
+    let api = view.api;
+    print_result(request(client, api, &identity.into(), false).await?, view)
 }
 
 pub(super) async fn cancel(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     identity: RunIdentity,
 ) -> anyhow::Result<()> {
-    print_result(request(client, api, &identity.into(), true).await?)
+    let api = view.api;
+    print_result(request(client, api, &identity.into(), true).await?, view)
 }
 
 async fn request(
@@ -114,7 +125,7 @@ async fn decode(response: reqwest::Response) -> anyhow::Result<SortRunResponse> 
             .context("invalid sort error response")?;
         bail!(
             "sort command failed ({code}): {}",
-            body["error"].as_str().unwrap_or("invalid command")
+            safe(body["error"].as_str().unwrap_or("invalid command"))
         );
     }
     response
@@ -123,12 +134,12 @@ async fn decode(response: reqwest::Response) -> anyhow::Result<SortRunResponse> 
         .context("invalid sort response; inspect the same request ID")
 }
 
-fn print_result(result: SortRunResponse) -> anyhow::Result<()> {
+fn print_result(result: SortRunResponse, view: View<'_>) -> anyhow::Result<()> {
     let failed = matches!(
         result.status,
         SortRunStatus::Failed | SortRunStatus::Interrupted
     );
-    super::print_json(&serde_json::to_value(&result)?)?;
+    view.print(Kind::Sort, &serde_json::to_value(&result)?)?;
     if failed {
         bail!("sort ended without verified output; see status above");
     }

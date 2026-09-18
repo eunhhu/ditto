@@ -1,3 +1,4 @@
+use super::presentation::{Kind, View};
 use ditto_protocol::{AgentRunQuery, RepeatScheduleCommand, ScheduleListQuery};
 
 #[derive(Debug, clap::Args)]
@@ -14,9 +15,10 @@ pub(super) struct RepeatArgs {
 
 pub(super) async fn create(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     args: RepeatArgs,
 ) -> anyhow::Result<()> {
+    let api = view.api;
     let base = super::schedules::command(args.schedule)?;
     let command = RepeatScheduleCommand {
         request_id: base.request_id,
@@ -27,47 +29,61 @@ pub(super) async fn create(
         every_seconds: args.every_seconds,
         occurrences: args.occurrences,
     };
-    eprintln!(
-        "Repeat request: {} (session: {}). Expired occurrences are skipped; execution requires an enabled daemon provider.",
-        command.request_id, command.session_id
-    );
+    view.submitting(Kind::Repeat, &command.request_id, &command.session_id);
+    eprintln!("Expired occurrences are skipped; execution requires an enabled daemon provider.");
     super::schedules::show(
         client
             .post(format!("{api}/v1/commands/repeat"))
             .json(&command),
+        view,
+        Kind::Repeat,
     )
     .await
 }
 pub(super) async fn inspect(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     identity: super::runs::RunIdentity,
 ) -> anyhow::Result<()> {
+    let api = view.api;
     let query: AgentRunQuery = identity.into();
-    super::schedules::show(client.get(format!("{api}/v1/repeats")).query(&query)).await
+    super::schedules::show(
+        client.get(format!("{api}/v1/repeats")).query(&query),
+        view,
+        Kind::Repeat,
+    )
+    .await
 }
 pub(super) async fn cancel(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     identity: super::runs::RunIdentity,
 ) -> anyhow::Result<()> {
+    let api = view.api;
     let query: AgentRunQuery = identity.into();
     super::schedules::show(
         client
             .post(format!("{api}/v1/commands/repeat/cancel"))
             .json(&query),
+        view,
+        Kind::Repeat,
     )
     .await
 }
 pub(super) async fn active(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     session: String,
 ) -> anyhow::Result<()> {
-    super::schedules::show(client.get(format!("{api}/v1/repeats/active")).query(
-        &ScheduleListQuery {
-            session_id: session,
-        },
-    ))
+    let api = view.api;
+    super::schedules::show(
+        client
+            .get(format!("{api}/v1/repeats/active"))
+            .query(&ScheduleListQuery {
+                session_id: session,
+            }),
+        view,
+        Kind::Repeat,
+    )
     .await
 }

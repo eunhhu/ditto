@@ -55,6 +55,8 @@ The executable foundation includes:
   visible expiry/cancellation and restart inspection without automatic retry;
 - finite fixed-interval repeats with independent occurrence identities, aggregate
   missed ranges and durable parent cancellation through the same scheduler;
+- opt-in human CLI task views and reproducible offline RAM, latency, accounting
+  and restart baselines, with production and fixture results labelled separately;
 - repository-native instructions for long-running coding agents.
 
 Calendar cron, indefinite repeats, scheduled effect grants, additional model
@@ -109,6 +111,26 @@ cargo run -p ditto-cli -- run-status REQUEST_ID
 cargo run -p ditto-cli -- run-cancel REQUEST_ID
 ```
 
+Add `--human` to run, sort, schedule or repeat start/status/cancel commands and
+schedule/repeat lists for readable output. JSON remains the default, including
+when redirected; exit codes retain their existing meaning.
+
+```bash
+cargo run -p ditto-cli -- run "Sort this list" --sort-file list.txt --human
+cargo run -p ditto-cli -- run-status REQUEST_ID --human
+cargo run -p ditto-cli -- repeat-status REQUEST_ID --human
+```
+
+The human view shows model answers as **unverified**, independently of verified
+sort results. It includes exact attached-artifact permission and the separate
+deduplication choice, wait reasons, schedule windows and child inspection
+commands. Cancellation requested is distinct from terminal cancellation;
+an exhausted repeat timetable is not successful work. Inspect the child outcome.
+Recoverable request/session identity and an inspection command print to stderr
+before submission. If submission is uncertain, inspect first and reuse the same
+ID only for the identical request. Terminal controls in human fields are escaped,
+including newlines displayed as `\n`, so content cannot impersonate status lines.
+
 Runs default to the `personal` session. Relevant current session memory is
 compiled into context; prior conversation text is not automatically reinserted.
 The model can answer directly or read an already-rooted, same-scope artifact.
@@ -138,7 +160,7 @@ cargo run -p ditto-cli -- sort-cancel REQUEST_ID
 ```
 
 The CLI reads a regular UTF-8 file of at most 64 KiB / 4096 lines. Output is JSON
-with sorted text and an immutable artifact reference; the original file is
+by default, with sorted text and an immutable artifact reference; the original file is
 unchanged. Ordering is by bytes, LF separates lines, CR remains data, and a
 nonempty last line gains LF. `--unique` removes exact duplicate lines. The
 process uses a cleared environment and private scratch, runs for at most five
@@ -148,6 +170,12 @@ that a broader model goal was completed. Same-ID retries do not rerun work.
 This closed profile has no shell or caller-selected executable. Model dispatch
 requires the explicit per-run attachment above; general process profiles remain
 future work.
+
+Submission states the exact file, byte count and deduplication choice. The
+standalone sort status response does not contain its input reference or mode;
+the human view says these are unavailable there. Model-run status does contain
+the attached input reference and deduplication permission. Neither path creates
+a durable grant or fulfills general approval requests.
 
 One-time future requests use the same agent and current session memory. Choose
 future timestamps with explicit offsets; the second timestamp is the exclusive
@@ -274,7 +302,23 @@ python3 scripts/smoke-local-sort.py
 # Actual CLI + daemon router + deterministic model fixture, without API calls:
 cargo test -p ditto-daemon built_cli_run_wait_retry_status_and_cancel -- --ignored
 cargo test -p ditto-daemon built_cli_model_sort_permission_retry_and_disabled_status -- --ignored
+
+# Offline personal-agent baseline (cached dependencies/toolchain required):
+python3 scripts/personal-baseline.py --output /tmp/ditto-baseline.json
 ```
+
+The baseline builds with `--offline --locked`, uses disposable stores and a
+cleared runtime environment, and calls no live provider. It records 12 repeated
+requests by default, startup/recovery readiness, idle/repeated RAM, raw CLI
+latencies and p50/p95, model/tool dispatch accounting, exact retry and restart
+evidence. Linux `/proc` supplies server RSS/high-water RSS; unsupported readings
+are null. Debug production-daemon results with the provider disabled are separate
+from the injected fixture test server. Known external provider spend is zero;
+missing token usage, live-equivalent model cost, model quality and isolated
+model/tool/overhead timing remain unknown. This small baseline does not establish
+live-agent quality, long-use efficiency, zero total cost or v0.1 readiness.
+See the [Task 014 contract](docs/agent/tasks/014-status-baselines.md) and
+[measured evidence](docs/agent/tasks/014-evidence.md).
 
 Long-running Codex or other coding-agent work starts at [`AGENTS.md`](AGENTS.md)
 and [`docs/agent/NEXT.md`](docs/agent/NEXT.md). A paste-ready autonomous-run
