@@ -26,6 +26,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_REPLAY_PAGE_SIZE: usize = 500;
+#[cfg(test)]
+mod baseline;
 mod memory;
 mod runs;
 mod schedules;

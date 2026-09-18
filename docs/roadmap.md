@@ -117,6 +117,10 @@ credentials or granting authority beyond one lease.
 
 ## F. Gateway UX
 
+Task 014 provides a minimum CLI human view for existing task/status and exact
+file permission paths, with recoverable identity and independent model/tool/
+schedule outcomes. It does not fulfill general approvals or complete gateway UX.
+
 - WebSocket event protocol
 - web timeline and inspector
 - context receipt editor
@@ -179,7 +183,15 @@ Exit criterion: an agreed schedule corpus survives restart before/during/after
 dispatch with no silent missed or repeated work under its declared delivery
 policy. Effects retain the same lease and evidence requirements as manual runs.
 
-## J. Cost and repeated-use performance — baseline pending
+## J. Cost and repeated-use performance — initial offline baseline recorded
+
+Task 014 records a reproducible [offline baseline](agent/tasks/014-evidence.md)
+for the production-disabled daemon and a separately labelled injected test
+server: startup/idle/repeated RAM, raw CLI latency, call accounting, explicit
+known/unknown cost and process-restart recovery. The 12-request debug sample
+establishes a local starting point. Live-model quality, large histories/catalogues,
+first useful progress, isolated model/tool versus Ditto-added timing and learning
+remain unmeasured; this milestone's broader exit criterion is still open.
 
 - separate necessary model/tool work from Ditto-added work
 - idle/peak RSS, startup cost, and catalogue/history growth

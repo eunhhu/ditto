@@ -1,3 +1,4 @@
+use super::presentation::{Kind, View};
 use anyhow::{Context, bail};
 use std::time::Duration;
 
@@ -19,18 +20,17 @@ pub(super) struct ScheduleArgs {
 
 pub(super) async fn create(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     args: ScheduleArgs,
 ) -> anyhow::Result<()> {
+    let api = view.api;
     let command = command(args)?;
-    eprintln!(
-        "Schedule request: {} (session: {}). Execution requires an explicitly enabled daemon provider.",
-        command.request_id, command.session_id
-    );
+    view.submitting(Kind::Schedule, &command.request_id, &command.session_id);
+    eprintln!("Execution requires an explicitly enabled daemon provider.");
     let response = client
         .post(format!("{api}/v1/commands/schedule"))
         .json(&command);
-    show(response).await
+    show(response, view, Kind::Schedule).await
 }
 pub(super) fn command(args: ScheduleArgs) -> anyhow::Result<ditto_protocol::ScheduleRunCommand> {
     let request_id = args
@@ -47,38 +47,56 @@ pub(super) fn command(args: ScheduleArgs) -> anyhow::Result<ditto_protocol::Sche
 
 pub(super) async fn inspect(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     identity: super::runs::RunIdentity,
 ) -> anyhow::Result<()> {
+    let api = view.api;
     let query: ditto_protocol::AgentRunQuery = identity.into();
-    show(client.get(format!("{api}/v1/schedules")).query(&query)).await
+    show(
+        client.get(format!("{api}/v1/schedules")).query(&query),
+        view,
+        Kind::Schedule,
+    )
+    .await
 }
 pub(super) async fn cancel(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     identity: super::runs::RunIdentity,
 ) -> anyhow::Result<()> {
+    let api = view.api;
     let query: ditto_protocol::AgentRunQuery = identity.into();
     show(
         client
             .post(format!("{api}/v1/commands/schedule/cancel"))
             .json(&query),
+        view,
+        Kind::Schedule,
     )
     .await
 }
 pub(super) async fn pending(
     client: &reqwest::Client,
-    api: &str,
+    view: View<'_>,
     session: String,
 ) -> anyhow::Result<()> {
-    show(client.get(format!("{api}/v1/schedules/pending")).query(
-        &ditto_protocol::ScheduleListQuery {
-            session_id: session,
-        },
-    ))
+    let api = view.api;
+    show(
+        client.get(format!("{api}/v1/schedules/pending")).query(
+            &ditto_protocol::ScheduleListQuery {
+                session_id: session,
+            },
+        ),
+        view,
+        Kind::Schedule,
+    )
     .await
 }
-pub(super) async fn show(request: reqwest::RequestBuilder) -> anyhow::Result<()> {
+pub(super) async fn show(
+    request: reqwest::RequestBuilder,
+    view: View<'_>,
+    kind: Kind,
+) -> anyhow::Result<()> {
     let response = request
         .timeout(Duration::from_secs(30))
         .send()
@@ -89,10 +107,10 @@ pub(super) async fn show(request: reqwest::RequestBuilder) -> anyhow::Result<()>
     if !status.is_success() {
         bail!(
             "schedule command failed ({status}): {}",
-            value["error"].as_str().unwrap_or("invalid command")
+            super::presentation::safe(value["error"].as_str().unwrap_or("invalid command"))
         );
     }
-    super::print_json(&value)?;
+    view.print(kind, &value)?;
     if matches!(
         value["status"].as_str(),
         Some("failed" | "interrupted" | "missed")
