@@ -5,17 +5,28 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-Task 014 is complete as a minimum pre-v0.1 slice: readable CLI task inspection,
-visible existing exact-file permission, and a reproducible offline baseline.
-Next, define representative personal-agent quality and longer-history workloads
-against that baseline before claiming the first personal-agent milestone.
-Live-model quality, first useful progress and isolated model/tool versus
-Ditto-added latency remain unmeasured. General approval fulfillment remains
-deferred; the human view does not add a grant or approval service. Use observed
-workflow gaps and measurements before adding another runtime surface or
-infrastructure.
+Task 015 is complete as a narrow measurement slice: an offline synthetic
+correction/exclusion workload compares minimal history with 1,000 unrelated
+memories through the actual CLI/HTTP/kernel path after restart. All ten model
+capsules passed; this is one lexical scenario, not general personal-agent quality.
+Next, define a representative multi-query personal-task corpus and its expected
+outcomes before claiming the first personal-agent milestone. Live-model answer
+quality, first useful progress, isolated model/tool versus Ditto-added latency,
+growing catalogues and learning remain unmeasured. General approval fulfillment
+remains deferred. Use observed workflow gaps and measurements before adding
+another runtime surface or infrastructure.
 
 ## Completed
+
+- [`015 Offline context-quality and longer-history workloads`](tasks/015-quality-history-workloads.md):
+  bounded standard-library harness, exact correction and session isolation after
+  restart, per-request test-driver capsule observations reconciled with durable
+  requests and unchanged call counting, raw latency/RSS/storage/context metrics
+  and exact source/artifact hashes. Eight new Python regressions, the canonical
+  small smoke, the full gate (490 Rust tests) and the recorded 1,000-memory/five-query
+  comparison passed. Scope is synthetic V1 lexical context selection; model
+  answers remain unverified. See [evidence](tasks/015-evidence.md) and
+  [raw report](tasks/015-quality-history.json).
 
 - [`014 Human task inspection and offline personal-agent baseline`](tasks/014-status-baselines.md):
   opt-in human run/sort/schedule/repeat views, independent outcomes, explicit

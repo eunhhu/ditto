@@ -57,6 +57,8 @@ The executable foundation includes:
   missed ranges and durable parent cancellation through the same scheduler;
 - opt-in human CLI task views and reproducible offline RAM, latency, accounting
   and restart baselines, with production and fixture results labelled separately;
+- offline synthetic memory-correction/exclusion measurements from actual
+  model-facing capsules after restart, comparing minimal and longer histories;
 - repository-native instructions for long-running coding agents.
 
 Calendar cron, indefinite repeats, scheduled effect grants, additional model
@@ -305,6 +307,8 @@ cargo test -p ditto-daemon built_cli_model_sort_permission_retry_and_disabled_st
 
 # Offline personal-agent baseline (cached dependencies/toolchain required):
 python3 scripts/personal-baseline.py --output /tmp/ditto-baseline.json
+# Synthetic context/history comparison (1,000 unrelated memories, five queries):
+python3 scripts/personal-quality.py --output docs/agent/tasks/015-quality-history.json
 ```
 
 The baseline builds with `--offline --locked`, uses disposable stores and a
@@ -319,6 +323,19 @@ model/tool/overhead timing remain unknown. This small baseline does not establis
 live-agent quality, long-use efficiency, zero total cost or v0.1 readiness.
 See the [Task 014 contract](docs/agent/tasks/014-status-baselines.md) and
 [measured evidence](docs/agent/tasks/014-evidence.md).
+
+The Task 015 harness compares zero versus 1,000 unrelated memories by default,
+with five unique queries per profile after exact correction and process restart.
+It checks the actual model-facing capsule for corrected inclusion and stale,
+irrelevant, noise and other-session exclusion, independently of the fixed fixture
+answer. `--history-size` (1–5000) and `--samples` (2–100) bound the work; the
+canonical gate runs a small smoke. Raw samples, context bytes/nodes, RSS,
+storage/events, call counts and exact source/Cargo artifact hashes are recorded.
+This is one synthetic V1 lexical scenario, not general or live-answer quality,
+semantic retrieval, cross-session recall or performance superiority. See the
+[Task 015 contract](docs/agent/tasks/015-quality-history-workloads.md),
+[evidence](docs/agent/tasks/015-evidence.md) and
+[raw report](docs/agent/tasks/015-quality-history.json).
 
 Long-running Codex or other coding-agent work starts at [`AGENTS.md`](AGENTS.md)
 and [`docs/agent/NEXT.md`](docs/agent/NEXT.md). A paste-ready autonomous-run

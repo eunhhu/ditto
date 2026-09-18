@@ -28,6 +28,10 @@ cargo test --locked -p ditto-daemon runs::tests::built_cli_model_sort_permission
 cargo test --locked -p ditto-daemon schedules::tests::built_cli_schedule_restart_dispatch_retry_and_cancel -- --exact --ignored
 cargo test --locked -p ditto-daemon schedules::tests::repeats::built_cli_repeat_restart_dispatch_inspect_retry_and_cancel -- --exact --ignored
 python3 scripts/test-personal-baseline.py
+python3 scripts/test-personal-quality.py
 baseline_report=$(mktemp "${TMPDIR:-/tmp}/ditto-baseline-gate.XXXXXX")
-trap 'rm -f "$baseline_report"' EXIT
+quality_report=""
+trap 'rm -f "$baseline_report" "$quality_report"' EXIT
 python3 scripts/personal-baseline.py --samples 2 --idle-seconds 0.05 --output "$baseline_report"
+quality_report=$(mktemp "${TMPDIR:-/tmp}/ditto-quality-gate.XXXXXX")
+python3 scripts/personal-quality.py --history-size 4 --samples 2 --output "$quality_report"

@@ -12,6 +12,7 @@ use std::{io::Write, sync::Arc};
 struct OfflineDriver {
     descriptor: DriverDescriptor,
     call_log: PathBuf,
+    context_log: Option<PathBuf>,
 }
 
 impl ModelDriver for OfflineDriver {
@@ -27,6 +28,20 @@ impl ModelDriver for OfflineDriver {
             .open(&self.call_log)
             .unwrap();
         writeln!(log, "{}", request.request_id).unwrap();
+        if let Some(path) = &self.context_log {
+            // Opt-in synthetic-workload observation at the actual driver boundary.
+            // Keep the exact capsule serialization separate from call counting.
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
+            let observation = json!({
+                "request_id": request.request_id,
+                "context_json": serde_json::to_string(&request.turn.context).unwrap(),
+            });
+            writeln!(log, "{observation}").unwrap();
+        }
         let continuing = request
             .turn
             .conversation
@@ -95,6 +110,8 @@ async fn fixture_server() {
                 .collect(),
         },
         call_log: data.join("fixture-calls.txt"),
+        context_log: std::env::var_os("DITTO_BASELINE_OBSERVE_CONTEXT")
+            .map(|_| data.join("fixture-contexts.jsonl")),
     });
     let shutdown = CancellationToken::new();
     let app = Router::new()

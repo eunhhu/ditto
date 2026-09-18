@@ -189,9 +189,14 @@ Task 014 records a reproducible [offline baseline](agent/tasks/014-evidence.md)
 for the production-disabled daemon and a separately labelled injected test
 server: startup/idle/repeated RAM, raw CLI latency, call accounting, explicit
 known/unknown cost and process-restart recovery. The 12-request debug sample
-establishes a local starting point. Live-model quality, large histories/catalogues,
-first useful progress, isolated model/tool versus Ditto-added timing and learning
-remain unmeasured; this milestone's broader exit criterion is still open.
+establishes a local starting point. Task 015 adds a recorded
+[synthetic context/history workload](agent/tasks/015-evidence.md): zero versus
+1,000 unrelated memories, exact correction and exclusion in all ten model-facing
+capsules after restart, with five unique requests per profile and source-bound
+latency/RSS/storage measurements. This is existing V1 lexical selection; answers
+remain unverified. Representative multi-query task quality, live-model quality,
+growing catalogues, first useful progress, isolated model/tool versus Ditto-added
+timing and learning remain unmeasured; the broader exit criterion is still open.
 
 - separate necessary model/tool work from Ditto-added work
 - idle/peak RSS, startup cost, and catalogue/history growth

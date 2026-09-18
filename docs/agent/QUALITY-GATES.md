@@ -10,8 +10,10 @@ The script checks tracked-artifact, developer-path, and credential-shaped
 canaries before formatting, strict Clippy, workspace tests, and required agent
 control files. It also runs the five existing actual-CLI fixture scenarios,
 baseline accounting regressions and a small offline baseline scenario (two
-repeated requests per server). Python 3 uses only its standard library; the
-measurement script builds with cached dependencies via `--offline --locked`.
+repeated requests per server), plus context-assessment/process regressions and
+an offline history smoke (zero versus four unrelated memories, two queries each).
+Python 3 uses only its standard library; the measurement scripts build with
+cached dependencies via `--offline --locked`.
 Loopback binding and the existing `/usr/bin/sort` profile must be available.
 CI additionally verifies the declared MSRV.
 
@@ -29,6 +31,7 @@ CI additionally verifies the declared MSRV.
 | Completion | verifier-specific positive and negative evidence; stream closure is insufficient |
 | Human task views | default JSON compatibility, independent model/sort/parent/child outcomes, unverified answers, requested/terminal cancellation, exhausted/missed repeats, recoverable identity and terminal-control escaping |
 | Personal-agent baseline | separate production-disabled and injected-fixture results; raw samples/settings/source identity; idle/repeated RSS and latency; model/tool accounting; known versus unavailable cost; exact retry and restart evidence |
+| Context/history workload | actual CLI saves/correction/restart/queries; exact driver capsules reconciled with durable request identities and independent calls; corrected inclusion and stale/irrelevant/noise/other-session exclusion for every request; raw measurements/source hashes; no fixture-answer quality inference |
 
 ## Offline baseline evidence
 
@@ -45,6 +48,26 @@ inference is permitted. Offline external provider spend is known zero, while
 unavailable usage, live-equivalent cost and isolated timing are null with reasons.
 Server RSS excludes CLI/sort children and a short fixed-catalogue sample is not
 evidence of long-use quality or a comparison with another agent.
+
+## Offline context/history evidence
+
+`python3 scripts/personal-quality.py --output docs/agent/tasks/015-quality-history.json`
+runs fresh minimal and longer histories with zero and 1,000 unrelated memories
+and five unique queries per profile. `--history-size` (1–5000) and `--samples`
+(2–100) bound the workload. The canonical gate uses four unrelated memories and
+two queries each, with a disposable report. Python optimization (`-O`) is
+rejected because it would disable assertions. Set `TMPDIR` and `CARGO_TARGET_DIR`
+inside the repository when all generated files must remain local to it.
+
+The cfg(test) driver can opt into a separate structured capsule log. Every
+request must retain the corrected fact and exclude stale, irrelevant, noise and
+other-session values after restart. Observations must match durable request
+IDs/payloads and the independent call log. Default fixture call counting and
+production behavior remain unchanged. Report raw timing, RSS/storage/event/call
+counts, selected capsule nodes/bytes and source/binary hashes. Recheck hashes
+after recording; regenerate measurements if any measured source changes.
+The [recorded evidence](tasks/015-evidence.md) is one synthetic V1 lexical
+selection workload; broader quality and v0.1 criteria remain open.
 
 ## Review questions
 
