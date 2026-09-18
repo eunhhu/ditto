@@ -59,10 +59,12 @@ cost or v0.1 readiness. Broader workloads remain separate work.
 
 ## Verification state
 
-Complete locally, with the implementation intentionally uncommitted. RED evidence,
-eight focused Python regressions, Task 014 compatibility, the full canonical gate
-and the default 1,000-memory/five-query comparison passed. All ten observed
-capsules contained one corrected node (227 serialized bytes), with every required
-exclusion. See [verification and measurements](015-evidence.md) and the
+Complete on implementation commit `0a272936c722409cb635d39e814b97ce4cd38b7f`.
+RED evidence, eight focused Python regressions, Task 014 compatibility, the full
+canonical gate and the default 1,000-memory/five-query comparison passed. All ten
+observed capsules contained one corrected node (227 serialized bytes), with every
+required exclusion. Independent fail-closed review found no security concern or
+logic error; PR #20's Linux `rust` and `msrv` checks passed on that implementation
+head. See [verification and measurements](015-evidence.md) and the
 [raw report](015-quality-history.json). Broader personal-agent quality and v0.1
 readiness remain open.

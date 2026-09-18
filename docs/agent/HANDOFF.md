@@ -25,12 +25,15 @@
 
 ## Canonical state
 
-- Current slice branch: `dev/task-015-quality-workloads`, base
-  `d1575bfd0f018bdfdee8dcccbdbd2b674d5026dd`. Task 015 is locally verified and
-  intentionally uncommitted at the user's request. No push, PR or remote check
-  was performed. [Evidence](tasks/015-evidence.md) and the
-  [raw report](tasks/015-quality-history.json) identify the measured uncommitted
-  sources and exact Cargo artifacts.
+- Current slice: Task 015 on `dev/task-015-quality-workloads`, based on
+  `d1575bfd0f018bdfdee8dcccbdbd2b674d5026dd`. Implementation commit
+  `0a272936c722409cb635d39e814b97ce4cd38b7f` is published in
+  [PR #20](https://github.com/eunhhu/ditto/pull/20); the final implementation
+  head passed local verification, independent fail-closed review, and Linux
+  `rust`/`msrv` CI. The PR was `CLEAN` and `MERGEABLE` at the last readback.
+  [Evidence](tasks/015-evidence.md) and the
+  [raw report](tasks/015-quality-history.json) identify the measured source
+  digests and exact Cargo artifacts.
 - Previous slice: Task 014 on `dev/task-014-status-baselines`, base
   `786a0587bdfed175579289309f9a938bb63f7424`; its
   [evidence](tasks/014-evidence.md) and [raw baseline](tasks/014-baseline.json)
@@ -150,10 +153,11 @@
   hashes bind the measurement. Capsule assessment measures one V1 lexical
   scenario, not model-answer quality or semantic/cross-session recall.
 - No production runtime surface, context logging, wire/policy/authority
-  contract, dependency or architecture changed. No live provider, credential,
-  download, commit, push or PR was used. External provider spend is zero;
-  model-answer quality, live tokens/cost, first useful progress and isolated
-  timing remain unavailable. Broader v0.1 criteria remain open.
+  contract, dependency or architecture changed. The workload itself used no
+  live provider, credential or download; publication happened only after the
+  measured source passed local checks and independent review. External provider
+  spend is zero; model-answer quality, live tokens/cost, first useful progress
+  and isolated timing remain unavailable. Broader v0.1 criteria remain open.
 
 ## Previous verified slice: Task 014
 

@@ -178,5 +178,6 @@ Recovery covers process kill/reopen, not power/host loss.
 Model-answer quality, fixture/live token usage, live-equivalent cost, first
 useful progress and isolated model/tool/Ditto timing are null/unavailable with
 reasons. External provider spend is known zero; total operating cost is unknown.
-No credential use, live provider call, download, commit, push or PR is part of
-this slice's execution.
+No credential use, live provider call, download, commit, push or PR occurs inside
+the measured workload. Development publication followed the recorded measurement
+and did not alter any source file covered by its digest manifest.
