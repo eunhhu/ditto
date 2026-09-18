@@ -25,15 +25,24 @@
 
 ## Canonical state
 
-- Current slice: Task 015 on `dev/task-015-quality-workloads`, based on
-  `d1575bfd0f018bdfdee8dcccbdbd2b674d5026dd`. Implementation commit
-  `0a272936c722409cb635d39e814b97ce4cd38b7f` is published in
-  [PR #20](https://github.com/eunhhu/ditto/pull/20); the final implementation
-  head passed local verification, independent fail-closed review, and Linux
-  `rust`/`msrv` CI. The PR was `CLEAN` and `MERGEABLE` at the last readback.
-  [Evidence](tasks/015-evidence.md) and the
-  [raw report](tasks/015-quality-history.json) identify the measured source
-  digests and exact Cargo artifacts.
+- Current slice: [Task 016](tasks/016-personal-task-corpus.md) on
+  `dev/task-016-personal-task-corpus`, based on
+  `5e9d5345a666bddcc85c482bd0ed5cfa9d313ed2`. Eighteen quality regressions, Task 014 compatibility, the
+  bounded smoke, full canonical gate, cached Rust 1.88 check and fifty-run
+  default report/audit passed. [Evidence](tasks/016-evidence.md) and the
+  [report](tasks/016-personal-task-corpus.json) bind the measured source and
+  artifacts. Independent review rejected permissive boolean/float version
+  equality; adversarial regressions and exact integer/full-round checks closed
+  that blocker before final review and repository delivery.
+- Task 015 [PR #20](https://github.com/eunhhu/ditto/pull/20) is **MERGED**, squash
+  commit `5e9d5345a666bddcc85c482bd0ed5cfa9d313ed2` (user-provided merge state;
+  current local HEAD agrees; no network readback). Its pre-merge implementation
+  commit was `0a272936c722409cb635d39e814b97ce4cd38b7f`, based on
+  `d1575bfd0f018bdfdee8dcccbdbd2b674d5026dd`. The final implementation head passed
+  the then-recorded local review and Linux `rust`/`msrv` CI. Task 015's
+  [evidence](tasks/015-evidence.md), [report](tasks/015-quality-history.json) and
+  old commands are historical; Task 016's five-case/repetition semantics do not
+  reproduce those measurements.
 - Previous slice: Task 014 on `dev/task-014-status-baselines`, base
   `786a0587bdfed175579289309f9a938bb63f7424`; its
   [evidence](tasks/014-evidence.md) and [raw baseline](tasks/014-baseline.json)
@@ -128,7 +137,49 @@
   injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
   provider completion still is not task completion.
 
-## Latest verified slice: Task 015
+## Latest verified slice: Task 016
+
+- The existing standard-library harness now emits schema 2,
+  `task016-offline-personal-task-corpus-v1`, with a complete frozen corpus and
+  digest. Seven synthetic seeds and five literal queries exercise correction,
+  strict reversed trip-memory ranking, food preference and empty context.
+  Samples mean repetitions per query: smoke 20 runs, default 50 across two
+  fresh 0/1,000-noise profiles. Client request IDs are unique across profiles.
+- Actual CLI save/correct/restart/list/run paths passed with no seed/recovery
+  model/tool calls. Each default profile reconciles 25 planned inputs, model
+  requests, independent calls and observations. Exact set/order and identity
+  are 25/25, nontrivial order 10/10, micro Recall@2 and returned precision 30/30.
+  All leak numerators are zero. Empty denominators are null with reasons.
+  Durable query/session/task/turn/event/causal identity and exact observed
+  capsule bytes are checked; source provenance resolves original user input.
+- Required RED logs preceded implementation: missing assessment/reconciliation
+  API and an actual two-versus-ten request coverage failure. Local socket denial
+  was resolved through loopback execution; it was not counted as workflow RED.
+  Final review regressions also cover malformed records, full frozen rounds,
+  extra inputs, atomic publication diagnostics and cross-profile identity uniqueness. Ten assessor
+  tests plus eight workflow tests pass; Task 014's eight tests remain green.
+- The unchanged canonical gate passed canaries, format, strict Clippy, 490 Rust
+  tests, both Python suites and both smoke workloads. Cached Rust 1.88 offline
+  workspace/all-target checking passed. The final full report was generated
+  after gates and independently audited against literal expectations, raw
+  aggregates, 113 source files, three exact Cargo artifacts and the corpus hash.
+  Measured values and RED/GREEN log digests are in the task evidence.
+- Cleanup tests verify server reaping and store removal on SIGTERM before/after
+  restart, SIGINT after restart and assessment failure. Failed assessment/final
+  hash checks preserve an older report; atomic publication occurs only after
+  complete pass and final hashes. Final scope/link/canary/diff and process/store
+  audits passed; no blocker or required unrun check remains.
+- No Rust, production surface, observer/call-log contract, dependency or ADR
+  changed. The measured workload used no live provider, credentials, external
+  network or download. Task 015's report/commands remain historical;
+  its old sample semantics are not reproduced by the new corpus.
+- This establishes only five-case synthetic lexical ContextCapsule conformance
+  after restart. Model-answer quality, task completion, semantic recall,
+  tool-task success, live cost, first useful progress, isolated Ditto overhead,
+  general agent quality and v0.1 readiness remain unavailable/open. Listing
+  warms recovery and fixture logging adds I/O; no latency superiority is claimed.
+
+## Previous verified slice: Task 015
 
 - The standard-library offline workload compares identical synthetic facts with
   zero versus 1,000 unrelated same-session memories, then queries five unique
