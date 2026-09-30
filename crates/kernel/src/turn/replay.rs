@@ -12,7 +12,8 @@ use ditto_context::{
 use ditto_model::{
     CancellationId, ContentPart, ConversationItem, ExecutionEpochId, FinishReason,
     GenerationControls, ModelEvent, ModelFeature, ModelRequest, OutputConstraint,
-    ParallelToolCalls, ProviderCallId, ToolCallBuffer, ToolCallError, ToolChoice, ToolUsePolicy,
+    ParallelToolCalls, ProviderCallId, StableSystemPrefix, ToolCallBuffer, ToolCallError,
+    ToolChoice, ToolUsePolicy,
 };
 use ditto_protocol::{EventActor, EventRecord, event_kind};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -28,7 +29,7 @@ use super::run::turn_signature;
 use super::shared::{
     Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, agent_run_text,
     append_assistant_text, bounded_turn_failure_message, history_messages, select_history,
-    stable_system_prefix, turn_failure_code_for_model,
+    system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
@@ -216,6 +217,8 @@ struct ReplayProjector<'turn, 'snapshot> {
     input_recorded_at: DateTime<Utc>,
     input_text: String,
     context_payload: Option<ContextCompiledPayload>,
+    /// System instructions recomputed from the recorded context payload.
+    system_prefix: Option<StableSystemPrefix>,
     capabilities_payload: Option<CapabilitiesSelectedPayload>,
     requests: Vec<ModelRequestedPayload>,
     outputs: Vec<ModelOutputPayload>,
@@ -339,6 +342,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             input_recorded_at: first.recorded_at,
             input_text,
             context_payload: None,
+            system_prefix: None,
             capabilities_payload: None,
             requests: Vec::new(),
             outputs: Vec::new(),
@@ -366,6 +370,16 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         self.validate_context_sources(&context, context_event)?;
         let history = self.conversation_history(&context)?;
         self.conversation.splice(0..0, history_messages(&history));
+        self.system_prefix = Some(
+            system_prefix(
+                context.event_version,
+                self.input_recorded_at,
+                context.utc_offset_minutes,
+            )
+            .ok_or_else(|| {
+                replay_invalid("context.compiled time offset contradicts its payload version")
+            })?,
+        );
         self.context = Some(context.capsule.clone());
         self.context_payload = Some(context);
 
@@ -1257,7 +1271,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 .as_ref()
                 .expect("selected epoch is set")
                 .clone()
-            || request.stable_system_prefix != stable_system_prefix()
+            || Some(&request.stable_system_prefix) != self.system_prefix.as_ref()
             || request.tools
                 != self
                     .schemas

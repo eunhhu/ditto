@@ -444,7 +444,13 @@ not the failure message wording. Version-1 turns carry no reason and keep the
 positive-overlap context rule. Version 3
 ([ADR 0022](../adr/0022-conversation-threads.md)) also replays the session's
 current conversation thread to agent runs as native messages and records the
-selected prior turn IDs in `context.compiled` as `history_turn_ids`.
+selected prior turn IDs in `context.compiled` as `history_turn_ids`. Version 4
+([ADR 0026](../adr/0026-assistant-instructions-and-local-time.md)) replaces
+the system instructions with personal-assistant instructions ending in the
+local time of acceptance. It records the host's UTC offset in minutes in
+`context.compiled` as `utc_offset_minutes`, and replay recomputes the
+instructions from it and the input's recorded time. Versions 1–3 keep the
+legacy instructions and carry no offset.
 
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished

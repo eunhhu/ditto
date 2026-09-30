@@ -17,8 +17,15 @@ ADR when a contract changes, and evidence:
    and a per-answer inspector - complete.
 4. [021](tasks/021-telegram-gateway.md) Telegram gateway and delivery of
    scheduled results - complete.
-5. 022 Builtin tool interface with model-callable memory tools.
-6. 023 Web fetch and search tools behind network leases.
+5. [022](tasks/022-assistant-instructions.md) Assistant instructions and
+   local time (turn payload version 4) - complete.
+6. 023 `web.fetch` for links the user sent: read-only network tool behind a
+   leased URL grant, with SSRF protection and bounded text extraction. Only
+   user-provided URLs, so the model has no exfiltration channel.
+7. 024 Model-callable memory tools: search beyond the context budget, and
+   saving the user's own words when asked (model output is never recorded as
+   a user assertion). Web search waits for approval fulfillment, because a
+   model-chosen query is an outbound channel.
 
 The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
 the measurement gate before any claim of parity with other assistants.
@@ -28,6 +35,8 @@ General approval fulfillment remains deferred.
 
 One line per slice; each task file and its evidence hold the details.
 
+- [022](tasks/022-assistant-instructions.md) Assistant instructions, local
+  time and `/remember` in `ditto chat`, turn payload version 4 (ADR 0026).
 - [021](tasks/021-telegram-gateway.md) Telegram gateway with streamed drafts,
   stop and scheduled result delivery (ADR 0025).
 - [020](tasks/020-local-web-app.md) Local web app, conversation view and

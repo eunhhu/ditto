@@ -3,7 +3,10 @@
 use std::io::{BufRead, Write};
 
 use anyhow::Context;
-use ditto_protocol::{AgentRunStatus, ConversationResetResponse, ResetConversationCommand};
+use ditto_protocol::{
+    AgentRunStatus, ConversationResetResponse, RememberInputCommand, ResetConversationCommand,
+    SubmitInputCommand, SubmitInputResponse,
+};
 
 use super::presentation::safe;
 
@@ -19,7 +22,7 @@ pub(super) async fn chat(
     args: ChatArgs,
 ) -> anyhow::Result<()> {
     eprintln!(
-        "Ditto chat (session {}). /new starts a new thread, /exit quits; Ctrl+C cancels a reply.",
+        "Ditto chat (session {}). /new starts a new thread, /remember <fact> saves a memory, /exit quits; Ctrl+C cancels a reply.",
         safe(&args.session)
     );
     loop {
@@ -46,6 +49,13 @@ pub(super) async fn chat(
             println!("-- new conversation --");
             continue;
         }
+        if let Some(fact) = text.strip_prefix("/remember") {
+            match remember(client, api, &args.session, fact.trim()).await {
+                Ok(()) => println!("-- saved to memory --"),
+                Err(error) => eprintln!("Error: {}", safe(&format!("{error:#}"))),
+            }
+            continue;
+        }
         match super::runs::ask(client, api, &args.session, text).await {
             Ok(result) => match (result.status, result.response) {
                 (AgentRunStatus::Unverified, Some(response)) => {
@@ -67,6 +77,46 @@ pub(super) async fn chat(
             Err(error) => eprintln!("Error: {}", safe(&format!("{error:#}"))),
         }
     }
+}
+
+/// Save exact user text as a memory through the typed input and memory commands.
+async fn remember(
+    client: &reqwest::Client,
+    api: &str,
+    session: &str,
+    fact: &str,
+) -> anyhow::Result<()> {
+    if fact.is_empty() {
+        anyhow::bail!("usage: /remember <fact>");
+    }
+    let input: SubmitInputResponse = client
+        .post(format!("{api}/v1/commands/input"))
+        .json(&SubmitInputCommand {
+            text: fact.to_owned(),
+            session_id: Some(session.to_owned()),
+            task_id: None,
+        })
+        .send()
+        .await
+        .context("could not reach the Ditto daemon")?
+        .error_for_status()
+        .context("input was not recorded")?
+        .json()
+        .await
+        .context("invalid input response")?;
+    client
+        .post(format!("{api}/v1/commands/memory"))
+        .json(&RememberInputCommand {
+            session_id: session.to_owned(),
+            input_event_id: input.event.event_id,
+            replaces: None,
+        })
+        .send()
+        .await
+        .context("could not reach the Ditto daemon")?
+        .error_for_status()
+        .context("memory was not saved")?;
+    Ok(())
 }
 
 pub(super) async fn reset(

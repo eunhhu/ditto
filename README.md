@@ -186,6 +186,10 @@ before submission. If submission is uncertain, inspect first and reuse the same
 ID only for the identical request. Terminal controls in human fields are escaped,
 including newlines displayed as `\n`, so content cannot impersonate status lines.
 
+The model is told it is the user's personal assistant, what the memory block
+means, what it cannot do (such as saving memories itself), and the current
+local time; set `TZ` for the daemon if the machine's zone is not yours.
+
 Runs default to the `personal` session. Current session memory is compiled
 into context: while the whole set fits the context budget (about a dozen short
 memories), the model receives all of it with lexical matches first, so a
@@ -200,7 +204,7 @@ follow-up like "What is his name?" works. Start a new thread at any time;
 memories are kept:
 
 ```bash
-cargo run -p ditto-cli -- chat     # interactive; /new starts a thread, /exit quits
+cargo run -p ditto-cli -- chat     # interactive; /new starts a thread, /remember saves, /exit quits
 cargo run -p ditto-cli -- new      # new thread for later run/chat requests
 ```
 The model can answer directly or read an already-rooted, same-scope artifact.
