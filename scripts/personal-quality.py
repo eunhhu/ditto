@@ -26,7 +26,7 @@ spec = importlib.util.spec_from_file_location("baseline", Path(__file__).with_na
 baseline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(baseline)
 REPO = baseline.REPO
-TURN_PAYLOAD_VERSION = 5
+TURN_PAYLOAD_VERSION = 6
 CAPSULE_ITEM_OVERHEAD_TOKENS = 16
 # Frozen independently of runtime capsules and fixture answers (Tasks 016, 016.1).
 CORPUS = {
@@ -99,12 +99,14 @@ def item_tokens(item):
 
 
 def expected_selection(relevant, active):
-    """Frozen complete-set rule applied to the seeded items, never to observations."""
+    """Frozen complete-set rule applied to the seeded items, never to observations.
+
+    Turn payload version 6 presents the selected items in ID order (admission
+    order for memories), so the capsule does not depend on the question."""
+    by_id = lambda item: item["id"]
     if sum(item_tokens(item) for item in active) > CORPUS["selection"]["token_budget"]:
-        return "ranked", list(relevant)
-    relevant_ids = {item["id"] for item in relevant}
-    rest = sorted((item for item in active if item["id"] not in relevant_ids), key=lambda item: item["id"])
-    return "complete", list(relevant) + rest
+        return "ranked", sorted(relevant, key=by_id)
+    return "complete", sorted(active, key=by_id)
 
 
 def assess_context(observation, expected, forbidden, relevant=None):
@@ -262,9 +264,16 @@ def reconcile_observations(observations, events, plans, calls, boundary):
                         and (parent["session_id"], parent["task_id"], parent["correlation_id"])
                         == (plan["session"], plan["task_id"], plan["turn_id"]), "unmatched causal event identity")
                 ancestor = parent
-            require(request["turn"]["conversation"] == [
-                {"type": "message", "role": "user", "content": [{"type": "text", "text": plan["query"]}]}],
-                "model conversation/query mismatch")
+            # Version 6 leads the message with Ditto's local-time note.
+            conversation = request["turn"]["conversation"]
+            require(isinstance(conversation, list) and len(conversation) == 1, "model conversation/query mismatch")
+            message = conversation[0]
+            text = message.get("content", [{}])[0].get("text") if isinstance(message.get("content"), list) else None
+            note, _, question = text.partition("]\n\n") if isinstance(text, str) else ("", "", None)
+            require(message.get("type") == "message" and message.get("role") == "user"
+                    and len(message["content"]) == 1 and message["content"][0].get("type") == "text"
+                    and note.startswith("[Ditto: local time ") and "]" not in note
+                    and question == plan["query"], "model conversation/query mismatch")
             require(set(observation) == {"request_id", "context_json"}, "malformed observation")
             require(strict_json(observation["context_json"]) == request["turn"]["context"]
                     and observation["context_json"] == capsule_json(request["turn"]["context"]),
@@ -493,7 +502,7 @@ def main():
     except (OSError, KeyError, ValueError):
         pass
     report = {
-        "schema": 3, "workload": "task016-offline-personal-task-corpus-v2", "utc": datetime.now(timezone.utc).isoformat(),
+        "schema": 4, "workload": "task016-offline-personal-task-corpus-v2", "utc": datetime.now(timezone.utc).isoformat(),
         "history_size": args.history_size, "samples_per_query": args.samples,
         "corpus": CORPUS, "corpus_sha256": hashlib.sha256(json.dumps(CORPUS, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "corpus_hash_basis": "UTF-8 JSON, sorted keys, compact separators, no trailing newline",

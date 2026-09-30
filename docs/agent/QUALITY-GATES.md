@@ -112,7 +112,9 @@ must reap children and remove temporary stores. Publish atomically after final
 source/artifact hash verification; independently audit the recorded report.
 
 [Task 016 evidence](tasks/016-evidence.md) (schema 2, historical) and
-[Task 016.1](tasks/016-1-personal-recall.md) (schema 3) support only five-case
+[Task 016.1](tasks/016-1-personal-recall.md) (schema 3) and
+[Task 025](tasks/025-cache-stable-layout.md) (schema 4, ID-ordered capsules)
+support only five-case
 synthetic ContextCapsule conformance after restart. Model-answer quality, task
 completion, semantic recall, tool-task success, live cost, first useful progress,
 general agent quality and v0.1 readiness remain unavailable/open.

@@ -1,7 +1,8 @@
 # ADR 0028: Thin real-time harness
 
-Status: proposed on 2026-09-30. It is decided per phase as each lands; the
-full design is in [docs/design/realtime-harness.md](../design/realtime-harness.md).
+Status: proposed on 2026-09-30 and decided per phase as each lands. Phase A
+was accepted with Task 025 (turn payload version 6). The full design is in
+[docs/design/realtime-harness.md](../design/realtime-harness.md).
 
 ## Context
 
@@ -54,3 +55,33 @@ single-run ceiling. Each phase amends the contracts it touches (payload
 version 6, the event protocol's publish rule, ADR 0016's run slot, payload
 blob references, the per-turn verification of ADR 0010/0013) when it lands,
 with its measured before and after.
+
+## Phase A as accepted (Task 025)
+
+Turn payload version 6 implements the cache-stable layout with the fewest
+moving parts:
+
+- **Instructions without the time.** The local time moves to a note at the
+  start of the latest message; an added segment says Ditto wrote it.
+- **Capsule in ID order.** Selection and receipts are unchanged; only the
+  order the model sees changes.
+- **Stable tool surface.** `web.fetch` is offered to every agent run while
+  enabled, and its grant still comes only from the message.
+- **Stepped history window.** Steps of 8 exchanges, at most 16 exchanges,
+  24 KiB. The anchor is the count of finished `run_*` turns since the reset,
+  so no new event is needed.
+
+Measured with `scripts/measure-harness.py` on the same machine, the median
+prompt prefix identical to the previous turn rose from 50.6 % to 96.4 %
+(minimum 96.0 %).
+
+Four parts of the design were deferred:
+
+- **Memory epochs and tail deltas.** A memory change is a one-time miss for
+  the turn after it; add epochs only if measurements show it matters.
+- **Context-window budgets.** The model IR caps a capsule at 1,800 tokens;
+  raising that is an IR change.
+- **Relevance hints for over-budget sessions.** Their lexical fallback set
+  still varies with the question, now presented in ID order.
+- **Excerpt blocks for exchanges that left the window.** They are dropped, as
+  before.

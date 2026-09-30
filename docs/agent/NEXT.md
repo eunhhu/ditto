@@ -13,13 +13,8 @@ context injection. The design is
 Implement in this order; each phase lands with tests, its ADR amendment, before
 and after numbers, and the gate:
 
-1. 025 Phase A, cache-stable prompt layout (turn payload version 6):
-   - context planes;
-   - tail injection of time, memory deltas and relevance hints;
-   - memory epochs and stepped extractive compaction;
-   - a stable tool surface and context-window budgets.
-
-   Exit: median prefix reuse ≥ 90 % (today 50.6 %).
+1. [025](tasks/025-cache-stable-layout.md) Phase A, cache-stable prompt
+   layout, turn payload version 6 - complete (prefix reuse 50.6 % → 96.4 %).
 2. 026 Phase B, journal writer thread with group commit, WAL reader pool, hot
    session state, turn prelude in one commit. Exit: before-dispatch ≤ 2 ms
    median (today 5–10 ms), no SQLite on async workers.
@@ -44,6 +39,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [025](tasks/025-cache-stable-layout.md) Cache-stable prompt layout, turn
+  payload version 6 (ADR 0028 Phase A).
 - [023](tasks/023-web-fetch.md) `web.fetch` for links in the user's message,
   turn payload version 5 (ADR 0027).
 - [022](tasks/022-assistant-instructions.md) Assistant instructions, local

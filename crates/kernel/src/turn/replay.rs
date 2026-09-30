@@ -32,8 +32,9 @@ use super::fetch::ReplayedFetchCall;
 use super::run::turn_signature;
 use super::shared::{
     Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, agent_run_text,
-    append_assistant_text, bounded_turn_failure_message, history_messages, select_history,
-    system_prefix, turn_failure_code_for_model,
+    append_assistant_text, bounded_turn_failure_message, history_messages, latest_user_text,
+    presented_context, select_history, select_history_stepped, system_prefix,
+    turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
@@ -388,7 +389,21 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         )?;
         self.validate_context_sources(&context, context_event)?;
         let history = self.conversation_history(&context)?;
-        self.conversation.splice(0..0, history_messages(&history));
+        let latest = latest_user_text(
+            context.event_version,
+            &self.input_text,
+            self.input_recorded_at,
+            context.utc_offset_minutes,
+        )
+        .ok_or_else(|| {
+            replay_invalid("context.compiled time offset contradicts its payload version")
+        })?;
+        let mut conversation = history_messages(&history);
+        conversation.extend(super::sort::initial_conversation(
+            latest,
+            self.sort.as_ref(),
+        ));
+        self.conversation = conversation;
         self.system_prefix = Some(
             system_prefix(
                 context.event_version,
@@ -399,7 +414,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 replay_invalid("context.compiled time offset contradicts its payload version")
             })?,
         );
-        self.context = Some(context.capsule.clone());
+        self.context = Some(presented_context(context.event_version, &context.capsule));
         self.context_payload = Some(context);
 
         if let Some(failure) = self.take_capability_stage_failure()? {
@@ -459,8 +474,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             }
         }
         if let Some(manifest) = &selected.fetch_manifest {
+            // Version 5 offered it only for links; from version 6 it is part of
+            // every agent run's stable tool surface.
             if self.version.is_none_or(|version| version < 5)
-                || self.fetch_grant.is_empty()
+                || !self.agent_run
+                || (self.version == Some(5) && self.fetch_grant.is_empty())
                 || !ditto_web_fetch::validate_manifest(manifest)
             {
                 return Err(replay_invalid(
@@ -1204,7 +1222,12 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         context: &ContextCompiledPayload,
     ) -> Result<Vec<HistoryExchange>, ReplayError> {
         let history = if context.event_version >= 3 && self.agent_run {
-            self.recompute_history()?
+            let (thread_len, newest_first) = self.recompute_thread()?;
+            if context.event_version >= 6 {
+                select_history_stepped(thread_len, newest_first)
+            } else {
+                select_history(newest_first)
+            }
         } else {
             Vec::new()
         };
@@ -1221,7 +1244,10 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         Ok(history)
     }
 
-    fn recompute_history(&self) -> Result<Vec<HistoryExchange>, ReplayError> {
+    /// The thread before this turn, recomputed from the snapshot: its length
+    /// in finished `run_*` turns (the stepped window's anchor) and its newest
+    /// exchanges, newest first.
+    fn recompute_thread(&self) -> Result<(usize, Vec<HistoryExchange>), ReplayError> {
         let input_seq = self.events[0].seq;
         let boundary = self
             .snapshot
@@ -1230,16 +1256,26 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             .map(|event| event.seq)
             .max()
             .unwrap_or(0);
+        let in_thread = |event: &&EventRecord| {
+            event.seq < input_seq && event.seq > boundary && event.kind == event_kind::TURN_FINISHED
+        };
+        let thread_len = self
+            .snapshot
+            .iter()
+            .filter(in_thread)
+            .filter(|event| {
+                event
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|task| task.starts_with("run_"))
+            })
+            .count();
         let mut exchanges = Vec::new();
         for finished in self
             .snapshot
             .iter()
             .rev()
-            .filter(|event| {
-                event.seq < input_seq
-                    && event.seq > boundary
-                    && event.kind == event_kind::TURN_FINISHED
-            })
+            .filter(in_thread)
             .take(MAX_HISTORY_CANDIDATES)
         {
             let payload: TurnFinishedPayload = decode_payload(finished)?;
@@ -1264,7 +1300,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 });
             }
         }
-        Ok(select_history(exchanges))
+        Ok((thread_len, exchanges))
     }
 
     fn artifact_is_authorized_in_snapshot(

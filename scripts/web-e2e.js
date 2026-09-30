@@ -37,7 +37,8 @@ function mockModel() {
       const system = (messages.find((message) => message.role === 'system') || {}).content || '';
       const prior = messages.slice(0, -1).filter((message) => message.role !== 'system').length;
       const memory = system.includes('afternoon meetings') ? 'afternoon' : system.includes('morning meetings') ? 'morning' : 'none';
-      const question = messages[messages.length - 1].content;
+      // Answer the user's words, not Ditto's leading time note.
+      const question = messages[messages.length - 1].content.replace(/^\[Ditto:[^\]]*\]\n\n/, '');
       const reply = `You asked: *${question}*\n\n- memory seen: **${memory}**\n- earlier messages: \`${prior}\`\n\n\`\`\`\nstreamed by a mock model\n\`\`\``;
       const delay = question.includes('slowly') ? 400 : 60;
       response.writeHead(200, { 'content-type': 'text/event-stream' });

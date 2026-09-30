@@ -32,9 +32,9 @@ and checks establish a new fact.
   because it reverses ADR 0015's exclusion of model tool invocation.
 - Still on 2026-09-30 the user asked for the thinnest harness designed around
   concurrency, real-time streaming and context injection timing and scope. The
-  design ([realtime-harness](../design/realtime-harness.md), ADR 0028
-  proposed) is committed on `dev/design-realtime-harness`; nothing of it is
-  implemented.
+  design ([realtime-harness](../design/realtime-harness.md), ADR 0028) is on
+  `dev/design-realtime-harness`. Phase A is implemented on
+  `dev/task-025-cache-stable-layout` (Task 025); phases B–E are not.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
   validator wording. The user prioritized fixing both, trimming process
@@ -93,18 +93,26 @@ and checks establish a new fact.
   OpenAI-compatible `/chat/completions` driver for an operator-configured
   local or hosted server (ADR 0023; HTTPS unless loopback, no redirects,
   optional key only from `DITTO_MODEL_API_KEY`). Keys are redacted and
-  transport-only. The daemon defaults to a disabled provider. The kernel turn loop compiles context, pages
-  `artifact.read` (plus `artifact.sort` only for a permitted attachment), runs
-  at most eight model requests, journals versioned transitions before
-  publication and replays without provider or artifact I/O. New turns write
-  payload version 3: typed `TurnFailureReason`s for validator-derived failures
-  (since version 2) and, for agent runs, the current conversation thread's
-  newest finished exchanges (at most eight, 24 KiB) as native messages, with
-  their turn IDs recorded and recomputed on replay (ADR 0022). Older versions
-  replay under their original rules; a turn never mixes versions. Version 4
-  (ADR 0026) replaces the harness-facing system instructions with
-  personal-assistant instructions and the local time of acceptance, fixed by a
-  recorded UTC offset. `ditto chat` is an interactive client with `/new` and
+  transport-only. The daemon defaults to a disabled provider. The kernel turn
+  loop compiles context, pages `artifact.read` (plus `artifact.sort` only for a
+  permitted attachment, and `web.fetch` while enabled), runs at most eight
+  model requests, journals versioned transitions before publication and
+  replays without provider, artifact or network I/O. New turns write payload
+  version 6:
+  - version 2 added typed `TurnFailureReason`s for validator-derived failures;
+  - version 3 gave agent runs the current thread's finished exchanges as
+    native messages, with their turn IDs recorded and recomputed on replay
+    (ADR 0022);
+  - version 4 (ADR 0026) added personal-assistant instructions and the local
+    time of acceptance, fixed by a recorded UTC offset;
+  - version 5 (ADR 0027) added `web.fetch`;
+  - version 6 (ADR 0028 Phase A) keeps the prompt prefix stable: a time note
+    leads the latest message, the capsule is in ID order, `web.fetch` is always
+    offered while enabled, and the history window steps by eight exchanges (at
+    most 16, 24 KiB).
+
+  Older versions replay under their original rules; a turn never mixes
+  versions. `ditto chat` is an interactive client with `/new` and
   `/remember`; `ditto new` starts a thread. Answers stay `unverified`; model runs never emit
   `task.completed`. The loop
   is split into stage functions (context, capability selection, request
@@ -123,32 +131,33 @@ and checks establish a new fact.
 - **Measurement.** Task 014 recorded an offline RAM/latency/accounting
   baseline; Tasks 015–016 recorded five literal synthetic queries at zero and
   1,000 unrelated memories; corpus schema 3 (Task 016.1) derives expected
-  capsules from the complete-set rule. None of these measures answer quality,
+  capsules from the complete-set rule, and schema 4 (Task 025) from its
+  version-6 ID-ordered presentation. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 023
+## Latest verified slice: Task 025
 
-- [Contract and evidence](tasks/023-web-fetch.md). The crate tests cover
-  address classes, extraction, URL grants, compile-path derivation, redirects,
-  bounds, timeouts and cancellation. The production policy refused six
-  private targets without a connection. Kernel tests fetched a granted link
-  once and replayed it without network I/O, rejecting four forgeries. They
-  also denied an unlisted URL without contact, enforced the call budget,
-  offered no tool without links or when disabled, and blocked a private link.
-  A real fetch of `https://example.com/` through the built daemon returned
-  "Example Domain"; a loopback link returned `blocked_address`.
-- The canonical gate passed on the final tree (1 min 49 s with warm caches,
-  pinned Rust 1.88.0): 544 Rust tests (537 workspace including doctests,
-  seven built-CLI scenarios), 8 baseline and 21 quality Python tests, 12 web
-  renderer cases and both smokes; the tree hash was identical before and
-  after. An earlier run hit the corpus harness's 20 s CLI bound under a load
-  average of 8.7 on the shared machine and passed on rerun.
+- [Contract and evidence](tasks/025-cache-stable-layout.md). Turn payload
+  version 6 makes everything before the latest message byte-identical between
+  turns:
+  - the local time moves from the instructions into a note leading the
+    message;
+  - the capsule is presented in ID order;
+  - `web.fetch` is always offered while enabled;
+  - the history window steps by eight exchanges.
 
-## Previous slice: Task 022
+  Median prefix reuse rose from 50.6 % to 96.4 %. The prefix test fails with
+  relevance ordering restored. Replay rejects forged notes, offsets, windows
+  and mixed versions.
+- Its gate passed on its final tree (547 Rust tests). The first run failed
+  because the offline baseline's blocking double compared the whole message,
+  which now starts with the note.
 
-- [Contract and evidence](tasks/022-assistant-instructions.md): assistant
-  instructions and local time, turn payload version 4 (ADR 0026). Its gate
-  passed on its final tree (532 Rust tests).
+## Previous slice: Task 023
+
+- [Contract and evidence](tasks/023-web-fetch.md): `web.fetch` for links in
+  the user's message (ADR 0027). Its gate passed on its final tree (544 Rust
+  tests).
 
 ## Known gaps
 
@@ -157,7 +166,8 @@ and checks establish a new fact.
   - 5–10 ms of work before dispatch;
   - 74–80 µs and one SQLite transaction per streamed delta, 206 or 1,006
     events per turn, 81–107 journal bytes per answer byte;
-  - median prompt prefix reuse between turns of 50.6 %;
+  - median prompt prefix reuse between turns of 50.6 % (96.4 % after
+    Task 025);
   - one of three simultaneous sessions accepted, the others HTTP 429.
 
   ADR 0028's phases target each of these.
