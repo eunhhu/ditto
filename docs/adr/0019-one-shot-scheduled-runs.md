@@ -1,6 +1,7 @@
 # ADR 0019: One-shot scheduled requests with at-most-once dispatch
 
-Status: accepted for Task 012.
+Status: accepted for Task 012. Amended by [ADR 0028](0028-thin-realtime-harness.md) Phase D: due work
+waits only for its own session's slot and the four-run limit.
 
 ## Contract
 

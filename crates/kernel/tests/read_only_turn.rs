@@ -40,6 +40,8 @@ mod agent_runs;
 mod model_sort;
 #[path = "read_only_turn/reuse.rs"]
 mod reuse;
+#[path = "read_only_turn/sessions.rs"]
+mod sessions;
 #[path = "read_only_turn/stream.rs"]
 mod stream;
 #[path = "read_only_turn/web_fetch.rs"]

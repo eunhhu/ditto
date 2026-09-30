@@ -136,8 +136,8 @@ impl DittoKernel {
             let result = self.schedule_status(&entry, &slot)?;
             if result.status == ScheduleStatus::Running {
                 self.schedule_transition(&entry, ScheduleState::CancelRequested)?;
-                // Status proves that this run owns the single active slot.
-                if let Some(active) = &slot.active {
+                // Status proves that this run is its session's active run.
+                if let Some(active) = slot.active.get(&entry.session_id) {
                     active.cancellation.cancel();
                 }
             }
@@ -238,59 +238,75 @@ impl DittoKernel {
                 return Ok(Step::Again);
             }
         }
-        if let Some(driver) = driver
-            && slot.active.is_none()
-            && let Some(entry) = repeats.first()
-        {
-            let due = entry
-                .timing
-                .window(entry.next_occurrence)
-                .map_err(storage)?
-                .0;
-            if due <= now.timestamp_millis()
-                && entries.first().is_none_or(|one| due < one.due_at_ms)
-            {
-                return match self.dispatch_repeat(entry, driver.clone(), &mut slot, &clock)? {
-                    Some(due) => Ok(Step::Wait(Some(due))),
-                    None => Ok(Step::Again),
-                };
+        // Due work starts in order of due time, a one-shot before a repeat at
+        // equal times, as soon as its own session can start: a run in another
+        // session never holds it back (ADR 0028 Phase D).
+        if let Some(driver) = driver {
+            let now_ms = now.timestamp_millis();
+            let mut due = Vec::new();
+            for (position, entry) in entries.iter().enumerate() {
+                if entry.due_at_ms <= now_ms && slot.can_start(&entry.session_id) {
+                    due.push((entry.due_at_ms, 0, position));
+                }
+            }
+            for (position, entry) in repeats.iter().enumerate() {
+                let start = entry
+                    .timing
+                    .window(entry.next_occurrence)
+                    .map_err(storage)?
+                    .0;
+                if start <= now_ms && slot.can_start(&entry.session_id) {
+                    due.push((start, 1, position));
+                }
+            }
+            match due.into_iter().min() {
+                Some((_, 1, position)) => {
+                    return match self.dispatch_repeat(
+                        &repeats[position],
+                        driver.clone(),
+                        &mut slot,
+                        &clock,
+                    )? {
+                        Some(due) => Ok(Step::Wait(Some(due))),
+                        None => Ok(Step::Again),
+                    };
+                }
+                Some((_, _, position)) => {
+                    let entry = &entries[position];
+                    let command = self.schedule_source(entry)?;
+                    let claim_at = clock();
+                    if claim_at < command.due_at {
+                        return Ok(Step::Wait(Some(command.due_at)));
+                    }
+                    if claim_at >= command.expires_at {
+                        self.schedule_transition(entry, ScheduleState::Missed)?;
+                        return Ok(Step::Again);
+                    }
+                    self.schedule_transition(entry, ScheduleState::Claimed)?;
+                    // A durable claim is consumed even when admission/storage fails. Never
+                    // turn uncertain work back into pending or mint a replacement identity.
+                    self.start_agent_run_locked(
+                        StartAgentRunCommand {
+                            request_id: entry.run_request_id.clone(),
+                            session_id: entry.session_id.clone(),
+                            text: command.text,
+                            sort: None,
+                        },
+                        driver.clone(),
+                        &mut slot,
+                    )?;
+                    return Ok(Step::Again);
+                }
+                None => {}
             }
         }
-        if let Some(driver) = driver
-            && slot.active.is_none()
-            && let Some(entry) = entries
-                .first()
-                .filter(|entry| entry.due_at_ms <= now.timestamp_millis())
-        {
-            let command = self.schedule_source(entry)?;
-            let claim_at = clock();
-            if claim_at < command.due_at {
-                return Ok(Step::Wait(Some(command.due_at)));
-            }
-            if claim_at >= command.expires_at {
-                self.schedule_transition(entry, ScheduleState::Missed)?;
-                return Ok(Step::Again);
-            }
-            self.schedule_transition(entry, ScheduleState::Claimed)?;
-            // A durable claim is consumed even when admission/storage fails. Never
-            // turn uncertain work back into pending or mint a replacement identity.
-            self.start_agent_run_locked(
-                StartAgentRunCommand {
-                    request_id: entry.run_request_id.clone(),
-                    session_id: entry.session_id.clone(),
-                    text: command.text,
-                    sort: None,
-                },
-                driver.clone(),
-                &mut slot,
-            )?;
-            return Ok(Step::Again);
-        }
-        let ready = driver.is_some() && slot.active.is_none();
+        // Work that can start waits for its due time; work whose session is
+        // busy waits for a wake-up when a run ends, or for its expiry.
+        let ready = |session: &str| driver.is_some() && slot.can_start(session);
         let mut next = entries
             .iter()
             .map(|entry| {
-                if ready {
+                if ready(&entry.session_id) {
                     entry.due_at_ms
                 } else {
                     entry.expires_at_ms
@@ -302,7 +318,11 @@ impl DittoKernel {
                 .timing
                 .window(entry.next_occurrence)
                 .map_err(storage)?;
-            let deadline = if ready { due } else { expiry };
+            let deadline = if ready(&entry.session_id) {
+                due
+            } else {
+                expiry
+            };
             next = Some(next.map_or(deadline, |current| current.min(deadline)));
         }
         let next = next
@@ -426,6 +446,7 @@ impl DittoKernel {
 
     pub(crate) fn schedule_wait_reason(
         &self,
+        session: &str,
         due: DateTime<Utc>,
         slot: &RunSlot,
     ) -> ScheduleWaitReason {
@@ -433,7 +454,7 @@ impl DittoKernel {
             0 => ScheduleWaitReason::SchedulerStopped,
             1 => ScheduleWaitReason::ProviderDisabled,
             _ if Utc::now() < due => ScheduleWaitReason::DueTime,
-            _ if slot.active.is_some() => ScheduleWaitReason::RuntimeBusy,
+            _ if !slot.can_start(session) => ScheduleWaitReason::RuntimeBusy,
             _ => ScheduleWaitReason::Dispatch,
         }
     }
@@ -476,7 +497,7 @@ impl DittoKernel {
             }
         };
         let waiting_for = (status == ScheduleStatus::Pending)
-            .then(|| self.schedule_wait_reason(command.due_at, slot));
+            .then(|| self.schedule_wait_reason(&entry.session_id, command.due_at, slot));
         Ok(ScheduleResponse {
             request_id: command.request_id,
             session_id: command.session_id,

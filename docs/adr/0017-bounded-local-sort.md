@@ -4,6 +4,8 @@
 
 Accepted for Task 010. Extends ADR 0012's previously deferred process placement
 and worker ingress, and adds the first contract-specific completion producer.
+Amended by [ADR 0028](0028-thin-realtime-harness.md) Phase D: a sort occupies its session's execution
+slot, not the kernel's.
 
 ## Decision
 

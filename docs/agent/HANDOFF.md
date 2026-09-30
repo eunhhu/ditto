@@ -25,9 +25,9 @@ and checks establish a new fact.
   `dev/task-020-web-app`, `dev/task-021-telegram`,
   `dev/task-022-assistant-instructions` and `dev/task-023-web-fetch` stack
   Tasks 019–023; `dev/design-realtime-harness`,
-  `dev/task-025-cache-stable-layout`, `dev/task-026-thin-turn-start` and
-  `dev/task-027-one-journal-plane` stack the harness design and Tasks 025–027.
-  Nothing is pushed.
+  `dev/task-025-cache-stable-layout`, `dev/task-026-thin-turn-start`,
+  `dev/task-027-one-journal-plane` and `dev/task-028-session-parallel` stack
+  the harness design and Tasks 025–028. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -36,7 +36,7 @@ and checks establish a new fact.
 - Still on 2026-09-30 the user asked for the thinnest harness designed around
   concurrency, real-time streaming and context injection timing and scope. The
   design is [realtime-harness](../design/realtime-harness.md) and ADR 0028.
-  Phases A–C are implemented (Tasks 025–027); phases D–E are not.
+  Phases A–D are implemented (Tasks 025–028); phase E is not.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
   validator wording. The user prioritized fixing both, trimming process
@@ -139,8 +139,9 @@ and checks establish a new fact.
   completion. One-shot schedules (ADR 0019) and finite repeats (ADR 0020) share
   a bounded index of 100 future intents, one event/timer-driven scheduler,
   at-most-once claims, visible missed/interrupted states and no automatic
-  retry or housekeeping model call. Runs, sorts and scheduled dispatch share
-  one execution slot; other immediate requests are rejected as busy.
+  retry or housekeeping model call. Each session has one execution slot for
+  runs, sorts and scheduled dispatch, and up to four sessions run at once;
+  other immediate requests are rejected as busy.
 - **Measurement.** Task 014 recorded an offline RAM/latency/accounting
   baseline; Tasks 015–016 recorded five literal synthetic queries at zero and
   1,000 unrelated memories; corpus schema 3 (Task 016.1) derives expected
@@ -149,22 +150,21 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 027
+## Latest verified slice: Task 028
 
-- [Contract and evidence](tasks/027-one-journal-plane.md) (ADR 0028 Phase C,
-  turn payload version 7). A 1,000-delta turn journals 9 events instead of
-  1,006, and the whole answer reaches a client's stream 10–16 ms after the
-  provider sends it instead of 116 ms. Requests are digests replay
-  reproduces, so the journal no longer grows with the conversation. Journal
-  bytes per answer byte fell from 80–111 to 4.9–16.3; the target of 3 is not
-  met, and the ADR names what is left.
-- Its gate passed on its final tree (561 Rust tests).
+- [Contract and evidence](tasks/028-session-parallel-runs.md) (ADR 0028 Phase
+  D). The run slot is per session, with up to four sessions at once: three
+  sessions starting a run together are all accepted and stream at once
+  (before: one, and two HTTP 429), and a due reminder no longer waits for
+  another session's run. A busy session still answers HTTP 429; clients keep
+  their own session's messages in order.
+- Its gate passed on its final tree (564 Rust tests).
 
-## Previous slice: Task 026
+## Previous slice: Task 027
 
-- [Contract and evidence](tasks/026-thin-turn-start.md): input to provider
-  request 5–10 ms to 1 ms, storage off async threads (ADR 0028 Phase B). Its
-  gate passed on its final tree (557 Rust tests).
+- [Contract and evidence](tasks/027-one-journal-plane.md): turn payload
+  version 7 journals each fact once (ADR 0028 Phase C). Its gate passed on its
+  final tree (561 Rust tests).
 
 ## Known gaps
 
@@ -176,7 +176,8 @@ and checks establish a new fact.
     answer byte (after Task 027: 8 or 9 events and 16.3 or 4.9 bytes);
   - median prompt prefix reuse between turns of 50.6 % (96.4 % after
     Task 025);
-  - one of three simultaneous sessions accepted, the others HTTP 429.
+  - one of three simultaneous sessions accepted, the others HTTP 429 (all
+    three after Task 028).
 
   ADR 0028's phases target each of these.
 
