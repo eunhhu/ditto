@@ -25,8 +25,9 @@ and checks establish a new fact.
   `dev/task-020-web-app`, `dev/task-021-telegram`,
   `dev/task-022-assistant-instructions` and `dev/task-023-web-fetch` stack
   Tasks 019–023; `dev/design-realtime-harness`,
-  `dev/task-025-cache-stable-layout` and `dev/task-026-thin-turn-start` stack
-  the harness design and Tasks 025–026. Nothing is pushed.
+  `dev/task-025-cache-stable-layout`, `dev/task-026-thin-turn-start` and
+  `dev/task-027-one-journal-plane` stack the harness design and Tasks 025–027.
+  Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -35,7 +36,7 @@ and checks establish a new fact.
 - Still on 2026-09-30 the user asked for the thinnest harness designed around
   concurrency, real-time streaming and context injection timing and scope. The
   design is [realtime-harness](../design/realtime-harness.md) and ADR 0028.
-  Phases A and B are implemented (Tasks 025–026); phases C–E are not.
+  Phases A–C are implemented (Tasks 025–027); phases D–E are not.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
   validator wording. The user prioritized fixing both, trimming process
@@ -103,7 +104,7 @@ and checks establish a new fact.
   permitted attachment, and `web.fetch` while enabled), runs at most eight
   model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. New turns write payload
-  version 6:
+  version 7:
   - version 2 added typed `TurnFailureReason`s for validator-derived failures;
   - version 3 gave agent runs the current thread's finished exchanges as
     native messages, with their turn IDs recorded and recomputed on replay
@@ -114,7 +115,10 @@ and checks establish a new fact.
   - version 6 (ADR 0028 Phase A) keeps the prompt prefix stable: a time note
     leads the latest message, the capsule is in ID order, `web.fetch` is always
     offered while enabled, and the history window steps by eight exchanges (at
-    most 16, 24 KiB).
+    most 16, 24 KiB);
+  - version 7 (Phase C) records each fact once: text in coalesced chunks (the
+    first text after a quiet 48 ms at once), each request as the SHA-256 of
+    what was sent, and no capsule or builtin schemas; replay rebuilds them.
 
   Older versions replay under their original rules; a turn never mixes
   versions. A run reuses its session's verified context while no context node
@@ -140,26 +144,27 @@ and checks establish a new fact.
 - **Measurement.** Task 014 recorded an offline RAM/latency/accounting
   baseline; Tasks 015–016 recorded five literal synthetic queries at zero and
   1,000 unrelated memories; corpus schema 3 (Task 016.1) derives expected
-  capsules from the complete-set rule, and schema 4 (Task 025) from its
-  version-6 ID-ordered presentation. None of these measures answer quality,
+  capsules from the complete-set rule, schema 4 (Task 025) from its
+  version-6 ID-ordered presentation, and schema 5 (Task 027) binds each
+  driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 026
+## Latest verified slice: Task 027
 
-- [Contract and evidence](tasks/026-thin-turn-start.md) (ADR 0028 Phase B).
-  Reused session context, kept threads, context-only projection deltas, tool
-  contracts validated once and a one-commit prelude cut the durable input to
-  `model.requested` from a 5 ms and 10 ms median (200- and 1,000-delta
-  answers) to 1 ms for both, independent of the previous answer. Storage work
-  left the async runtime threads, enforced by a debug guard. No wire or
-  payload change; replay is unchanged.
-- Its gate passed on its final tree (557 Rust tests).
+- [Contract and evidence](tasks/027-one-journal-plane.md) (ADR 0028 Phase C,
+  turn payload version 7). A 1,000-delta turn journals 9 events instead of
+  1,006, and the whole answer reaches a client's stream 10–16 ms after the
+  provider sends it instead of 116 ms. Requests are digests replay
+  reproduces, so the journal no longer grows with the conversation. Journal
+  bytes per answer byte fell from 80–111 to 4.9–16.3; the target of 3 is not
+  met, and the ADR names what is left.
+- Its gate passed on its final tree (561 Rust tests).
 
-## Previous slice: Task 025
+## Previous slice: Task 026
 
-- [Contract and evidence](tasks/025-cache-stable-layout.md): turn payload
-  version 6 keeps the prompt prefix stable (median reuse 50.6 % to 96.4 %).
-  Its gate passed on its final tree (547 Rust tests).
+- [Contract and evidence](tasks/026-thin-turn-start.md): input to provider
+  request 5–10 ms to 1 ms, storage off async threads (ADR 0028 Phase B). Its
+  gate passed on its final tree (557 Rust tests).
 
 ## Known gaps
 
@@ -168,7 +173,7 @@ and checks establish a new fact.
   - 5–10 ms of work before dispatch (1 ms after Task 026);
   - 74–80 µs (55–60 µs after Task 026) and one SQLite transaction per
     streamed delta, 206 or 1,006 events per turn, 81–107 journal bytes per
-    answer byte;
+    answer byte (after Task 027: 8 or 9 events and 16.3 or 4.9 bytes);
   - median prompt prefix reuse between turns of 50.6 % (96.4 % after
     Task 025);
   - one of three simultaneous sessions accepted, the others HTTP 429.

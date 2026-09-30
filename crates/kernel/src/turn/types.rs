@@ -15,7 +15,10 @@ use crate::KernelError;
 /// context with the complete-set selection (ADR 0021) and records a typed
 /// [`TurnFailureReason`] for validator-derived failures. Version 3 prepends the
 /// current conversation thread's recent exchanges to agent runs (ADR 0022).
-pub const TURN_PAYLOAD_VERSION: u16 = 6;
+/// Version 7 (ADR 0028 Phase C) journals each fact once: streamed text in
+/// coalesced chunks, and requests, capsules and builtin schemas as what replay
+/// rebuilds from the rest of the journal.
+pub const TURN_PAYLOAD_VERSION: u16 = 7;
 /// Oldest turn contract that replay and run status still read. Version-1
 /// turns use positive-overlap context selection and message grammar.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -33,7 +36,9 @@ pub struct ContextCompiledPayload {
     pub turn_id: String,
     pub provenance_through_seq: i64,
     pub compiled: CompiledContext,
-    pub capsule: ContextCapsule,
+    /// Versions 1 to 6. Version 7 derives the capsule from `compiled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule: Option<ContextCapsule>,
     /// Version 3: prior turns replayed as conversation history, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history_turn_ids: Vec<String>,
@@ -54,15 +59,33 @@ pub struct CapabilitiesSelectedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_manifest: Option<CapabilityManifest>,
     pub epoch: ExecutionEpochEvidence,
+    /// Versions 1 to 6. Version 7 derives the builtin schemas of the selected
+    /// manifests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<CapabilitySchema>,
 }
 
+/// A model request as sent: the durable form of versions 1 to 6, and the form
+/// replay rebuilds for version 7.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequestedPayload {
     pub event_version: u16,
     pub turn_id: String,
     pub request_index: u8,
     pub request: ModelRequest,
+}
+
+/// Version-7 durable form of `model.requested`: the request's identity,
+/// deadline and SHA-256. Every other part derives from earlier durable
+/// events, so replay rebuilds the request and must reproduce the digest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelRequestDigestPayload {
+    pub event_version: u16,
+    pub turn_id: String,
+    pub request_index: u8,
+    pub request_id: ModelRequestId,
+    pub deadline: DateTime<Utc>,
+    pub request_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +97,10 @@ pub struct ModelOutputPayload {
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub admitted_at: DateTime<Utc>,
     pub stream_event: ModelStreamEvent,
+    /// Version 7: the last provider stream sequence a coalesced text chunk
+    /// covers, from `stream_event.sequence`; absent for a single event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

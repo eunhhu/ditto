@@ -545,7 +545,9 @@ async function inspect(taskId) {
     const receipt = context.payload.compiled.receipt;
     const reasons = new Map(receipt.included.map((entry) => [entry.node_id, entry.reason]));
     const label = (reason) => ({ 'task-relevance': t('reasonRelevance'), 'complete-set': t('reasonComplete'), 'user-pinned': t('reasonPinned') })[reason] || reason;
-    section(t('usedMemories'), context.payload.capsule.nodes.map((node) => [node.summary, label(reasons.get(node.id))]));
+    // Version 7 records the compiled nodes only; the capsule derives from them.
+    const used = (context.payload.capsule || context.payload.compiled).nodes;
+    section(t('usedMemories'), used.map((node) => [node.summary, label(reasons.get(node.id))]));
     const excluded = new Map();
     for (const entry of receipt.excluded) excluded.set(entry.reason, (excluded.get(entry.reason) || 0) + 1);
     section(t('excluded'), [...excluded].map(([reason, count]) => [`${t(reason)}: ${count}`]));

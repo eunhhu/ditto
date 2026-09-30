@@ -26,7 +26,7 @@ spec = importlib.util.spec_from_file_location("baseline", Path(__file__).with_na
 baseline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(baseline)
 REPO = baseline.REPO
-TURN_PAYLOAD_VERSION = 6
+TURN_PAYLOAD_VERSION = 7
 CAPSULE_ITEM_OVERHEAD_TOKENS = 16
 # Frozen independently of runtime capsules and fixture answers (Tasks 016, 016.1).
 CORPUS = {
@@ -199,7 +199,7 @@ def reconcile_observations(observations, events, plans, calls, boundary):
         inputs = [e for e in events if e.get("kind") == "input.received"
                   and (e["seq"] > boundary or "agent_run" in e.get("payload", {}))]
         counts.update(durable=len(model_events), durable_inputs=len(inputs))
-        request_ids = [e.get("payload", {}).get("request", {}).get("request_id") for e in model_events]
+        request_ids = [e.get("payload", {}).get("request_id") for e in model_events]
         observed_ids = [o.get("request_id") for o in observations]
         client_ids = [p.get("client_request_id") for p in plans]
         input_ids = [e["payload"]["agent_run"].get("request_id") for e in inputs]
@@ -236,7 +236,13 @@ def reconcile_observations(observations, events, plans, calls, boundary):
             for r in rounds), "missing case/repetition")
         by_event = {e["event_id"]: e for e in events}
         for plan, source, event, observation in zip(plans, inputs, model_events, observations):
-            payload, request = event["payload"], event["payload"]["request"]
+            payload = event["payload"]
+            require(set(observation) == {"request_id", "request_json", "context_json"}, "malformed observation")
+            # Version 7 journals the SHA-256 of the request the driver received.
+            require(isinstance(observation["request_json"], str)
+                    and hashlib.sha256(observation["request_json"].encode()).hexdigest()
+                    == payload.get("request_sha256"), "driver/journal request digest mismatch")
+            request = strict_json(observation["request_json"])
             require(plan["query"] == cases[plan["case"]]["query"], "case/query mismatch")
             require(plan["session"] == CORPUS["session"], "planned session mismatch")
             require(plan["task_id"] == "run_" + plan["client_request_id"], "client/task mismatch")
@@ -254,8 +260,9 @@ def reconcile_observations(observations, events, plans, calls, boundary):
             require(event["actor"] == "system" and type(payload["event_version"]) is int
                     and payload["event_version"] == TURN_PAYLOAD_VERSION
                     and payload["turn_id"] == plan["turn_id"] and type(payload["request_index"]) is int
-                    and payload["request_index"] == 0 and event["span_id"] == request["request_id"]
-                    and request["control"]["cancellation_id"] == plan["turn_id"], "model request identity mismatch")
+                    and payload["request_index"] == 0 and event["span_id"] == payload["request_id"]
+                    == request["request_id"] and request["control"]["cancellation_id"] == plan["turn_id"],
+                    "model request identity mismatch")
             # Follow the actual event causation chain back to this exact input.
             ancestor = event
             while ancestor["event_id"] != source["event_id"]:
@@ -274,7 +281,6 @@ def reconcile_observations(observations, events, plans, calls, boundary):
                     and len(message["content"]) == 1 and message["content"][0].get("type") == "text"
                     and note.startswith("[Ditto: local time ") and "]" not in note
                     and question == plan["query"], "model conversation/query mismatch")
-            require(set(observation) == {"request_id", "context_json"}, "malformed observation")
             require(strict_json(observation["context_json"]) == request["turn"]["context"]
                     and observation["context_json"] == capsule_json(request["turn"]["context"]),
                     "driver/journal capsule byte mismatch")
@@ -502,7 +508,7 @@ def main():
     except (OSError, KeyError, ValueError):
         pass
     report = {
-        "schema": 4, "workload": "task016-offline-personal-task-corpus-v2", "utc": datetime.now(timezone.utc).isoformat(),
+        "schema": 5, "workload": "task016-offline-personal-task-corpus-v2", "utc": datetime.now(timezone.utc).isoformat(),
         "history_size": args.history_size, "samples_per_query": args.samples,
         "corpus": CORPUS, "corpus_sha256": hashlib.sha256(json.dumps(CORPUS, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "corpus_hash_basis": "UTF-8 JSON, sorted keys, compact separators, no trailing newline",

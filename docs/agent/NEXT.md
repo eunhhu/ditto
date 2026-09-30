@@ -19,9 +19,10 @@ and after numbers, and the gate:
    threads, one-commit prelude, storage off async threads - complete
    (before-dispatch 5–10 ms → 1 ms; writer thread and reader pool deferred
    with measurements).
-3. 027 Phase C, live delta plane, coalesced durable text, content-addressed
-   blobs; web and Telegram on live deltas. Exit: ≤ 50 events per 1,000-delta
-   answer (today 1,006), ≤ 3 journal bytes per answer byte (today 81–107).
+3. [027](tasks/027-one-journal-plane.md) Phase C, coalesced durable text and
+   requests as digests, turn payload version 7 - complete (1,006 → 9 events
+   per 1,000-delta turn; journal bytes per answer byte 80–111 → 4.9–16.3,
+   short of the target of 3; live plane and blobs replaced, see the ADR).
 4. 028 Phase D, session-parallel runs with provider lanes and a `queued`
    status. Exit: three sessions at once all stream (today 1 of 3).
 5. 029 Phase E, one builtin tool lifecycle, parallel read-only calls, progress
@@ -40,6 +41,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [027](tasks/027-one-journal-plane.md) One journal plane, each fact once,
+  turn payload version 7 (ADR 0028 Phase C).
 - [026](tasks/026-thin-turn-start.md) Thin turn start and storage off async
   threads (ADR 0028 Phase B).
 - [025](tasks/025-cache-stable-layout.md) Cache-stable prompt layout, turn

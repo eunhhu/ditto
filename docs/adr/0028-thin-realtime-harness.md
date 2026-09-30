@@ -1,7 +1,8 @@
 # ADR 0028: Thin real-time harness
 
 Status: proposed on 2026-09-30 and decided per phase as each lands. Phase A
-was accepted with Task 025 (turn payload version 6) and Phase B with Task 026.
+was accepted with Task 025 (turn payload version 6), Phase B with Task 026 and
+Phase C with Task 027 (turn payload version 7).
 The full design is in
 [docs/design/realtime-harness.md](../design/realtime-harness.md).
 
@@ -134,4 +135,53 @@ Three parts of the design were deferred:
 - **A WAL reader pool.** Same reason: no read contention was measured.
 - **Session actors.** Hot state is kept as reused context and kept threads;
   per-session run queues belong to Phase D.
+
+## Phase C as accepted (Task 027)
+
+Turn payload version 7 records each fact once and keeps one durable plane:
+
+- **Coalesced text.** Consecutive text deltas commit as one `model.output`
+  chunk that names the provider sequences it covers. The first text after a
+  quiet interval of 48 ms commits at once; later text commits 48 ms after its
+  chunk opened, before the chunk would pass 2 KiB, or with the next non-text
+  output, failure or terminal in the same transaction. Every provider event
+  still counts against the request's event bound.
+- **Requests as digests.** `model.requested` records the request ID, the
+  deadline and the SHA-256 of the request as sent. Instructions, tools,
+  capsule and conversation already derive from earlier durable events, and
+  the runtime and replay build requests with one shared function, so replay
+  rebuilds each request and must reproduce the digest.
+- **Derived parts not recorded.** `context.compiled` omits the capsule and
+  `capabilities.selected` the builtin schemas.
+
+Measured with `scripts/measure-harness.py` on the same machine (200- and
+1,000-delta answers):
+
+| Measure | Before | After |
+| --- | --- | --- |
+| Durable events per turn | 206 / 1,006 | 8 / 9 |
+| Journal bytes per answer byte | 111 / 80 | 16.3 / 4.9 |
+| Provider sending the answer to its last text on a client's stream | 56 / 116 ms | 2.6 / 10–16 ms |
+| Provider to the first text on the stream | 1.7 / 5.2 ms | 1.6 / 5.6–7.6 ms |
+
+The first-text times are dominated by the loopback mock building its stream.
+Journal bytes also no longer grow with the conversation: requests used to
+repeat up to 24 KiB of history each.
+
+Two parts of the design were replaced:
+
+- **The live plane.** Committing the first text after a quiet interval at
+  once gives a slow stream no added latency and bounds a fast one to 48 ms at
+  about twenty chunks a second, with no second plane, resume protocol or
+  client change. Web and Telegram render chunks as they rendered deltas.
+- **Blobs.** Digests of derivable requests remove the largest repeated part
+  without a blob table or references that readers would have to resolve.
+
+The target of 3 journal bytes per answer byte is not met: 4.9 for a 4 KB
+answer, 16.3 for an 800-byte one. The rest is the compiled context of each
+turn (6.5 KB with twelve memories, relevance-ordered per question), the
+capability selection (3.3 KB) and the answer, recorded in its chunks and again
+in `turn.finished`, which status, history and clients read. Node references in
+the compiled context and an answer derived from its chunks would close it;
+they change several readers and are deferred until journal size matters.
 

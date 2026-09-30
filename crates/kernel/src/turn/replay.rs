@@ -31,10 +31,10 @@ use super::fetch::ReplayedFetchCall;
 
 use super::run::turn_signature;
 use super::shared::{
-    Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, agent_run_text,
+    Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, RequestInputs, agent_run_text,
     append_assistant_text, bounded_turn_failure_message, history_messages, latest_user_text,
-    presented_context, select_history, select_history_stepped, system_prefix,
-    turn_failure_code_for_model,
+    model_request, presented_context, request_sha256, select_history, select_history_stepped,
+    system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
@@ -42,10 +42,10 @@ use super::types::{
     ExecutionOutputPayload, ExecutionStartedPayload, MAX_ASSISTANT_TEXT_BYTES,
     MAX_MODEL_EVENTS_PER_REQUEST, MAX_MODEL_OUTPUT_BYTES_PER_REQUEST, MAX_MODEL_OUTPUT_EVENT_BYTES,
     MAX_MODEL_REQUESTS, MAX_TURN_DURATION, MAX_TURN_FAILURE_MESSAGE_BYTES,
-    MIN_TURN_PAYLOAD_VERSION, ModelOutputPayload, ModelRequestedPayload, ReplayError,
-    ReplayedArtifactReadCall, ReplayedReadOnlyTurn, TURN_PAYLOAD_VERSION, TurnFailedPayload,
-    TurnFailure, TurnFailureCode, TurnFailureEvidence, TurnFailureReason, TurnFinishedPayload,
-    TurnSequenceSpan,
+    MIN_TURN_PAYLOAD_VERSION, ModelOutputPayload, ModelRequestDigestPayload, ModelRequestedPayload,
+    ReplayError, ReplayedArtifactReadCall, ReplayedReadOnlyTurn, TURN_PAYLOAD_VERSION,
+    TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFailureEvidence, TurnFailureReason,
+    TurnFinishedPayload, TurnSequenceSpan,
 };
 
 #[derive(Debug, Deserialize)]
@@ -380,9 +380,19 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         if context_event.span_id.is_some() {
             return Err(replay_invalid("context.compiled must not carry a span id"));
         }
+        // Version 7 records the compiled context alone; the capsule derives.
+        let capsule = match (&context.capsule, context.event_version >= 7) {
+            (Some(capsule), false) => capsule.clone(),
+            (None, true) => ContextCapsule::from(&context.compiled),
+            _ => {
+                return Err(replay_invalid(
+                    "context.compiled capsule contradicts its payload version",
+                ));
+            }
+        };
         validate_compiled_context_payload(
             &context.compiled,
-            &context.capsule,
+            &capsule,
             &self.input_text,
             self.input_recorded_at,
             context.event_version,
@@ -414,7 +424,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 replay_invalid("context.compiled time offset contradicts its payload version")
             })?,
         );
-        self.context = Some(presented_context(context.event_version, &context.capsule));
+        self.context = Some(presented_context(context.event_version, &capsule));
         self.context_payload = Some(context);
 
         if let Some(failure) = self.take_capability_stage_failure()? {
@@ -498,7 +508,13 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             expected_cards.push(CapabilityCard::from(manifest));
             self.fetch_selected = true;
         }
-        if selected.schemas != expected_schemas {
+        // Version 7 records no schemas: they are the builtins' own.
+        let recorded_schemas = if self.version.is_some_and(|version| version >= 7) {
+            selected.schemas.is_empty()
+        } else {
+            selected.schemas == expected_schemas
+        };
+        if !recorded_schemas {
             return Err(replay_invalid(
                 "selected schemas do not equal the installed contracts",
             ));
@@ -521,7 +537,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             ));
         }
         self.execution_epoch_id = Some(selected_epoch_id);
-        self.schemas = Some(selected.schemas.clone());
+        self.schemas = Some(expected_schemas);
         self.capabilities_payload = Some(selected);
 
         let mut request_index = 0_usize;
@@ -534,7 +550,14 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 return Err(replay_invalid("model request bound was exceeded"));
             }
             let request_event = self.take(event_kind::MODEL_REQUESTED, EventActor::System)?;
-            let persisted: ModelRequestedPayload = self.decode_versioned(request_event)?;
+            let persisted: ModelRequestedPayload =
+                if self.version.is_some_and(|version| version >= 7) {
+                    let recorded: ModelRequestDigestPayload =
+                        self.decode_versioned(request_event)?;
+                    self.rebuild_request(recorded, request_index)?
+                } else {
+                    self.decode_versioned(request_event)?
+                };
             self.require_turn_id(&persisted.turn_id)?;
             if persisted.request_index as usize != request_index {
                 return Err(replay_invalid("model request index is not contiguous"));
@@ -646,12 +669,37 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 if output.stream_event.sequence != expected_sequence {
                     return Err(replay_invalid("model stream sequence is not contiguous"));
                 }
+                // Version 7 journals consecutive text deltas as one chunk.
+                let covered = match output.through_sequence {
+                    None => 1,
+                    Some(through)
+                        if self.version.is_some_and(|version| version >= 7)
+                            && matches!(
+                                output.stream_event.event,
+                                ModelEvent::TextDelta { .. }
+                            )
+                            && through > output.stream_event.sequence =>
+                    {
+                        through - output.stream_event.sequence + 1
+                    }
+                    Some(_) => {
+                        return Err(replay_invalid(
+                            "model output chunk contradicts its payload version",
+                        ));
+                    }
+                };
+                let covered = usize::try_from(covered)
+                    .ok()
+                    .filter(|covered| event_count + covered <= MAX_MODEL_EVENTS_PER_REQUEST)
+                    .ok_or_else(|| {
+                        replay_invalid("model output chunk passes the request's event bound")
+                    })?;
                 output
                     .stream_event
                     .validate()
                     .map_err(|error| replay_invalid(error.to_string()))?;
-                expected_sequence = expected_sequence.saturating_add(1);
-                event_count += 1;
+                expected_sequence = expected_sequence.saturating_add(covered as u64);
+                event_count += covered;
                 self.outputs.push(output.clone());
 
                 match &output.stream_event.event {
@@ -1348,6 +1396,41 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         }
     }
 
+    /// Rebuild a version-7 request from the turn's durable state and require
+    /// the recorded digest: the request itself was never journaled.
+    fn rebuild_request(
+        &self,
+        recorded: ModelRequestDigestPayload,
+        request_index: usize,
+    ) -> Result<ModelRequestedPayload, ReplayError> {
+        let request = model_request(RequestInputs {
+            request_id: recorded.request_id,
+            execution_epoch_id: self
+                .execution_epoch_id
+                .clone()
+                .expect("selected epoch is set"),
+            system_prefix: self.system_prefix.clone().expect("system prefix is set"),
+            context: self.context.clone().expect("compiled context is set"),
+            tools: self.schemas.clone().expect("selected schemas are set"),
+            conversation: self.conversation.clone(),
+            first_tool_required: request_index == 0 && !self.agent_run,
+            turn_id: self.turn_id.clone(),
+            deadline: recorded.deadline,
+        })
+        .map_err(replay_invalid)?;
+        if request_sha256(&request) != recorded.request_sha256 {
+            return Err(replay_invalid(
+                "model request digest does not match the durable turn state",
+            ));
+        }
+        Ok(ModelRequestedPayload {
+            event_version: recorded.event_version,
+            turn_id: recorded.turn_id,
+            request_index: recorded.request_index,
+            request,
+        })
+    }
+
     fn validate_request(
         &mut self,
         request: &ModelRequest,
@@ -1869,6 +1952,7 @@ impl_payload_version!(
     ContextCompiledPayload,
     CapabilitiesSelectedPayload,
     ModelRequestedPayload,
+    ModelRequestDigestPayload,
     ModelOutputPayload,
     CapabilityRequestedPayload,
     ExecutionStartedPayload,

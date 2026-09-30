@@ -20,10 +20,9 @@ use ditto_context::{
     ContextSelection, TaskSignature,
 };
 use ditto_model::{
-    CancellationId, CancellationToken, ContentPart, ConversationItem, ExecutionEpochId,
-    FeatureRequest, FinishReason, GenerationControls, ModelContractError, ModelDriver, ModelEvent,
-    ModelFeature, ModelRequest, ModelRequestId, ModelTurn, OutputConstraint, ParallelToolCalls,
-    ProviderCallId, RequestControl, StableSystemPrefix, ToolCallBuffer, ToolChoice, ToolUsePolicy,
+    CancellationToken, ContentPart, ConversationItem, ExecutionEpochId, FinishReason,
+    ModelContractError, ModelDriver, ModelEvent, ModelRequest, ModelRequestId, ProviderCallId,
+    StableSystemPrefix, ToolCallBuffer,
 };
 use ditto_policy::{AuthorizationOutcome, InvocationAuthorizer, PolicyError, StaticPolicy};
 use ditto_protocol::{
@@ -43,16 +42,16 @@ mod fetch_tool;
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
-    Checkpoint, HistoryExchange, ReadyCall, append_assistant_text, bounded_turn_failure_message,
-    history_messages, latest_user_text, local_utc_offset_minutes, presented_context, system_prefix,
-    turn_failure_code_for_model,
+    Checkpoint, HistoryExchange, ReadyCall, RequestInputs, append_assistant_text,
+    bounded_turn_failure_message, history_messages, latest_user_text, local_utc_offset_minutes,
+    model_request, presented_context, request_sha256, system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnStatus, CapabilitiesSelectedPayload,
     CapabilityRequestedPayload, ContextCompiledPayload, ExecutionOutputPayload,
     ExecutionStartedPayload, MAX_ASSISTANT_TEXT_BYTES, MAX_MODEL_EVENTS_PER_REQUEST,
     MAX_MODEL_OUTPUT_BYTES_PER_REQUEST, MAX_MODEL_OUTPUT_EVENT_BYTES, MAX_MODEL_REQUESTS,
-    MAX_TURN_DURATION, ModelOutputPayload, ModelRequestedPayload, ReadOnlyTurnControl,
+    MAX_TURN_DURATION, ModelOutputPayload, ModelRequestDigestPayload, ReadOnlyTurnControl,
     TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFailureEvidence,
     TurnFailureReason, TurnFinishedPayload, TurnRunError,
 };
@@ -75,6 +74,9 @@ pub(super) struct TurnScope {
     /// Prelude transitions awaiting the turn's next append, which commits
     /// them with it in one transaction (ADR 0028 Phase B).
     staged: RefCell<Vec<(String, NewEvent)>>,
+    /// Streamed text admitted but not yet durable (turn payload version 7):
+    /// the turn's next append or the chunk's flush deadline commits it.
+    pending_text: RefCell<Option<PendingText>>,
 }
 
 pub(crate) struct AdmittedReadOnlyTurn {
@@ -132,6 +134,113 @@ struct ModelResponse {
     finish_reason: FinishReason,
     ready_call: Option<ReadyCall>,
     text: String,
+}
+
+/// Streamed text commits as one `model.output` chunk at most this long after
+/// its first delta. Text after a quiet interval of the same length commits at
+/// once, so a slow stream is never delayed and a fast one writes about twenty
+/// chunks a second.
+const TEXT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(48);
+/// A chunk commits before it would pass this much text.
+const TEXT_CHUNK_BYTES: usize = 2 * 1_024;
+
+/// Coalesced text awaiting its commit, with its pre-assigned event ID so later
+/// transitions can name it as their cause.
+#[derive(Clone)]
+struct PendingText {
+    event_id: String,
+    causation_id: String,
+    output: ModelOutputPayload,
+    encoded_bytes: usize,
+    opened: tokio::time::Instant,
+}
+
+/// How one admitted provider event enters the journal.
+enum OutputAdmission {
+    /// Text extending the pending chunk, with the chunk's new encoded size.
+    Extend(Box<ModelOutputPayload>, usize),
+    /// Text opening a new chunk after the pending one commits.
+    Open,
+    /// Any other output, committed individually after pending text.
+    Append,
+}
+
+impl TurnScope {
+    fn pending_text_flush_at(&self) -> Option<tokio::time::Instant> {
+        self.pending_text
+            .borrow()
+            .as_ref()
+            .map(|pending| pending.opened + TEXT_FLUSH_INTERVAL)
+    }
+
+    fn pending_text_bytes(&self) -> usize {
+        self.pending_text
+            .borrow()
+            .as_ref()
+            .map_or(0, |pending| pending.encoded_bytes)
+    }
+
+    /// The pending chunk extended by one text delta, unless that would pass
+    /// `TEXT_CHUNK_BYTES` or nothing is pending.
+    fn pending_text_with(
+        &self,
+        delta: &ModelOutputPayload,
+    ) -> Result<Option<(ModelOutputPayload, usize)>, serde_json::Error> {
+        let pending = self.pending_text.borrow();
+        let Some(pending) = pending.as_ref() else {
+            return Ok(None);
+        };
+        let (ModelEvent::TextDelta { text: joined }, ModelEvent::TextDelta { text }) = (
+            &pending.output.stream_event.event,
+            &delta.stream_event.event,
+        ) else {
+            return Ok(None);
+        };
+        if joined.len() + text.len() > TEXT_CHUNK_BYTES {
+            return Ok(None);
+        }
+        let mut extended = pending.output.clone();
+        extended.stream_event.event = ModelEvent::TextDelta {
+            text: format!("{joined}{text}"),
+        };
+        extended.through_sequence = Some(delta.stream_event.sequence);
+        extended.admitted_at = delta.admitted_at;
+        let bytes = serde_json::to_vec(&extended)?.len();
+        Ok(Some((extended, bytes)))
+    }
+
+    fn extend_pending_text(&self, extended: ModelOutputPayload, encoded_bytes: usize) {
+        if let Some(pending) = self.pending_text.borrow_mut().as_mut() {
+            pending.output = extended;
+            pending.encoded_bytes = encoded_bytes;
+        }
+    }
+
+    fn open_pending_text(&self, pending: PendingText) {
+        let previous = self.pending_text.replace(Some(pending));
+        debug_assert!(
+            previous.is_none(),
+            "pending text commits before the next chunk opens"
+        );
+    }
+
+    /// Staged prelude and pending text, in journal order, ready to commit.
+    fn take_uncommitted(&self) -> Result<Vec<(String, NewEvent)>, TurnRunError> {
+        let mut batch = self.staged.take();
+        if let Some(pending) = self.pending_text.take() {
+            let span = pending.output.request_id.to_string();
+            let event = turn_event(
+                self,
+                EventActor::Model,
+                event_kind::MODEL_OUTPUT,
+                &pending.output,
+                Some(pending.causation_id),
+                Some(span),
+            )?;
+            batch.push((pending.event_id, event));
+        }
+        Ok(batch)
+    }
 }
 
 /// Builtin tool contracts, paged and validated on first use and then reused
@@ -203,6 +312,7 @@ impl DittoKernel {
                 Vec::new()
             },
             staged: RefCell::default(),
+            pending_text: RefCell::default(),
         };
         if self.task_is_completed(&scope.session_id, &scope.task_id)? {
             return Err(KernelError::InvalidCommand(format!(
@@ -368,7 +478,7 @@ impl DittoKernel {
                 turn_id: run.scope.turn_id.clone(),
                 provenance_through_seq,
                 compiled,
-                capsule: capsule.clone(),
+                capsule: None,
                 history_turn_ids: history
                     .iter()
                     .map(|exchange| exchange.turn_id.clone())
@@ -540,7 +650,7 @@ impl DittoKernel {
                 sort_manifest,
                 fetch_manifest,
                 epoch: live_epoch.evidence().clone(),
-                schemas: schemas.clone(),
+                schemas: Vec::new(),
             },
             None,
         )?;
@@ -745,15 +855,22 @@ impl DittoKernel {
         conversation: &[ConversationItem],
     ) -> Result<(ModelRequest, DateTime<Utc>), TurnRunError> {
         let index = Some(request_index as u8);
-        let request = build_model_request(
-            run,
-            request_index,
-            tools.execution_epoch_id.clone(),
-            presented_context(TURN_PAYLOAD_VERSION, capsule),
-            tools.schemas.clone(),
-            conversation.to_vec(),
-        )
-        .map_err(|error| self.fail(run, TurnFailureCode::DriverContract, error, index, None))?;
+        let request = ModelRequestId::new(format!("model_request_{}", Ulid::new()))
+            .map_err(|error| error.to_string())
+            .and_then(|request_id| {
+                model_request(RequestInputs {
+                    request_id,
+                    execution_epoch_id: tools.execution_epoch_id.clone(),
+                    system_prefix: run.system_prefix.clone(),
+                    context: presented_context(TURN_PAYLOAD_VERSION, capsule),
+                    tools: tools.schemas.clone(),
+                    conversation: conversation.to_vec(),
+                    first_tool_required: request_index == 0 && !run.scope.agent_run,
+                    turn_id: run.scope.turn_id.clone(),
+                    deadline: run.deadline,
+                })
+            })
+            .map_err(|error| self.fail(run, TurnFailureCode::DriverContract, error, index, None))?;
         if let Err(error) = request.validate_at(run.accepted_at) {
             return Err(self.fail(
                 run,
@@ -777,15 +894,18 @@ impl DittoKernel {
         }
         self.ensure_before_deadline(run, Checkpoint::BeforeModelRequest, index, None)?;
 
+        // Replay rebuilds the rest of the request from earlier durable events.
         let requested = self.append_turn_event(
             run,
             EventActor::System,
             event_kind::MODEL_REQUESTED,
-            &ModelRequestedPayload {
+            &ModelRequestDigestPayload {
                 event_version: TURN_PAYLOAD_VERSION,
                 turn_id: run.scope.turn_id.clone(),
                 request_index: request_index as u8,
-                request: request.clone(),
+                request_id: request.request_id.clone(),
+                deadline: run.deadline,
+                request_sha256: request_sha256(&request),
             },
             Some(request.request_id.to_string()),
         )?;
@@ -807,10 +927,15 @@ impl DittoKernel {
         let driver = run.driver;
         let mut stream = driver.stream(request.clone(), run.cancellation.clone());
         let mut event_count = 0_usize;
+        // Encoded bytes of this request's committed outputs; pending text adds
+        // its own, and the two together never pass the request's bound.
         let mut model_output_bytes = 0_usize;
         let mut tool_buffer = ToolCallBuffer::default();
         let mut ready_call: Option<ReadyCall> = None;
         let mut request_text = String::new();
+        // When text last became durable. Text after a quiet interval commits
+        // at once, so coalescing never delays the first words of a burst.
+        let mut text_committed_at: Option<tokio::time::Instant> = None;
 
         loop {
             if event_count == MAX_MODEL_EVENTS_PER_REQUEST {
@@ -826,6 +951,14 @@ impl DittoKernel {
             }
             let deadline_wait = tokio::time::sleep(duration_until(run.deadline));
             tokio::pin!(deadline_wait);
+            let flush_at = run.scope.pending_text_flush_at();
+            let flush_wait = async move {
+                match flush_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::pin!(flush_wait);
             let next = tokio::select! {
                 biased;
                 _ = run.cancellation.cancelled() => {
@@ -846,6 +979,11 @@ impl DittoKernel {
                         None,
                     ));
                 }
+                () = &mut flush_wait => {
+                    model_output_bytes += self.commit_pending_text(&run.scope)?;
+                    text_committed_at = Some(tokio::time::Instant::now());
+                    continue;
+                }
                 next = stream.next() => next,
             };
             let Some(stream_event) = next else {
@@ -865,18 +1003,6 @@ impl DittoKernel {
                     None,
                 ));
             }
-
-            let mut output_payload = ModelOutputPayload {
-                event_version: TURN_PAYLOAD_VERSION,
-                turn_id: run.scope.turn_id.clone(),
-                request_index: request_index as u8,
-                request_id: request.request_id.clone(),
-                admitted_at: ceil_to_millis(Utc::now()),
-                stream_event: stream_event.clone(),
-            };
-            let encoded_output_bytes = serde_json::to_vec(&output_payload)?.len();
-            self.ensure_output_bounds(run, index, model_output_bytes, encoded_output_bytes)?;
-            self.ensure_not_cancelled(run, Checkpoint::AwaitingModelOutput, index, None)?;
             let admitted_at = ceil_to_millis(Utc::now());
             if admitted_at >= run.deadline {
                 return Err(self.fail(
@@ -887,20 +1013,80 @@ impl DittoKernel {
                     None,
                 ));
             }
-            output_payload.admitted_at = admitted_at;
+            let output_payload = ModelOutputPayload {
+                event_version: TURN_PAYLOAD_VERSION,
+                turn_id: run.scope.turn_id.clone(),
+                request_index: request_index as u8,
+                request_id: request.request_id.clone(),
+                admitted_at,
+                stream_event: stream_event.clone(),
+                through_sequence: None,
+            };
             let encoded_output_bytes = serde_json::to_vec(&output_payload)?.len();
-            self.ensure_output_bounds(run, index, model_output_bytes, encoded_output_bytes)?;
+            // Text joins the pending chunk, or opens the next one; any other
+            // output commits after the pending chunk, in the same transaction.
+            let admission = match &stream_event.event {
+                ModelEvent::TextDelta { .. } => {
+                    match run.scope.pending_text_with(&output_payload)? {
+                        Some((extended, bytes)) => {
+                            OutputAdmission::Extend(Box::new(extended), bytes)
+                        }
+                        None => OutputAdmission::Open,
+                    }
+                }
+                _ => OutputAdmission::Append,
+            };
+            // Bytes this output leaves pending or newly committed beyond the
+            // committed total; a chunk holds at most one delta past
+            // `TEXT_CHUNK_BYTES`, so only single events can reach the event bound.
+            let prospective_bytes = match &admission {
+                OutputAdmission::Extend(_, bytes) => *bytes,
+                OutputAdmission::Open | OutputAdmission::Append => {
+                    run.scope.pending_text_bytes() + encoded_output_bytes
+                }
+            };
+            self.ensure_output_bounds(
+                run,
+                index,
+                model_output_bytes + prospective_bytes.saturating_sub(encoded_output_bytes),
+                encoded_output_bytes,
+            )?;
             self.ensure_live(run, Checkpoint::AwaitingModelOutput, index, None)?;
             event_count += 1;
 
-            self.append_turn_event(
-                run,
-                EventActor::Model,
-                event_kind::MODEL_OUTPUT,
-                &output_payload,
-                Some(request.request_id.to_string()),
-            )?;
-            model_output_bytes = model_output_bytes.saturating_add(encoded_output_bytes);
+            match admission {
+                OutputAdmission::Extend(extended, bytes) => {
+                    run.scope.extend_pending_text(*extended, bytes);
+                }
+                OutputAdmission::Open => {
+                    model_output_bytes += self.commit_pending_text(&run.scope)?;
+                    let now = tokio::time::Instant::now();
+                    let event_id = Ulid::new().to_string();
+                    run.scope.open_pending_text(PendingText {
+                        event_id: event_id.clone(),
+                        causation_id: run.cause.clone(),
+                        output: output_payload,
+                        encoded_bytes: encoded_output_bytes,
+                        opened: now,
+                    });
+                    run.cause = event_id;
+                    if text_committed_at.is_none_or(|at| now - at >= TEXT_FLUSH_INTERVAL) {
+                        model_output_bytes += self.commit_pending_text(&run.scope)?;
+                        text_committed_at = Some(now);
+                    }
+                }
+                OutputAdmission::Append => {
+                    model_output_bytes += run.scope.pending_text_bytes();
+                    self.append_turn_event(
+                        run,
+                        EventActor::Model,
+                        event_kind::MODEL_OUTPUT,
+                        &output_payload,
+                        Some(request.request_id.to_string()),
+                    )?;
+                    model_output_bytes += encoded_output_bytes;
+                }
+            }
 
             match &stream_event.event {
                 ModelEvent::TextDelta { text } => {
@@ -1571,6 +1757,17 @@ impl DittoKernel {
         Ok(event)
     }
 
+    /// Commit pending streamed text, with anything staged before it. Returns
+    /// the committed chunk's encoded bytes.
+    fn commit_pending_text(&self, scope: &TurnScope) -> Result<usize, TurnRunError> {
+        let bytes = scope.pending_text_bytes();
+        let batch = scope.take_uncommitted()?;
+        if !batch.is_empty() {
+            self.append_and_publish_batch(batch)?;
+        }
+        Ok(bytes)
+    }
+
     /// Stage a prelude transition caused by the previous one; the turn's next
     /// append, its first model request or its failure, commits it.
     fn stage_turn_event<T: Serialize>(
@@ -1608,7 +1805,7 @@ impl DittoKernel {
         span_id: Option<String>,
     ) -> Result<EventRecord, TurnRunError> {
         let event = turn_event(scope, actor, kind, payload, causation_id, span_id)?;
-        let mut batch = scope.staged.take();
+        let mut batch = scope.take_uncommitted()?;
         if batch.is_empty() {
             return Ok(self.append_and_publish(event)?);
         }
@@ -1869,56 +2066,6 @@ fn artifact_read_argument_error(arguments: &Value) -> ArtifactReadError {
     ArtifactReadError::invalid_arguments()
 }
 
-fn build_model_request(
-    run: &TurnRun<'_>,
-    request_index: usize,
-    execution_epoch_id: ExecutionEpochId,
-    context: ContextCapsule,
-    tools: Vec<CapabilitySchema>,
-    conversation: Vec<ConversationItem>,
-) -> Result<ModelRequest, String> {
-    let (scope, deadline) = (&run.scope, run.deadline);
-    let request_id = ModelRequestId::new(format!("model_request_{}", Ulid::new()))
-        .map_err(|error| error.to_string())?;
-    let cancellation_id =
-        CancellationId::new(scope.turn_id.clone()).map_err(|error| error.to_string())?;
-    let mut required = BTreeSet::new();
-    required.insert(ModelFeature::Text);
-    required.insert(ModelFeature::ToolCalls);
-
-    let mut request = ModelRequest::new(
-        request_id,
-        execution_epoch_id,
-        run.system_prefix.clone(),
-        ModelTurn {
-            conversation,
-            context,
-            output: OutputConstraint::Text,
-        },
-    );
-    request.tools = tools;
-    request.features = FeatureRequest {
-        required,
-        preferred: BTreeSet::new(),
-    };
-    request.generation = GenerationControls {
-        reasoning: None,
-        prompt_cache: Default::default(),
-        tool_use: ToolUsePolicy {
-            choice: if request_index == 0 && !scope.agent_run {
-                ToolChoice::Required
-            } else {
-                ToolChoice::Auto
-            },
-            parallel_calls: ParallelToolCalls::Forbid,
-        },
-    };
-    request.control = RequestControl {
-        cancellation_id: Some(cancellation_id),
-        deadline: Some(deadline),
-    };
-    Ok(request)
-}
 fn deadline_expired(deadline: DateTime<Utc>) -> bool {
     Utc::now() >= deadline
 }
