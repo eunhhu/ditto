@@ -36,7 +36,8 @@ mod sort_tool;
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
-    Checkpoint, ReadyCall, append_assistant_text, bounded_turn_failure_message,
+    Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, agent_run_text,
+    append_assistant_text, bounded_turn_failure_message, history_messages, select_history,
     stable_system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
@@ -217,19 +218,22 @@ impl DittoKernel {
         };
 
         self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
-        let capsule = self.compile_turn_context(&mut run, &text, context_candidates)?;
+        let (capsule, history) =
+            self.compile_turn_context(&mut run, &text, context_candidates, &input_event)?;
         let tools = self.select_turn_tools(&mut run, &input_event)?;
-        self.run_model_requests(&mut run, text, capsule, tools)
+        self.run_model_requests(&mut run, text, history, capsule, tools)
             .await
     }
 
-    /// Compile and journal the turn's source-verified context capsule.
+    /// Compile and journal the turn's source-verified context capsule and, for
+    /// agent runs, the conversation thread's recent exchanges.
     fn compile_turn_context(
         &self,
         run: &mut TurnRun<'_>,
         text: &str,
         context_candidates: Option<impl IntoIterator<Item = ContextCandidate>>,
-    ) -> Result<ContextCapsule, TurnRunError> {
+        input_event: &EventRecord,
+    ) -> Result<(ContextCapsule, Vec<HistoryExchange>), TurnRunError> {
         let context_candidates = match context_candidates {
             Some(candidates) => candidates.into_iter().collect(),
             None => match self.agent_context_candidates(
@@ -280,6 +284,20 @@ impl DittoKernel {
                 return Err(self.fail_with(run, reason, message, None, None));
             }
         }
+        let history = if run.scope.agent_run {
+            self.conversation_history(&run.scope, input_event)
+                .map_err(|_| {
+                    self.fail_with(
+                        run,
+                        TurnFailureReason::ConversationHistoryUnavailable,
+                        "conversation history is unavailable",
+                        None,
+                        None,
+                    )
+                })?
+        } else {
+            Vec::new()
+        };
         self.append_turn_event(
             run,
             EventActor::System,
@@ -290,10 +308,49 @@ impl DittoKernel {
                 provenance_through_seq,
                 compiled,
                 capsule: capsule.clone(),
+                history_turn_ids: history
+                    .iter()
+                    .map(|exchange| exchange.turn_id.clone())
+                    .collect(),
             },
             None,
         )?;
-        Ok(capsule)
+        Ok((capsule, history))
+    }
+
+    /// The current thread's finished agent-run exchanges before this input:
+    /// bounded indexed reads of the latest candidates after the last reset.
+    fn conversation_history(
+        &self,
+        scope: &TurnScope,
+        input: &EventRecord,
+    ) -> Result<Vec<HistoryExchange>, KernelError> {
+        let finished = self.inner.events.conversation_finished_turns(
+            &scope.session_id,
+            input.seq,
+            MAX_HISTORY_CANDIDATES,
+        )?;
+        let mut exchanges = Vec::with_capacity(finished.len());
+        for event in finished {
+            let payload: TurnFinishedPayload = serde_json::from_value(event.payload)?;
+            let task = event
+                .task_id
+                .as_deref()
+                .ok_or_else(|| KernelError::InvalidCommand("finished turn has no task".into()))?;
+            let turn_input = self
+                .inner
+                .events
+                .turn_input(&scope.session_id, task, &payload.turn_id)?
+                .ok_or_else(|| KernelError::InvalidCommand("finished turn has no input".into()))?;
+            if let Some(user) = agent_run_text(&turn_input) {
+                exchanges.push(HistoryExchange {
+                    turn_id: payload.turn_id,
+                    user: user.to_owned(),
+                    assistant: payload.outcome.response,
+                });
+            }
+        }
+        Ok(select_history(exchanges))
     }
 
     /// Page the permitted capabilities into one sealed execution epoch,
@@ -509,10 +566,15 @@ impl DittoKernel {
         &self,
         run: &mut TurnRun<'_>,
         text: String,
+        history: Vec<HistoryExchange>,
         capsule: ContextCapsule,
         tools: TurnTools,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
-        let mut conversation = super::sort::initial_conversation(text, run.scope.sort.as_ref());
+        let mut conversation = history_messages(&history);
+        conversation.extend(super::sort::initial_conversation(
+            text,
+            run.scope.sort.as_ref(),
+        ));
         let mut totals = TurnTotals::default();
 
         for request_index in 0..MAX_MODEL_REQUESTS {

@@ -338,7 +338,7 @@ fn old_schema_five_one_shots_migrate_without_rewriting_source_or_reservations() 
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        6
+        crate::CURRENT_SCHEMA_VERSION
     );
 }
 

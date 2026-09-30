@@ -125,7 +125,9 @@ current memory set fits the context budget, the model receives all of it with
 lexical matches first; otherwise selection falls back to positive lexical
 overlap that ignores function words. Turn payload version 2 records this
 contract and typed failure reasons; version-1 turns replay under their original
-rules.
+rules. Version 3 adds conversation threads (ADR 0022): an agent run replays the
+current thread's newest finished exchanges as native messages, bounded to eight
+exchanges and 24 KiB, until a `conversation.reset` starts a new thread.
 
 ## Capability pager
 

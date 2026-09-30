@@ -165,7 +165,7 @@ class AssessmentTests(unittest.TestCase):
                                payload={"text": query, "agent_run": {"version": 1, "request_id": identity}}))
             events.append(dict(common, seq=seq+1, event_id=f"model-{i}", actor="system", kind="model.requested",
                                span_id=request, causation_id=f"input-{i}",
-                               payload={"event_version": 2, "turn_id": turn, "request_index": 0,
+                               payload={"event_version": 3, "turn_id": turn, "request_index": 0,
                                         "request": {"request_id": request, "control": {"cancellation_id": turn},
                                                     "turn": {"context": {"nodes": nodes}, "conversation": [
                                                         {"type": "message", "role": "user", "content": [
@@ -206,8 +206,8 @@ class AssessmentTests(unittest.TestCase):
             lambda d: d[1][3].update(seq=4.0),
             lambda d: d[1][2]["payload"]["agent_run"].update(request_id="wrong"),
             lambda d: d[1][2]["payload"]["agent_run"].update(version=True),
-            lambda d: d[1][3]["payload"].update(event_version=2.0),
-            lambda d: d[1][3]["payload"].update(event_version=1),
+            lambda d: d[1][3]["payload"].update(event_version=3.0),
+            lambda d: d[1][3]["payload"].update(event_version=2),
             lambda d: d[1][3]["payload"]["request"]["turn"]["context"].update(nodes=[]),
             lambda d: d[0][1].update(context_json=json.dumps(json.loads(d[0][1]["context_json"]), indent=2)),
         ]

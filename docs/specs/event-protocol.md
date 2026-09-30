@@ -432,7 +432,15 @@ compiles context with the complete-set contract and adds an optional
 `artifact_read_package_unverified` or `tool_call_lifecycle` that is required for
 validator-derived failures and absent otherwise. Replay validates that reason,
 not the failure message wording. Version-1 turns carry no reason and keep the
-positive-overlap context rule.
+positive-overlap context rule. Version 3
+([ADR 0022](../adr/0022-conversation-threads.md)) also replays the session's
+current conversation thread to agent runs as native messages and records the
+selected prior turn IDs in `context.compiled` as `history_turn_ids`.
+
+`conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
+correlation) starts a new thread: later agent runs replay only finished
+agent-run turns recorded after the latest reset. It deletes nothing and does
+not affect memories.
 Model request/output events use the request ID as their span; capability and
 execution events use the call ID. Every transition is durably appended before it
 is published or returned. Each `model.output` also records the

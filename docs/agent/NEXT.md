@@ -5,23 +5,28 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-Task 017 is the drafted [personal-task outcomes and evaluation
-specification](tasks/017-evaluation-outcomes.md). It defines representative
-semantic recall, answer-quality, tool/schedule, safety, resource and cost/latency
-evaluation needs after Task 016's bounded lexical corpus. This is a specification
-only: the broader suite, calibrated budgets, live model-answer assessment,
-semantic retrieval, tool-task success and v0.1 readiness are not verified.
-General approval fulfillment remains deferred.
+On 2026-09-30 the user redirected the frontier: build a daily-driver personal
+assistant that can stand in for current assistant agents (OpenClaw, Hermes,
+Grok bots, Muse, Dot). Work these slices in order; each lands with tests, an
+ADR when a contract changes, and evidence:
 
-On 2026-09-30 the user prioritized a prerequisite before Task 017's measured
-runs; [Task 016.1](tasks/016-1-personal-recall.md) now sends the complete
-current memory set when it fits the budget and records typed turn failures.
-Task 017 remains the next task.
+1. [018](tasks/018-conversation-threads.md) Conversation threads - complete.
+2. 019 OpenAI-compatible model provider (local and hosted models).
+3. 020 Local web app: chat, memories, schedules and a per-answer inspector.
+4. 021 Telegram gateway and delivery of scheduled results.
+5. 022 Builtin tool interface with model-callable memory tools.
+6. 023 Web fetch and search tools behind network leases.
+
+The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
+the measurement gate before any claim of parity with other assistants.
+General approval fulfillment remains deferred.
 
 ## Completed
 
 One line per slice; each task file and its evidence hold the details.
 
+- [018](tasks/018-conversation-threads.md) Conversation threads, `ditto chat`
+  and `ditto new`, turn payload version 3 (ADR 0022).
 - [016.1](tasks/016-1-personal-recall.md) Personal-scale recall (complete-set
   context) and typed turn failures, turn payload version 2 (ADR 0021).
 - [016](tasks/016-personal-task-corpus.md) Offline personal-task context corpus:

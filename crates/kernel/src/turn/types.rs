@@ -13,8 +13,9 @@ use crate::KernelError;
 
 /// Durable turn contract written by this kernel. Version 2 compiles run
 /// context with the complete-set selection (ADR 0021) and records a typed
-/// [`TurnFailureReason`] for validator-derived failures.
-pub const TURN_PAYLOAD_VERSION: u16 = 2;
+/// [`TurnFailureReason`] for validator-derived failures. Version 3 prepends the
+/// current conversation thread's recent exchanges to agent runs (ADR 0022).
+pub const TURN_PAYLOAD_VERSION: u16 = 3;
 /// Oldest turn contract that replay and run status still read. Version-1
 /// turns use positive-overlap context selection and message grammar.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -33,6 +34,9 @@ pub struct ContextCompiledPayload {
     pub provenance_through_seq: i64,
     pub compiled: CompiledContext,
     pub capsule: ContextCapsule,
+    /// Version 3: prior turns replayed as conversation history, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_turn_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +181,7 @@ pub enum TurnFailureReason {
     RequiredContextOverBudget,
     MissingContextProvenance,
     UnresolvedContextProvenance,
+    ConversationHistoryUnavailable,
     ArtifactReadUnavailable,
     ArtifactReadPackageUnverified,
     ArtifactReadManifestMismatch,
@@ -201,7 +206,8 @@ impl TurnFailureReason {
             | Self::InvalidRequiredContext
             | Self::RequiredContextOverBudget
             | Self::MissingContextProvenance
-            | Self::UnresolvedContextProvenance => TurnFailureCode::ContextCompilation,
+            | Self::UnresolvedContextProvenance
+            | Self::ConversationHistoryUnavailable => TurnFailureCode::ContextCompilation,
             Self::ArtifactReadUnavailable => TurnFailureCode::CapabilityUnavailable,
             Self::ArtifactReadPackageUnverified
             | Self::ArtifactReadManifestMismatch

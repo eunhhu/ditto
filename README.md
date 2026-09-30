@@ -48,6 +48,8 @@ The executable foundation includes:
 - explicit CLI/HTTP model runs with current session context (the complete
   memory set when it fits the context budget), durable retry identity,
   cancellation, and restart inspection;
+- conversation threads: runs replay the session's recent exchanges until a new
+  thread is started, plus an interactive `ditto chat`;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - model-directed sorting of one explicitly attached file, with separate permission
@@ -140,8 +142,17 @@ memories), the model receives all of it with lexical matches first, so a
 paraphrased question such as "What is my meeting preference?" still reaches
 "I prefer afternoon meetings". Larger sessions fall back to lexical matching and
 can miss paraphrases until semantic retrieval exists. Superseded and
-other-session memories are never sent, and prior conversation text is not
-automatically reinserted.
+other-session memories are never sent.
+
+Runs also continue the session's conversation thread: the model receives the
+newest finished exchanges (up to eight, 24 KiB) since the thread began, so a
+follow-up like "What is his name?" works. Start a new thread at any time;
+memories are kept:
+
+```bash
+cargo run -p ditto-cli -- chat     # interactive; /new starts a thread, /exit quits
+cargo run -p ditto-cli -- new      # new thread for later run/chat requests
+```
 The model can answer directly or read an already-rooted, same-scope artifact.
 An explicit attachment also permits one bounded sort:
 
@@ -242,6 +253,7 @@ intervals, without named-time-zone or daylight-saving calendar adjustments. See
 | --- | --- | --- |
 | `GET` | `/health` | Liveness, durable count, and latest sequence |
 | `POST` | `/v1/commands/input` | Submit user input; kernel assigns event authority |
+| `POST` | `/v1/commands/conversation/reset` | Start a new conversation thread in a session (memories are kept) |
 | `POST` | `/v1/commands/memory` | Save an existing same-session user input, optionally replacing an active memory |
 | `GET` | `/v1/memories` | Inspect current session memories with an ID cursor |
 | `POST` | `/v1/commands/run` | Admit one model run, optionally permitting one attached-file sort |

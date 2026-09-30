@@ -1,4 +1,5 @@
 use ditto_model::{ContentPart, ConversationItem, MessageRole, ProviderCallId, StableSystemPrefix};
+use ditto_protocol::{EventActor, EventRecord, event_kind};
 use serde_json::Value;
 
 use super::types::{MAX_TURN_FAILURE_MESSAGE_BYTES, TurnFailureCode};
@@ -129,4 +130,147 @@ pub(super) fn bounded_turn_failure_message(message: &str) -> String {
         end = end.saturating_sub(1);
     }
     format!("{}{SUFFIX}", &message[..end])
+}
+
+/// Conversation history bounds (turn payload version 3, ADR 0022). Changing
+/// any of them changes recorded conversations and needs a new version.
+pub(super) const MAX_HISTORY_EXCHANGES: usize = 8;
+/// Finished turns examined per thread, including skipped non-agent turns.
+pub(super) const MAX_HISTORY_CANDIDATES: usize = 32;
+pub(super) const MAX_HISTORY_MESSAGE_BYTES: usize = 4 * 1_024;
+pub(super) const MAX_HISTORY_BYTES: usize = 24 * 1_024;
+
+/// One finished agent-run exchange of the current conversation thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HistoryExchange {
+    pub(super) turn_id: String,
+    pub(super) user: String,
+    pub(super) assistant: String,
+}
+
+/// The single history rule shared by runtime and replay: take exchanges newest
+/// first, bound each message, stop at the exchange or byte limit, and return
+/// them oldest first.
+pub(super) fn select_history(
+    newest_first: impl IntoIterator<Item = HistoryExchange>,
+) -> Vec<HistoryExchange> {
+    let mut selected = Vec::new();
+    let mut used = 0_usize;
+    for mut exchange in newest_first.into_iter().take(MAX_HISTORY_EXCHANGES) {
+        exchange.user = bounded_history_text(&exchange.user);
+        exchange.assistant = bounded_history_text(&exchange.assistant);
+        let cost = exchange.user.len() + exchange.assistant.len();
+        if used + cost > MAX_HISTORY_BYTES {
+            break;
+        }
+        used += cost;
+        selected.push(exchange);
+    }
+    selected.reverse();
+    selected
+}
+
+/// Replay the exchanges as native conversation messages before the request.
+pub(super) fn history_messages(history: &[HistoryExchange]) -> Vec<ConversationItem> {
+    history
+        .iter()
+        .flat_map(|exchange| {
+            [
+                (MessageRole::User, &exchange.user),
+                (MessageRole::Assistant, &exchange.assistant),
+            ]
+        })
+        .map(|(role, text)| ConversationItem::Message {
+            role,
+            content: vec![ContentPart::Text { text: text.clone() }],
+        })
+        .collect()
+}
+
+/// The user text of an explicit agent-run input; `None` for other turns.
+pub(super) fn agent_run_text(input: &EventRecord) -> Option<&str> {
+    if input.kind != event_kind::INPUT_RECEIVED
+        || input.actor != EventActor::User
+        || !input.payload.get("agent_run").is_some_and(Value::is_object)
+    {
+        return None;
+    }
+    input.payload.get("text")?.as_str()
+}
+
+fn bounded_history_text(text: &str) -> String {
+    const SUFFIX: &str = "...[truncated]";
+    if text.len() <= MAX_HISTORY_MESSAGE_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_HISTORY_MESSAGE_BYTES - SUFFIX.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{SUFFIX}", &text[..end])
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    fn exchange(index: usize, bytes: usize) -> HistoryExchange {
+        HistoryExchange {
+            turn_id: format!("turn_{index}"),
+            user: "u".repeat(bytes),
+            assistant: "a".repeat(bytes),
+        }
+    }
+
+    #[test]
+    fn history_keeps_the_newest_bounded_exchanges_oldest_first() {
+        let newest_first = (0..12).rev().map(|index| exchange(index, 10));
+        let selected = select_history(newest_first);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|e| e.turn_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "turn_4", "turn_5", "turn_6", "turn_7", "turn_8", "turn_9", "turn_10", "turn_11"
+            ]
+        );
+        let messages = history_messages(&selected[..1]);
+        assert!(matches!(
+            &messages[..],
+            [
+                ConversationItem::Message {
+                    role: MessageRole::User,
+                    ..
+                },
+                ConversationItem::Message {
+                    role: MessageRole::Assistant,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn long_messages_truncate_on_char_boundaries_and_the_byte_budget_stops_older_turns() {
+        let long = HistoryExchange {
+            turn_id: "turn_long".into(),
+            user: "한".repeat(3_000),
+            assistant: "x".repeat(10_000),
+        };
+        let bounded = select_history([long]);
+        assert!(bounded[0].user.len() <= MAX_HISTORY_MESSAGE_BYTES);
+        assert!(bounded[0].user.ends_with("...[truncated]"));
+        assert_eq!(bounded[0].assistant.len(), MAX_HISTORY_MESSAGE_BYTES);
+        // Three 8 KiB exchanges fill 24 KiB exactly; the fourth is not taken.
+        let full = (0..4).rev().map(|index| exchange(index, 4 * 1_024));
+        let selected = select_history(full);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|e| e.turn_id.as_str())
+                .collect::<Vec<_>>(),
+            ["turn_1", "turn_2", "turn_3"]
+        );
+    }
 }

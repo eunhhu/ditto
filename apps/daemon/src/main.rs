@@ -15,8 +15,8 @@ use axum::{
 use clap::Parser;
 use ditto_kernel::{DittoKernel, KernelConfig, KernelError};
 use ditto_protocol::{
-    CapabilitySearchQuery, EventQuery, EventRecord, HealthResponse, SubmitInputCommand,
-    SubmitInputResponse,
+    CapabilitySearchQuery, ConversationResetResponse, EventQuery, EventRecord, HealthResponse,
+    ResetConversationCommand, SubmitInputCommand, SubmitInputResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -86,16 +86,7 @@ async fn main() -> anyhow::Result<()> {
         driver: driver.clone(),
         shutdown: shutdown.clone(),
     };
-    let app = Router::new()
-        .merge(memory::routes())
-        .merge(runs::routes())
-        .merge(schedules::routes(args.bind.ip().is_loopback()))
-        .merge(sorts::routes(args.bind.ip().is_loopback()))
-        .route("/health", get(health))
-        .route("/v1/commands/input", post(submit_input))
-        .route("/v1/events", get(list_events))
-        .route("/v1/stream", get(stream_events))
-        .route("/v1/capabilities", get(capabilities))
+    let app = api_routes(args.bind.ip().is_loopback())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -137,6 +128,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Every HTTP route. The daemon and the offline fixture server share this
+/// assembly so their surfaces cannot drift apart.
+fn api_routes(loopback: bool) -> Router<AppState> {
+    Router::new()
+        .merge(memory::routes())
+        .merge(runs::routes())
+        .merge(schedules::routes(loopback))
+        .merge(sorts::routes(loopback))
+        .route("/health", get(health))
+        .route("/v1/commands/input", post(submit_input))
+        .route("/v1/commands/conversation/reset", post(reset_conversation))
+        .route("/v1/events", get(list_events))
+        .route("/v1/stream", get(stream_events))
+        .route("/v1/capabilities", get(capabilities))
+}
+
 fn validate_bind(bind: SocketAddr, allow_unauthenticated_remote: bool) -> anyhow::Result<()> {
     if !bind.ip().is_loopback() && !allow_unauthenticated_remote {
         bail!(
@@ -161,6 +168,14 @@ async fn submit_input(
 ) -> Result<(StatusCode, Json<SubmitInputResponse>), ApiError> {
     let event = state.kernel.record_user_input(command)?;
     Ok((StatusCode::CREATED, Json(SubmitInputResponse { event })))
+}
+
+async fn reset_conversation(
+    State(state): State<AppState>,
+    Json(command): Json<ResetConversationCommand>,
+) -> Result<(StatusCode, Json<ConversationResetResponse>), ApiError> {
+    let reset = state.kernel.reset_conversation(command)?;
+    Ok((StatusCode::CREATED, Json(reset)))
 }
 
 async fn list_events(

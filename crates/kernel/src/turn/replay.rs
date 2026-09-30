@@ -26,7 +26,8 @@ use super::sort::{ReplayedSortCall, SortGrant};
 
 use super::run::turn_signature;
 use super::shared::{
-    Checkpoint, ReadyCall, append_assistant_text, bounded_turn_failure_message,
+    Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, agent_run_text,
+    append_assistant_text, bounded_turn_failure_message, history_messages, select_history,
     stable_system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
@@ -363,6 +364,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             context.event_version,
         )?;
         self.validate_context_sources(&context, context_event)?;
+        let history = self.conversation_history(&context)?;
+        self.conversation.splice(0..0, history_messages(&history));
         self.context = Some(context.capsule.clone());
         self.context_payload = Some(context);
 
@@ -1127,6 +1130,77 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         Ok(())
     }
 
+    /// Version-3 agent runs replay the thread's recent exchanges. Recompute
+    /// them from the snapshot with the runtime's rule and require the
+    /// recorded turn IDs to match exactly.
+    fn conversation_history(
+        &self,
+        context: &ContextCompiledPayload,
+    ) -> Result<Vec<HistoryExchange>, ReplayError> {
+        let history = if context.event_version >= 3 && self.agent_run {
+            self.recompute_history()?
+        } else {
+            Vec::new()
+        };
+        if context.history_turn_ids
+            != history
+                .iter()
+                .map(|exchange| exchange.turn_id.clone())
+                .collect::<Vec<_>>()
+        {
+            return Err(replay_invalid(
+                "context history does not match the conversation thread",
+            ));
+        }
+        Ok(history)
+    }
+
+    fn recompute_history(&self) -> Result<Vec<HistoryExchange>, ReplayError> {
+        let input_seq = self.events[0].seq;
+        let boundary = self
+            .snapshot
+            .iter()
+            .filter(|event| event.seq < input_seq && event.kind == event_kind::CONVERSATION_RESET)
+            .map(|event| event.seq)
+            .max()
+            .unwrap_or(0);
+        let mut exchanges = Vec::new();
+        for finished in self
+            .snapshot
+            .iter()
+            .rev()
+            .filter(|event| {
+                event.seq < input_seq
+                    && event.seq > boundary
+                    && event.kind == event_kind::TURN_FINISHED
+            })
+            .take(MAX_HISTORY_CANDIDATES)
+        {
+            let payload: TurnFinishedPayload = decode_payload(finished)?;
+            let task = finished
+                .task_id
+                .as_deref()
+                .ok_or_else(|| replay_invalid("history turn has no task"))?;
+            let input = self
+                .snapshot
+                .iter()
+                .find(|event| {
+                    payload.turn_id.starts_with("turn_")
+                        && event.task_id.as_deref() == Some(task)
+                        && event.correlation_id.as_deref() == Some(payload.turn_id.as_str())
+                })
+                .ok_or_else(|| replay_invalid("history turn has no input"))?;
+            if let Some(user) = agent_run_text(input) {
+                exchanges.push(HistoryExchange {
+                    turn_id: payload.turn_id,
+                    user: user.to_owned(),
+                    assistant: payload.outcome.response,
+                });
+            }
+        }
+        Ok(select_history(exchanges))
+    }
+
     fn artifact_is_authorized_in_snapshot(
         &self,
         resource: &ArtifactReadResource,
@@ -1352,6 +1426,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 ];
                 if self.agent_run {
                     allowed.push(TurnFailureReason::SessionContextUnavailable);
+                    if self.version.is_some_and(|version| version >= 3) {
+                        allowed.push(TurnFailureReason::ConversationHistoryUnavailable);
+                    }
                 }
                 self.valid_reasoned_failure(&failure, &allowed, |message| {
                     valid_context_compilation_failure_message(message)

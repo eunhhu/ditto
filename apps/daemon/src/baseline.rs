@@ -114,20 +114,11 @@ async fn fixture_server() {
             .map(|_| data.join("fixture-contexts.jsonl")),
     });
     let shutdown = CancellationToken::new();
-    let app = Router::new()
-        .merge(memory::routes())
-        .merge(runs::routes())
-        .merge(schedules::routes(true))
-        .merge(sorts::routes(true))
-        .route("/health", get(health))
-        .route("/v1/events", get(list_events))
-        .route("/v1/commands/input", post(submit_input))
-        .route("/v1/stream", get(stream_events))
-        .with_state(AppState {
-            kernel: kernel.clone(),
-            driver: Some(driver.clone()),
-            shutdown: shutdown.clone(),
-        });
+    let app = super::api_routes(true).with_state(AppState {
+        kernel: kernel.clone(),
+        driver: Some(driver.clone()),
+        shutdown: shutdown.clone(),
+    });
     let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
     // Test-only first-process phase: explicit runs still use the fixture driver,
     // but due schedule/repeat work cannot acquire a claim until an enabled restart.

@@ -17,10 +17,14 @@ and checks establish a new fact.
 
 ## Repository state
 
-- Base: main `58b2b02` (Task 016, PR #21). Work branch
-  `dev/task-016-1-personal-recall` holds, in order: the preserved
+- Base: main `58b2b02` (Task 016, PR #21). Branch
+  `dev/task-016-1-personal-recall` holds the preserved
   [Task 017](tasks/017-evaluation-outcomes.md) draft, raw-report and handoff
-  trimming, the behavior-preserving turn-loop split, and Task 016.1.
+  trimming, the turn-loop split and Task 016.1; `dev/task-018-conversation-threads`
+  stacks Task 018 on it. Nothing is pushed.
+- Later on 2026-09-30 the user redirected the frontier to a daily-driver
+  assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
+  [NEXT](NEXT.md) orders the slices. No parity claim is made.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
   validator wording. The user prioritized fixing both, trimming process
@@ -34,13 +38,14 @@ and checks establish a new fact.
 ## Current system
 
 - **Runtime and storage.** Rust daemon (axum, loopback by default) and CLI. The
-  SQLite event spine (schema 6) is append-only by trigger and the sole durable
+  SQLite event spine (schema 7) is append-only by trigger and the sole durable
   authority; schedule and repeat indexes are projected in the same transaction.
   Artifacts are SHA-256 content-addressed with verified reads. The context
   projection (`context-projection.db`, schema 4) is a rebuildable,
   digest-verified cache replayed once at open, then delta-verified.
 - **Ingress.** Typed commands only: record-only input, memory save/list/correct,
-  run/status/cancel, and loopback-only sort, schedule and repeat. Clients never
+  run/status/cancel, conversation reset, and loopback-only sort, schedule and
+  repeat. The daemon and the offline fixture server share one route table. Clients never
   choose actors, kinds or internal metadata; the kernel derives all authority,
   including an attached file's sort permission. SSE subscribes first, replays a
   bounded high-water snapshot in pages and recovers gaps or lag from storage.
@@ -69,9 +74,12 @@ and checks establish a new fact.
   `artifact.read` (plus `artifact.sort` only for a permitted attachment), runs
   at most eight model requests, journals versioned transitions before
   publication and replays without provider or artifact I/O. New turns write
-  payload version 2 with typed `TurnFailureReason`s for validator-derived
-  failures; version-1 turns replay under their original rules and a turn never
-  mixes versions. Answers stay `unverified`; model runs never emit
+  payload version 3: typed `TurnFailureReason`s for validator-derived failures
+  (since version 2) and, for agent runs, the current conversation thread's
+  newest finished exchanges (at most eight, 24 KiB) as native messages, with
+  their turn IDs recorded and recomputed on replay (ADR 0022). Older versions
+  replay under their original rules; a turn never mixes versions. `ditto chat`
+  is an interactive client; `ditto new` starts a thread. Answers stay `unverified`; model runs never emit
   `task.completed`. The loop
   is split into stage functions (context, capability selection, request
   dispatch, stream admission, tool execution, finish); cancellation/deadline
@@ -92,7 +100,20 @@ and checks establish a new fact.
   capsules from the complete-set rule. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 016.1
+## Latest verified slice: Task 018
+
+- [Contract and evidence](tasks/018-conversation-threads.md). Follow-ups receive
+  the previous exchange; resets, failed turns and other sessions never join a
+  thread; bounds and truncation are deterministic; replay rejects altered
+  history IDs, a conversation without its history and history under an older
+  version. A real `ditto chat` session against the fixture server sent
+  `[user]`, `[user, assistant, user]` and, after `/new`, `[user]`.
+- The canonical gate passed on the final tree (8 min 34 s, pinned Rust 1.88.0):
+  505 Rust tests (500 workspace including doctests, five built-CLI scenarios),
+  8 baseline and 21 quality Python tests and both smokes; git status and diff
+  hashes were identical before and after.
+
+## Previous slice: Task 016.1
 
 - [Contract and evidence](tasks/016-1-personal-recall.md). A kernel regression
   copied onto the pre-change tree failed (`left: 0, right: 6`: no memory reached
