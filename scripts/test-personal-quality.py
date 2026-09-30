@@ -1,5 +1,6 @@
 """Assessment adversaries and the real offline CLI/memory/restart boundary."""
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -28,6 +29,23 @@ baseline = module("baseline")
 
 # Version 6 leads the latest message with Ditto's local-time note.
 NOTE = "[Ditto: local time Wednesday, 30 September 2026, 16:30 (UTC+01:00)]\n\n"
+
+
+def compact(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def sha256(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def resealed(data, index, change):
+    """Change the request that case `index` sent, and its journaled digest with it."""
+    observations, events = data[0], data[1]
+    request = json.loads(observations[index]["request_json"])
+    change(request)
+    observations[index]["request_json"] = compact(request)
+    events[2 * index + 1]["payload"]["request_sha256"] = sha256(observations[index]["request_json"])
 
 
 class AssessmentTests(unittest.TestCase):
@@ -168,16 +186,19 @@ class AssessmentTests(unittest.TestCase):
             seq = 1 + i * 2
             events.append(dict(common, seq=seq, event_id=f"input-{i}", actor="user", kind="input.received",
                                payload={"text": query, "agent_run": {"version": 1, "request_id": identity}}))
+            sent = {"request_id": request, "control": {"cancellation_id": turn},
+                    "turn": {"context": {"nodes": nodes}, "conversation": [
+                        {"type": "message", "role": "user", "content": [
+                            {"type": "text", "text": NOTE + query}]}]}}
+            observation = dict(self.observation(nodes, request), request_json=compact(sent))
             events.append(dict(common, seq=seq+1, event_id=f"model-{i}", actor="system", kind="model.requested",
                                span_id=request, causation_id=f"input-{i}",
                                payload={"event_version": self.quality.TURN_PAYLOAD_VERSION,
-                                        "turn_id": turn, "request_index": 0,
-                                        "request": {"request_id": request, "control": {"cancellation_id": turn},
-                                                    "turn": {"context": {"nodes": nodes}, "conversation": [
-                                                        {"type": "message", "role": "user", "content": [
-                                                            {"type": "text", "text": NOTE + query}]}]}}}))
+                                        "turn_id": turn, "request_index": 0, "request_id": request,
+                                        "deadline": "2026-09-30T16:35:00Z",
+                                        "request_sha256": sha256(observation["request_json"])}))
             calls.append(request)
-            observations.append(self.observation(nodes, request))
+            observations.append(observation)
         return observations, events, plans, calls, 0
 
     def test_reconciliation_identity_query_order_and_capsule_adversaries(self):
@@ -198,8 +219,14 @@ class AssessmentTests(unittest.TestCase):
             lambda d: d[2][1].update(case="wrong_case"),
             lambda d: d[2][1].update(repetition=1),
             lambda d: d[2][0].update(repetition=False),
-            lambda d: d[1][3]["payload"]["request"]["turn"]["conversation"][0]["content"][0].update(text="wrong query"),
-            lambda d: d[1][3]["payload"]["request"]["turn"]["conversation"][0]["content"][0].update(text=NOTE + "wrong query"),
+            lambda d: resealed(d, 1, lambda r: r["turn"]["conversation"][0]["content"][0].update(text="wrong query")),
+            lambda d: resealed(d, 1, lambda r: r["turn"]["conversation"][0]["content"][0].update(
+                text=NOTE + "wrong query")),
+            lambda d: resealed(d, 1, lambda r: r["control"].update(cancellation_id="wrong")),
+            lambda d: resealed(d, 1, lambda r: r.update(request_id="wrong")),
+            # A request other than the one journaled.
+            lambda d: d[0][1].update(request_json=d[0][1]["request_json"].replace("harbor", "other")),
+            lambda d: d[1][3]["payload"].update(request_sha256="0" * 64),
             lambda d: d[1][3].update(session_id="elsewhere"),
             lambda d: d[1][3].update(task_id="wrong"),
             lambda d: d[1][3].update(correlation_id="wrong"),
@@ -215,7 +242,7 @@ class AssessmentTests(unittest.TestCase):
             lambda d: d[1][2]["payload"]["agent_run"].update(version=True),
             lambda d: d[1][3]["payload"].update(event_version=float(self.quality.TURN_PAYLOAD_VERSION)),
             lambda d: d[1][3]["payload"].update(event_version=self.quality.TURN_PAYLOAD_VERSION - 1),
-            lambda d: d[1][3]["payload"]["request"]["turn"]["context"].update(nodes=[]),
+            lambda d: resealed(d, 1, lambda r: r["turn"]["context"].update(nodes=[])),
             lambda d: d[0][1].update(context_json=json.dumps(json.loads(d[0][1]["context_json"]), indent=2)),
         ]
         for i, mutate in enumerate(mutations):
@@ -312,7 +339,9 @@ class WorkflowTests(unittest.TestCase):
         for run, (query, summaries) in zip(result["requests"], expected):
             self.assertEqual(run["query"], query)
             self.assertEqual(run["input_event"]["payload"]["text"], query)
-            conversation = run["model_event"]["payload"]["request"]["turn"]["conversation"]
+            # The journal holds the digest of exactly this request.
+            self.assertEqual(sha256(run["request_json"]), run["model_event"]["payload"]["request_sha256"])
+            conversation = json.loads(run["request_json"])["turn"]["conversation"]
             self.assertEqual(len(conversation), 1)
             note, _, question = conversation[0]["content"][0]["text"].partition("]\n\n")
             self.assertTrue(note.startswith("[Ditto: local time "))
@@ -395,11 +424,13 @@ class WorkflowTests(unittest.TestCase):
                     self.assertEqual(value["status"], "unverified")
                 observed = [json.loads(line) for line in (server.data / "fixture-contexts.jsonl").read_text().splitlines()]
                 calls = (server.data / "fixture-calls.txt").read_text().splitlines()
-                requests = [e["payload"]["request"] for e in server.events() if e["kind"] == "model.requested"]
+                recorded = [e["payload"] for e in server.events() if e["kind"] == "model.requested"]
                 self.assertEqual(len(observed), 2)
                 self.assertEqual([o["request_id"] for o in observed], calls)
-                self.assertEqual(calls, [r["request_id"] for r in requests])
-                for observation, request in zip(observed, requests):
+                self.assertEqual(calls, [r["request_id"] for r in recorded])
+                for observation, digest in zip(observed, recorded):
+                    self.assertEqual(sha256(observation["request_json"]), digest["request_sha256"])
+                    request = json.loads(observation["request_json"])
                     context = json.loads(observation["context_json"])
                     self.assertEqual(context, request["turn"]["context"])
                     # Six current memories fit the budget: the correction ranks

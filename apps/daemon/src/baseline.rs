@@ -36,8 +36,10 @@ impl ModelDriver for OfflineDriver {
                 .append(true)
                 .open(path)
                 .unwrap();
+            // The exact request bytes: their SHA-256 is the durable record.
             let observation = json!({
                 "request_id": request.request_id,
+                "request_json": serde_json::to_string(&request).unwrap(),
                 "context_json": serde_json::to_string(&request.turn.context).unwrap(),
             });
             writeln!(log, "{observation}").unwrap();

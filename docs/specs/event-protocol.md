@@ -501,6 +501,28 @@ History messages and the conversation view keep the text exactly as the user
 wrote it. Replay recomputes the note, the order, the tool surface and the
 window.
 
+Version 7 ([ADR 0028](../adr/0028-thin-realtime-harness.md) Phase C) changes
+what the journal records, not what the model reads. Each fact is recorded
+once:
+
+- Streamed text commits in chunks. A `model.output` text chunk joins
+  consecutive text deltas; `stream_event.sequence` is the first provider
+  sequence it covers and `through_sequence` the last, absent for a single
+  delta. `admitted_at` is the admission time of its last delta. The first text
+  after a quiet interval of 48 ms commits at once; later text commits when
+  48 ms have passed since the chunk opened, before it would pass 2 KiB, or
+  with the next non-text output, failure or terminal in the same transaction.
+  Every provider event still counts against the per-request event bound.
+- `model.requested` records `request_id`, `deadline` and `request_sha256`: the
+  SHA-256 of the request's JSON encoding as sent. Everything else derives from
+  earlier durable events, so replay rebuilds the request and must reproduce the
+  digest.
+- `context.compiled` omits `capsule`, which derives from `compiled`, and
+  `capabilities.selected` omits `schemas`, which are the builtins' own.
+
+Replay rejects version-7 turns carrying the earlier forms and earlier versions
+carrying version-7 forms.
+
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished
 agent-run turns recorded after the latest reset. It deletes nothing and does

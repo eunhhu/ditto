@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Measure the harness around the model: latency before dispatch, cost per
-streamed delta, journal amplification, prompt prefix reuse between turns, and
-concurrent sessions. Standard library only; no network beyond loopback.
+streamed delta, journal amplification, prompt prefix reuse between turns,
+streaming latency to a client, and concurrent sessions. Standard library
+only; no network beyond loopback.
 
     cargo build --release --locked -p ditto-daemon
     python3 scripts/measure-harness.py [--deltas 200] [--memories 12] [--runs 12]
@@ -11,6 +12,7 @@ harness's own cost on this machine, not model latency. Daemon-side timings
 come from durable event timestamps (millisecond precision).
 """
 import argparse
+import http.client
 import json
 import os
 import shutil
@@ -164,12 +166,13 @@ def turn_costs(args):
                      for kind in ("input.received", "model.requested")}
             outputs = [e for e in events if e["kind"] == "model.output"]
             text = sum(len(e["payload"]["stream_event"]["event"].get("text", "")) for e in outputs)
+            # Streaming cost per delta is measured at the client (streaming());
+            # durable timestamps no longer mark each delta once text coalesces.
             payload = sum(len(json.dumps(e["payload"])) for e in events)
             rows.append({
                 "client_to_accepted_ms": daemon.accepted_ms,
                 "client_to_provider_ms": (Mock.marks[question]["arrived"] - started) * 1e3,
                 "harness_before_dispatch_ms": millis(first["model.requested"]) - millis(first["input.received"]),
-                "per_delta_us": (millis(outputs[-1]) - millis(outputs[0])) * 1e3 / max(1, len(outputs) - 1),
                 "events_per_turn": len(events),
                 "journal_bytes_per_answer_byte": payload / max(1, text),
             })
@@ -212,6 +215,52 @@ def prefix_reuse(args):
         daemon.close()
 
 
+def streaming(args):
+    """Provider receiving the request to the first and last text on a client's
+    event stream, over one SSE connection that follows the session."""
+    Mock.deltas, Mock.delay, Mock.prompts, Mock.marks = args.deltas, 0.0, [], {}
+    daemon = Daemon()
+    first_text, last_text = {}, {}
+    try:
+        host, port = daemon.api.removeprefix("http://").split(":")
+        connection = http.client.HTTPConnection(host, int(port), timeout=60)
+        connection.request("GET", "/v1/stream?session_id=personal")
+        response = connection.getresponse()
+
+        def follow():
+            kind = None
+            for raw in response:
+                line = raw.decode().rstrip("\r\n")
+                if line.startswith("event: "):
+                    kind = line[7:]
+                elif line.startswith("data: ") and kind == "model.output":
+                    event = json.loads(line[6:])
+                    if event["payload"]["stream_event"]["event"].get("type") == "text_delta":
+                        now = time.perf_counter()
+                        first_text.setdefault(event["correlation_id"], now)
+                        last_text[event["correlation_id"]] = now
+        threading.Thread(target=follow, daemon=True).start()
+        rows = []
+        for i in range(1, args.runs + 1):
+            question = f"stream {i}"
+            status = daemon.run(f"01K{i:023d}", question)
+            for _ in range(500):
+                if status["turn_id"] in last_text and time.perf_counter() - last_text[status["turn_id"]] > 0.1:
+                    break
+                time.sleep(0.01)
+            arrived = Mock.marks[question]["arrived"]
+            first, last = first_text[status["turn_id"]], last_text[status["turn_id"]]
+            rows.append({"provider_to_first_text_ms": (first - arrived) * 1e3,
+                         "provider_to_last_text_ms": (last - arrived) * 1e3,
+                         "per_delta_to_client_us": (last - first) * 1e6 / max(1, args.deltas - 1)})
+        connection.close()
+        warm = rows[2:] or rows
+        return {key: {"median": median(row[key] for row in warm), "max": round(max(row[key] for row in warm), 2)}
+                for key in warm[0]} | {"deltas": args.deltas}
+    finally:
+        daemon.close()
+
+
 def concurrency(_args):
     Mock.deltas, Mock.delay, Mock.prompts, Mock.marks = 1, 0.5, [], {}
     daemon = Daemon()
@@ -244,6 +293,7 @@ def main():
     print(json.dumps({
         "turn_costs": turn_costs(args),
         "prefix_reuse": prefix_reuse(args),
+        "streaming": streaming(args),
         "concurrency": concurrency(args),
     }, indent=1))
 

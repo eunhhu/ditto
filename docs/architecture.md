@@ -283,7 +283,10 @@ snapshot supplies current scoped memory; model inference is never housekeeping.
 A run reuses its session's verified context while no context node has been
 committed since, and each session's thread is kept and advanced by the
 conversation events committed since the last turn; the turn's prelude commits
-with its first model request (ADR 0028 Phase B).
+with its first model request (ADR 0028 Phase B). From turn payload version 7
+streamed text is journaled in coalesced chunks, the first words of a burst at
+once, and each request as the SHA-256 of what was sent, which replay rebuilds
+from earlier durable events (Phase C).
 Runs, sorts and the scheduler journal from blocking threads, and daemon
 handlers run kernel calls on the blocking pool, so no async runtime thread
 waits on SQLite; debug builds reject journal access on those threads.

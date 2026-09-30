@@ -136,7 +136,8 @@ selected capsule items in ID order (admission order for memories). The same
 memories therefore render the same bytes whatever the question, and a prompt
 cache keeps them. The recorded `context.compiled` capsule stays in canonical
 selection order, and replay checks that the request carries its ID-ordered
-presentation.
+presentation. From version 7 the capsule is not recorded: replay derives it
+from the compiled nodes.
 
 Conversation history is not context IR: agent runs replay the current
 thread's recent exchanges as native model messages under ADR 0022, while the

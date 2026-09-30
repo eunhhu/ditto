@@ -12,8 +12,8 @@ use ditto_artifact_read::{
 use ditto_artifact_store::ArtifactStore;
 use ditto_capability::{CapabilityDeriver, CapabilityRevision};
 use ditto_context::{
-    ContextCandidate, ContextCapsule, ContextLens, ContextNode, ContextNodeKind, ContextOrigin,
-    ContextScope, EpistemicStatus,
+    ContextCandidate, ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope,
+    EpistemicStatus,
 };
 use ditto_event_store::EventStore;
 use ditto_kernel::turn::{TURN_PAYLOAD_VERSION, TurnFailureEvidence, TurnFailureReason};
@@ -40,6 +40,8 @@ mod agent_runs;
 mod model_sort;
 #[path = "read_only_turn/reuse.rs"]
 mod reuse;
+#[path = "read_only_turn/stream.rs"]
+mod stream;
 #[path = "read_only_turn/web_fetch.rs"]
 mod web_fetch;
 
@@ -180,6 +182,7 @@ impl ModelDriver for OutputBudgetDriver {
                 admitted_at: chrono::DateTime::from_timestamp_millis(1_800_000_000_123)
                     .expect("fixed admitted timestamp"),
                 stream_event: ModelStreamEvent::new(sequence, event.clone()),
+                through_sequence: None,
             })
             .expect("encode model output fixture")
             .len()
@@ -420,13 +423,20 @@ fn attach_deadline_evidence(event: &mut EventRecord, deadline: chrono::DateTime<
     });
 }
 
+/// Version 7 records a request as its digest; a forged request is the digest
+/// of a different request.
+fn reseal_request(event: &mut EventRecord, request: &ModelRequest) {
+    event.payload["request_sha256"] = json!(ditto_kernel::turn::request_sha256(request));
+}
+
 fn refresh_context_token_accounting(event: &mut EventRecord) {
-    let capsule: ContextCapsule = serde_json::from_value(event.payload["capsule"].clone())
-        .expect("decode mutated context capsule");
-    let item_costs = capsule
-        .nodes
+    // Version 7 derives the capsule from the compiled nodes.
+    let nodes: Vec<ContextNode> =
+        serde_json::from_value(event.payload["compiled"]["nodes"].clone())
+            .expect("decode mutated context nodes");
+    let item_costs = nodes
         .iter()
-        .map(ditto_context::ContextCapsuleItem::token_cost)
+        .map(|node| ditto_context::ContextCapsuleItem::from(node).token_cost())
         .collect::<Vec<_>>();
     for (index, cost) in item_costs.iter().enumerate() {
         event.payload["compiled"]["receipt"]["included"][index]["token_cost"] = json!(cost);
@@ -610,9 +620,11 @@ async fn successful_two_request_continuation_persists_exact_epoch_schema_history
     assert_eq!(replay.calls.len(), 1);
     assert!(replay.calls[0].output.is_some());
     let selected = replay.capabilities.as_ref().expect("selected capability");
+    // Version 7 records no builtin schemas: replay derives them.
+    assert!(selected.schemas.is_empty());
     let expected_revision = CapabilityRevision::from_contract(
         &selected.manifest,
-        &selected.schemas[0],
+        &capability_schema(),
         ArtifactReadDeriver::default().revision().clone(),
     )
     .expect("exact artifact revision");
@@ -1340,7 +1352,7 @@ async fn cancellation_after_durable_execution_start_emits_no_result() {
                     && event.correlation_id.as_deref() == Some(failure.turn_id.as_str())
             })
             .expect("model request")
-            .payload["request"]["control"]["deadline"]
+            .payload["deadline"]
             .clone(),
     )
     .expect("request deadline");
@@ -1430,7 +1442,7 @@ async fn cancellation_and_deadline_are_checked_before_capability_request() {
             .iter()
             .find(|event| event.kind == event_kind::MODEL_REQUESTED)
             .expect("model request")
-            .payload["request"]["control"]["deadline"]
+            .payload["deadline"]
             .clone(),
     )
     .expect("request deadline");
@@ -1511,7 +1523,7 @@ async fn cancellation_and_deadline_are_checked_after_capability_request_before_s
             .iter()
             .find(|event| event.kind == event_kind::MODEL_REQUESTED)
             .expect("model request")
-            .payload["request"]["control"]["deadline"]
+            .payload["deadline"]
             .clone(),
     )
     .expect("request deadline");
@@ -1904,7 +1916,7 @@ async fn cancellation_and_deadline_are_checked_before_turn_finished() {
                     && event.payload["request_index"] == json!(1)
             })
             .expect("final model request")
-            .payload["request"]["control"]["deadline"]
+            .payload["deadline"]
             .clone(),
     )
     .expect("request deadline");
@@ -2736,11 +2748,12 @@ async fn compiled_context_requires_resolved_same_scope_provenance() {
         .find(|event| event.kind == event_kind::CONTEXT_COMPILED)
         .expect("context compiled");
     context.payload["compiled"]["nodes"][0]["valid_until"] = json!(valid_until);
-    context.payload["capsule"]["nodes"][0]["valid_until"] = json!(valid_until);
     refresh_context_token_accounting(context);
+    let mut sent = driver.requests()[0].clone();
+    sent.turn.context.nodes[0].valid_until = Some(valid_until);
     let request = &mut expiry_failure[request_position];
     request.recorded_at = failure_time;
-    request.payload["request"]["turn"]["context"]["nodes"][0]["valid_until"] = json!(valid_until);
+    reseal_request(request, &sent);
     let terminal = expiry_failure.last_mut().expect("synthetic terminal");
     terminal.kind = event_kind::TURN_FAILED.into();
     terminal.actor = EventActor::System;
@@ -2771,10 +2784,9 @@ async fn compiled_context_requires_resolved_same_scope_provenance() {
         .find(|event| event.kind == event_kind::CONTEXT_COMPILED)
         .expect("context compiled");
     context.payload["compiled"]["nodes"][0]["valid_until"] = json!(still_valid);
-    context.payload["capsule"]["nodes"][0]["valid_until"] = json!(still_valid);
     refresh_context_token_accounting(context);
-    forged_expiry[request_position].payload["request"]["turn"]["context"]["nodes"][0]["valid_until"] =
-        json!(still_valid);
+    sent.turn.context.nodes[0].valid_until = Some(still_valid);
+    reseal_request(&mut forged_expiry[request_position], &sent);
     assert!(replay_artifact_read_turn(&forged_expiry, &outcome.turn_id).is_err());
 
     let mut missing_source = snapshot.clone();
@@ -2788,7 +2800,6 @@ async fn compiled_context_requires_resolved_same_scope_provenance() {
     context.payload["compiled"]["nodes"][0]["source_event_ids"][0] = json!("missing-source");
     context.payload["compiled"]["receipt"]["included"][0]["source_event_ids"][0] =
         json!("missing-source");
-    context.payload["capsule"]["nodes"][0]["source_event_ids"][0] = json!("missing-source");
     assert!(replay_artifact_read_turn(&missing_source, &outcome.turn_id).is_err());
 
     let mut bad_cutoff = snapshot;
@@ -2919,7 +2930,6 @@ async fn context_replay_revalidates_acceptance_structure_score_and_capability_st
         .find(|event| event.kind == event_kind::CONTEXT_COMPILED)
         .expect("context compiled");
     context.payload["compiled"]["nodes"][0]["valid_until"] = json!(accepted_at);
-    context.payload["capsule"]["nodes"][0]["valid_until"] = json!(accepted_at);
     assert!(replay_artifact_read_turn(&expired_at_acceptance, &failure.turn_id).is_err());
 
     let mut impossible_confidence = snapshot;
@@ -2928,7 +2938,6 @@ async fn context_replay_revalidates_acceptance_structure_score_and_capability_st
         .find(|event| event.kind == event_kind::CONTEXT_COMPILED)
         .expect("context compiled");
     context.payload["compiled"]["nodes"][0]["confidence"] = json!(2.0);
-    context.payload["capsule"]["nodes"][0]["confidence"] = json!(2.0);
     assert!(replay_artifact_read_turn(&impossible_confidence, &failure.turn_id).is_err());
 }
 
@@ -2970,7 +2979,7 @@ async fn submillisecond_context_expiry_replays_identically_after_reopen() {
                     && event.correlation_id.as_deref() == Some(failure.turn_id.as_str())
             })
             .expect("context compiled")
-            .payload["capsule"]["nodes"][0]["valid_until"]
+            .payload["compiled"]["nodes"][0]["valid_until"]
             .clone(),
     )
     .expect("submillisecond validity");
@@ -3157,12 +3166,26 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
     assert!(replay_artifact_read_turn(&corrupted_invocation_revision, &outcome.turn_id).is_err());
 
     let mut corrupted_generation = events.clone();
-    corrupted_generation
-        .iter_mut()
-        .find(|event| event.kind == event_kind::MODEL_REQUESTED)
-        .expect("model request")
-        .payload["request"]["generation"]["prompt_cache"] = json!({"type": "disabled"});
+    let mut forged = driver.requests()[0].clone();
+    forged.generation.prompt_cache =
+        serde_json::from_value(json!({"type": "disabled"})).expect("disabled prompt cache");
+    reseal_request(
+        corrupted_generation
+            .iter_mut()
+            .find(|event| event.kind == event_kind::MODEL_REQUESTED)
+            .expect("model request"),
+        &forged,
+    );
     assert!(replay_artifact_read_turn(&corrupted_generation, &outcome.turn_id).is_err());
+    // The honest request reseals to the recorded digest.
+    let recorded = events
+        .iter()
+        .find(|event| event.kind == event_kind::MODEL_REQUESTED)
+        .expect("model request");
+    assert_eq!(
+        recorded.payload["request_sha256"],
+        json!(ditto_kernel::turn::request_sha256(&driver.requests()[0]))
+    );
 
     let mut output_at_deadline = events.clone();
     let deadline: chrono::DateTime<Utc> = serde_json::from_value(
@@ -3170,7 +3193,7 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
             .iter()
             .find(|event| event.kind == event_kind::MODEL_REQUESTED)
             .expect("model request")
-            .payload["request"]["control"]["deadline"]
+            .payload["deadline"]
             .clone(),
     )
     .expect("request deadline");

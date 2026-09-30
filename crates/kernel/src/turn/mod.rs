@@ -12,6 +12,7 @@ pub use fetch::{
 };
 pub use replay::replay_artifact_read_turn;
 pub(crate) use run::ToolContracts;
+pub use shared::request_sha256;
 pub use sort::{
     ReplayedSortCall, SortToolError, SortToolOutput, SortToolRequested, SortToolResult,
     SortToolStarted,

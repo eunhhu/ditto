@@ -170,12 +170,15 @@ async fn direct_answer_uses_corrected_scoped_memory_and_survives_restart() {
         .payload["agent_run"]["version"] = json!(2);
     assert!(replay_artifact_read_turn(&changed, &accepted.turn_id).is_err());
     let mut changed = events.clone();
-    changed
-        .iter_mut()
-        .find(|event| event.kind == event_kind::MODEL_REQUESTED)
-        .unwrap()
-        .payload["request"]["generation"]["tool_use"]["choice"] =
-        serde_json::to_value(ToolChoice::Required).unwrap();
+    let mut forged = driver.requests()[0].clone();
+    forged.generation.tool_use.choice = ToolChoice::Required;
+    super::reseal_request(
+        changed
+            .iter_mut()
+            .find(|event| event.kind == event_kind::MODEL_REQUESTED)
+            .unwrap(),
+        &forged,
+    );
     assert!(replay_artifact_read_turn(&changed, &accepted.turn_id).is_err());
     let config = fixture.config.clone();
     let count = fixture.kernel.event_count().unwrap();
@@ -669,7 +672,7 @@ async fn paraphrased_personal_questions_receive_the_complete_current_memory_set(
                 })
                 .unwrap();
             assert_eq!(
-                recorded.payload["capsule"]["nodes"][0]["id"],
+                recorded.payload["compiled"]["nodes"][0]["id"],
                 json!(first),
                 "{question}"
             );
@@ -762,10 +765,31 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
     // same transcript relabeled as version 1 replays through the legacy rules
     // once its version-4 instructions and offset are restored to the frozen
     // legacy form.
+    // Versions before 7 record what version 7 derives: the capsule, the
+    // builtin schemas and each request as sent, which the driver received.
+    let requests = driver.requests();
     let relabel = |version: u16, only_first: bool, legacy: bool| {
         let mut relabeled = events.clone();
         for event in relabeled.iter_mut().filter(|event| versioned(event)) {
             event.payload["event_version"] = json!(version);
+            if version < 7 {
+                match event.kind.as_str() {
+                    event_kind::CONTEXT_COMPILED => event.payload["capsule"] = json!({"nodes": []}),
+                    event_kind::CAPABILITIES_SELECTED => {
+                        event.payload["schemas"] = json!([capability_schema()]);
+                    }
+                    event_kind::MODEL_REQUESTED => {
+                        let index = event.payload["request_index"].as_u64().unwrap() as usize;
+                        event.payload = json!({
+                            "event_version": version,
+                            "turn_id": event.payload["turn_id"],
+                            "request_index": index,
+                            "request": requests[index],
+                        });
+                    }
+                    _ => {}
+                }
+            }
             if legacy {
                 if let Some(payload) = event.payload.as_object_mut() {
                     payload.remove("utc_offset_minutes");
@@ -805,6 +829,25 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
     let future = ditto_kernel::turn::TURN_PAYLOAD_VERSION + 1;
     assert!(replay_artifact_read_turn(&relabel(future, false, false), &status.turn_id).is_err());
     assert!(replay_artifact_read_turn(&relabel(0, false, true), &status.turn_id).is_err());
+    // Version 7 sends what version 6 sent: recorded in full, the same turn
+    // replays as version 6. Each version accepts only its own forms.
+    replay_artifact_read_turn(&relabel(6, false, false), &status.turn_id).unwrap();
+    let mut derived_forms_as_six = events.clone();
+    for event in derived_forms_as_six
+        .iter_mut()
+        .filter(|event| versioned(event))
+    {
+        event.payload["event_version"] = json!(6);
+    }
+    assert!(replay_artifact_read_turn(&derived_forms_as_six, &status.turn_id).is_err());
+    let mut full_forms_as_seven = relabel(6, false, false);
+    for event in full_forms_as_seven
+        .iter_mut()
+        .filter(|event| versioned(event))
+    {
+        event.payload["event_version"] = json!(7);
+    }
+    assert!(replay_artifact_read_turn(&full_forms_as_seven, &status.turn_id).is_err());
 }
 
 /// The frozen system instructions of turn payload versions 1 to 3.
@@ -894,17 +937,28 @@ async fn assistant_instructions_state_the_local_time_of_acceptance_and_replay() 
         .unwrap()
         .remove("utc_offset_minutes");
     assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
+    // The recorded digest binds the exact note and instructions sent.
+    assert_eq!(
+        events[request].payload["request_sha256"],
+        json!(ditto_kernel::turn::request_sha256(&requests[0]))
+    );
     let mut forged = events.clone();
-    forged[request].payload["request"]["turn"]["conversation"][0]["content"][0]["text"] =
-        json!("[Ditto: local time Monday, 1 January 2001, 00:00 (UTC+00:00)]\n\nWhat day is it?");
+    let mut sent = requests[0].clone();
+    let Some(ConversationItem::Message { content, .. }) = sent.turn.conversation.last_mut() else {
+        panic!("the latest item is the user's message")
+    };
+    content[0] = ContentPart::Text {
+        text: "[Ditto: local time Monday, 1 January 2001, 00:00 (UTC+00:00)]\n\nWhat day is it?"
+            .into(),
+    };
+    super::reseal_request(&mut forged[request], &sent);
     assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
     let mut forged = events.clone();
-    forged[request].payload["request"]["stable_system_prefix"]["segments"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!(
-            "Current local time: Monday, 1 January 2001, 00:00 (UTC+00:00)."
-        ));
+    let mut sent = requests[0].clone();
+    sent.stable_system_prefix
+        .segments
+        .push("Current local time: Monday, 1 January 2001, 00:00 (UTC+00:00).".into());
+    super::reseal_request(&mut forged[request], &sent);
     assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
 }
 
@@ -984,7 +1038,7 @@ async fn conversation_threads_replay_recent_exchanges_until_a_reset() {
     )
     .await;
 
-    let (second, driver) = ask(
+    let (second, second_driver) = ask(
         kernel,
         "personal",
         "What is his name?",
@@ -993,7 +1047,7 @@ async fn conversation_threads_replay_recent_exchanges_until_a_reset() {
     .await;
     assert_eq!(second.status, AgentRunStatus::Unverified);
     assert_eq!(
-        message_texts_without_note(&driver.requests()[0]),
+        message_texts_without_note(&second_driver.requests()[0]),
         [
             ("User".into(), "My dog is called Miso.".into()),
             ("Assistant".into(), "Noted.".into()),
@@ -1066,10 +1120,9 @@ async fn conversation_threads_replay_recent_exchanges_until_a_reset() {
                 && event.correlation_id.as_deref() == Some(second.turn_id.as_str())
         })
         .unwrap();
-    let conversation = request.payload["request"]["turn"]["conversation"]
-        .as_array_mut()
-        .unwrap();
-    conversation.drain(0..2);
+    let mut sent = second_driver.requests()[0].clone();
+    sent.turn.conversation.drain(0..2);
+    super::reseal_request(request, &sent);
     assert!(replay_artifact_read_turn(&forged, &second.turn_id).is_err());
     // Payload versions before 3 carry no history.
     let mut relabeled = events.clone();
