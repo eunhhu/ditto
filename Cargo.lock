@@ -531,6 +531,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "ulid",
 ]
 

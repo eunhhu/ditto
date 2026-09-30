@@ -2,7 +2,8 @@
 
 Status: proposed on 2026-09-30 and decided per phase as each lands. Phase A
 was accepted with Task 025 (turn payload version 6), Phase B with Task 026,
-Phase C with Task 027 (turn payload version 7) and Phase D with Task 028.
+Phase C with Task 027 (turn payload version 7), Phase D with Task 028 and
+Phase E, in part, with Task 029 (turn payload version 8).
 The full design is in
 [docs/design/realtime-harness.md](../design/realtime-harness.md).
 
@@ -212,4 +213,25 @@ Three parts of the design were replaced:
   kernel creates.
 - **A scheduler without a slot.** The scheduler keeps its one loop and index
   and now checks each due item's own session.
+
+## Phase E as accepted (Task 029)
+
+- **`memory.search`** ([ADR 0029](0029-memory-search-tool.md)): agent runs
+  can search the memories their compilation saw, including those the budget
+  left out, and replay recomputes each result.
+- **Progress.** While a tool runs, the web app says what it is doing
+  ("Searching memories…", "Reading the linked page…") from the tool call
+  already on the event stream, until the model writes again.
+
+Two parts are deferred:
+
+- **One builtin tool lifecycle.** Each tool keeps its own journal events and
+  replay checks. A shared lifecycle would restructure the request, claim and
+  replay path of every tool, including the effectful sort, with no change a
+  user sees; revisit when another effectful tool is added.
+- **Parallel read-only calls.** A request still yields at most one tool call.
+  Running several at once needs every tool's journal in phases (all requests,
+  then all starts, then all results) and matching replay, for a gain only in
+  turns that call several tools; revisit when such turns are measured to
+  matter.
 

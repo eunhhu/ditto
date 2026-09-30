@@ -1,0 +1,39 @@
+id = "memory.search"
+version = "0.1.0"
+namespace = "memory"
+kind = "tool"
+summary = "Search what the user asked Ditto to remember, for facts missing from DITTO_CONTEXT_V1."
+
+[runtime]
+type = "builtin"
+lazy = true
+idle_ttl_ms = 0
+
+[placement]
+modes = ["local"]
+requires = []
+
+[retrieval]
+intents = ["recall something the user asked Ditto to remember", "look up a saved personal fact"]
+negative_examples = ["save a new memory", "search the web"]
+aliases = ["recall", "search memories"]
+complements = []
+
+[effects]
+resources = []
+
+[effects.minimum]
+access = "content"
+mutation = "none"
+externality = "local"
+privilege = "user"
+
+[effects.maximum]
+access = "content"
+mutation = "none"
+externality = "local"
+privilege = "user"
+
+[policy]
+approval = "never"
+secret_handles = []

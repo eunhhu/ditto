@@ -95,7 +95,7 @@ pub(crate) struct ContextReuse {
 
 struct ReusableContext {
     through_seq: i64,
-    nodes: Vec<ditto_context::ContextNode>,
+    nodes: Arc<[ditto_context::ContextNode]>,
     sources_verified: bool,
 }
 
@@ -103,6 +103,8 @@ struct ReusableContext {
 /// resolve for every task of the session.
 pub(crate) struct RunContext {
     pub(crate) candidates: Vec<ditto_context::ContextCandidate>,
+    /// The snapshot the candidates were taken from, shared, not copied.
+    pub(crate) nodes: Arc<[ditto_context::ContextNode]>,
     pub(crate) sources_verified: bool,
 }
 
@@ -131,11 +133,12 @@ impl DittoKernel {
             )?
         {
             return Ok(RunContext {
-                candidates: ranked(reusable.nodes.clone()),
+                candidates: ranked(&reusable.nodes),
+                nodes: Arc::clone(&reusable.nodes),
                 sources_verified: reusable.sources_verified,
             });
         }
-        let nodes = self
+        let nodes: Arc<[ditto_context::ContextNode]> = self
             .inner
             .context_projection
             .synchronize_and_verified_snapshot_through_at(
@@ -146,7 +149,8 @@ impl DittoKernel {
                 evaluated_at,
                 &mut ditto_retrieval::RetrievalWorkBudget::new(),
             )?
-            .into_candidates();
+            .into_candidates()
+            .into();
         let mut sources_verified = false;
         if self
             .inner
@@ -161,7 +165,7 @@ impl DittoKernel {
                 session.to_owned(),
                 ReusableContext {
                     through_seq: high_water,
-                    nodes: nodes.clone(),
+                    nodes: Arc::clone(&nodes),
                     sources_verified,
                 },
             );
@@ -169,7 +173,8 @@ impl DittoKernel {
             reuse.sessions.remove(session);
         }
         Ok(RunContext {
-            candidates: ranked(nodes),
+            candidates: ranked(&nodes),
+            nodes,
             sources_verified,
         })
     }
@@ -451,9 +456,10 @@ impl Drop for ActiveGuard {
     }
 }
 
-fn ranked(nodes: Vec<ditto_context::ContextNode>) -> Vec<ditto_context::ContextCandidate> {
+fn ranked(nodes: &[ditto_context::ContextNode]) -> Vec<ditto_context::ContextCandidate> {
     nodes
-        .into_iter()
+        .iter()
+        .cloned()
         .map(ditto_context::ContextCandidate::ranked)
         .collect()
 }

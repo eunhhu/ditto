@@ -2237,6 +2237,29 @@ fn relevance_score(
     overlap * 5.0 + authority + node.confidence
 }
 
+/// Lexical recall over context nodes with the complete-set tokenizer: the nodes
+/// sharing at least one word other than a function word with `query`, best
+/// first by the compiler's relevance score, then by ID. The `memory.search`
+/// tool uses it, and replay recomputes its results with it.
+pub fn lexical_recall<'a>(
+    query: &str,
+    nodes: impl IntoIterator<Item = &'a ContextNode>,
+) -> Vec<&'a ContextNode> {
+    let selection = ContextSelection::CompleteSet;
+    let query_tokens = selection.tokens(query);
+    let mut scored = nodes
+        .into_iter()
+        .map(|node| (relevance_score(node, &query_tokens, selection), node))
+        .filter(|(score, _)| *score > 0.0)
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    scored.into_iter().map(|(_, node)| node).collect()
+}
+
 fn v2_relevance(node: &ContextNode, query: &TaskQuery) -> Result<(f32, bool), RetrievalError> {
     let document = context_retrieval_document(node)?;
     v2_relevance_from_document(node, query, &document)
@@ -2461,8 +2484,30 @@ mod tests {
         MAX_CONTEXT_NODE_ID_BYTES, MAX_CONTEXT_NODE_SUMMARY_BYTES, MAX_CONTEXT_REFERENCE_ID_BYTES,
         MAX_CONTEXT_SOURCE_EVENT_IDS, MAX_CONTEXT_SUPERSEDES, MAX_REQUEST_BYTES,
         MAX_RETRIEVAL_DOCUMENT_BYTES, MAX_SERIALIZED_CONTEXT_NODE_BYTES, RetrievalError, TaskQuery,
-        TaskSignature, TaskSignatureV2, context_retrieval_document,
+        TaskSignature, TaskSignatureV2, context_retrieval_document, lexical_recall,
     };
+
+    #[test]
+    fn lexical_recall_ranks_shared_words_ignoring_function_words() {
+        let nodes = [
+            node("b-miso", "My dog is called Miso"),
+            node("a-mochi", "My dog is called Mochi"),
+            node("c-dog", "The dog park opens early"),
+            node("d-none", "What is the plan for the week"),
+        ];
+        let ids = |query: &str| {
+            lexical_recall(query, &nodes)
+                .into_iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>()
+        };
+        // Two shared words outrank one; equal scores rank by ID.
+        assert_eq!(ids("dog called"), ["a-mochi", "b-miso", "c-dog"]);
+        // Function words alone share nothing.
+        assert!(ids("what is the").is_empty());
+        assert_eq!(ids("Miso?"), ["b-miso"]);
+        assert!(ids("").is_empty());
+    }
 
     fn node(id: &str, summary: &str) -> ContextNode {
         ContextNode {

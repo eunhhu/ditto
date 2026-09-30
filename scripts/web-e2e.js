@@ -25,8 +25,13 @@ function check(name, ok, detail = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` - ${detail}` : ''}`);
 }
 
+function event(delta, finish = null) {
+  return `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+}
+
 // The mock streams a markdown reply describing what it received, so the page
-// shows which memory and how much history reached the model.
+// shows which memory and how much history reached the model. Asked to recall,
+// it first calls memory.search and then answers with what the search found.
 function mockModel() {
   const server = http.createServer((request, response) => {
     let raw = '';
@@ -38,10 +43,23 @@ function mockModel() {
       const prior = messages.slice(0, -1).filter((message) => message.role !== 'system').length;
       const memory = system.includes('afternoon meetings') ? 'afternoon' : system.includes('morning meetings') ? 'morning' : 'none';
       // Answer the user's words, not Ditto's leading time note.
-      const question = messages[messages.length - 1].content.replace(/^\[Ditto:[^\]]*\]\n\n/, '');
-      const reply = `You asked: *${question}*\n\n- memory seen: **${memory}**\n- earlier messages: \`${prior}\`\n\n\`\`\`\nstreamed by a mock model\n\`\`\``;
-      const delay = question.includes('slowly') ? 400 : 60;
+      const user = [...messages].reverse().find((message) => message.role === 'user');
+      const question = user.content.replace(/^\[Ditto:[^\]]*\]\n\n/, '');
+      const result = messages[messages.length - 1].role === 'tool' ? JSON.parse(messages[messages.length - 1].content) : null;
       response.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (question.includes('recall') && !result) {
+        const call = { index: 0, id: 'call-recall', type: 'function', function: { name: 'memory_search', arguments: '{"query":"meetings"}' } };
+        response.write(event({ tool_calls: [call] }));
+        response.write(event({}, 'tool_calls'));
+        response.end('data: [DONE]\n\n');
+        return;
+      }
+      // Long enough for the page to show the search in progress.
+      if (result) await sleep(800);
+      const reply = result
+        ? `recalled: ${result.memories.map((found) => found.text).join('; ')}`
+        : `You asked: *${question}*\n\n- memory seen: **${memory}**\n- earlier messages: \`${prior}\`\n\n\`\`\`\nstreamed by a mock model\n\`\`\``;
+      const delay = question.includes('slowly') ? 400 : 60;
       for (let index = 0; index < reply.length; index += 12) {
         if (response.destroyed) return;
         response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: reply.slice(index, index + 12) } }] })}\n\n`);
@@ -219,6 +237,16 @@ async function main() {
     }, { timeout: 10000 });
     await send(page, 'When should we meet now?');
     check('a corrected memory replaces the old one', (await waitDone(page, 7)).text.includes('memory seen: morning'));
+
+    await send(page, 'Please recall my meetings');
+    await page.waitForFunction(() => {
+      const nodes = document.querySelectorAll('.msg.assistant .body');
+      const body = nodes[nodes.length - 1];
+      return body.classList.contains('progress') && body.innerText === 'Searching memories…';
+    }, { timeout: 10000 });
+    check('a running memory search shows progress', true);
+    const recalled = await waitDone(page, 8);
+    check('the memory search result reaches the model', recalled.text.includes('recalled: I prefer morning meetings') && recalled.foot.includes('memory.search'), recalled.text);
 
     const inView = () => page.evaluate(() => {
       const header = document.querySelector('.chat-header').getBoundingClientRect();

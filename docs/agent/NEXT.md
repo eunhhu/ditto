@@ -26,8 +26,15 @@ and after numbers, and the gate:
 4. [028](tasks/028-session-parallel-runs.md) Phase D, session-parallel
    runs - complete (three sessions at once, from one; queue, `queued` status
    and provider lanes replaced, see the ADR).
-5. 029 Phase E, one builtin tool lifecycle, parallel read-only calls, progress
-   events, read-only `memory.search`.
+5. [029](tasks/029-memory-search.md) Phase E in part, read-only
+   `memory.search` and tool progress, turn payload version 8 - complete
+   (a memory the budget left out reaches the model through a search). One
+   builtin tool lifecycle and parallel read-only calls are deferred with
+   reasons in the ADR, so the design's exit criteria for those parts are not
+   met.
+
+The harness phases are done except those deferred parts. The next slice waits
+for the user's choice among them and the open items below.
 
 Still open from the earlier frontier:
 
@@ -42,6 +49,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [029](tasks/029-memory-search.md) Read-only memory search and tool
+  progress, turn payload version 8 (ADR 0029; ADR 0028 Phase E in part).
 - [028](tasks/028-session-parallel-runs.md) Session-parallel runs (ADR 0028
   Phase D).
 - [027](tasks/027-one-journal-plane.md) One journal plane, each fact once,

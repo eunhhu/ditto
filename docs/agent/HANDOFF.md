@@ -26,8 +26,9 @@ and checks establish a new fact.
   `dev/task-022-assistant-instructions` and `dev/task-023-web-fetch` stack
   Tasks 019–023; `dev/design-realtime-harness`,
   `dev/task-025-cache-stable-layout`, `dev/task-026-thin-turn-start`,
-  `dev/task-027-one-journal-plane` and `dev/task-028-session-parallel` stack
-  the harness design and Tasks 025–028. Nothing is pushed.
+  `dev/task-027-one-journal-plane`, `dev/task-028-session-parallel` and
+  `dev/task-029-memory-search` stack the harness design and Tasks 025–029.
+  Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -36,7 +37,9 @@ and checks establish a new fact.
 - Still on 2026-09-30 the user asked for the thinnest harness designed around
   concurrency, real-time streaming and context injection timing and scope. The
   design is [realtime-harness](../design/realtime-harness.md) and ADR 0028.
-  Phases A–D are implemented (Tasks 025–028); phase E is not.
+  Phases A–D are implemented (Tasks 025–028) and Phase E in part (Task 029:
+  `memory.search` and tool progress); one tool lifecycle and parallel
+  read-only calls are deferred.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
   validator wording. The user prioritized fixing both, trimming process
@@ -76,7 +79,9 @@ and checks establish a new fact.
   compile the verified active session/task snapshot with the complete-set
   contract (ADR 0021): the whole current set when it fits the budget (default
   900 estimated tokens, about twelve short memories), otherwise positive
-  lexical overlap without function words. There is no transcript injection,
+  lexical overlap without function words. Agent runs can search the user's
+  own memories their compilation saw, including those it left out, with the
+  read-only `memory.search` (ADR 0029). There is no transcript injection,
   cross-session memory or production semantic retrieval.
   The separate V2 joint working-set query is lexical in production with an
   injected embedding seam for tests.
@@ -91,8 +96,9 @@ and checks establish a new fact.
   authority. `device.process.run` is a discovery-only manifest with no runner.
 - **Policy.** Sealed canonical invocations carry harness-derived effect,
   resource and placement. One affine ticket per epoch creates one expiring
-  ledger. `artifact.read` uses a static no-approval permit; `artifact.sort`
-  consumes a one-shot `ExecutionClaim` under an exact-resource, one-call lease.
+  ledger. `artifact.read` and `memory.search` use static no-approval permits;
+  `artifact.sort` consumes a one-shot `ExecutionClaim` under an
+  exact-resource, one-call lease.
 - **Model and turns.** `ditto-model` owns the provider-neutral request/stream
   contract. `ditto-model-openai` holds two drivers on one request lifecycle:
   the closed `gpt-5.6` Responses profile (ephemeral storage) and an
@@ -101,10 +107,11 @@ and checks establish a new fact.
   optional key only from `DITTO_MODEL_API_KEY`). Keys are redacted and
   transport-only. The daemon defaults to a disabled provider. The kernel turn
   loop compiles context, pages `artifact.read` (plus `artifact.sort` only for a
-  permitted attachment, and `web.fetch` while enabled), runs at most eight
+  permitted attachment, `web.fetch` while enabled and `memory.search` for
+  agent runs while installed), runs at most eight
   model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. New turns write payload
-  version 7:
+  version 8:
   - version 2 added typed `TurnFailureReason`s for validator-derived failures;
   - version 3 gave agent runs the current thread's finished exchanges as
     native messages, with their turn IDs recorded and recomputed on replay
@@ -118,7 +125,9 @@ and checks establish a new fact.
     most 16, 24 KiB);
   - version 7 (Phase C) records each fact once: text in coalesced chunks (the
     first text after a quiet 48 ms at once), each request as the SHA-256 of
-    what was sent, and no capsule or builtin schemas; replay rebuilds them.
+    what was sent, and no capsule or builtin schemas; replay rebuilds them;
+  - version 8 (ADR 0029) adds `memory.search`, whose results replay
+    recomputes.
 
   Older versions replay under their original rules; a turn never mixes
   versions. A run reuses its session's verified context while no context node
@@ -150,21 +159,21 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 028
+## Latest verified slice: Task 029
 
-- [Contract and evidence](tasks/028-session-parallel-runs.md) (ADR 0028 Phase
-  D). The run slot is per session, with up to four sessions at once: three
-  sessions starting a run together are all accepted and stream at once
-  (before: one, and two HTTP 429), and a due reminder no longer waits for
-  another session's run. A busy session still answers HTTP 429; clients keep
-  their own session's messages in order.
-- Its gate passed on its final tree (564 Rust tests).
+- [Contract and evidence](tasks/029-memory-search.md) (ADR 0029, ADR 0028
+  Phase E in part). Agent runs can search the user's own memories that the
+  context budget left out, and replay recomputes every result. The web app
+  says what a running tool is doing. One tool lifecycle and parallel
+  read-only calls are deferred, so the design's Phase E exit criteria for
+  those parts are not met.
+- Its gate passed on its final tree (571 Rust tests).
 
-## Previous slice: Task 027
+## Previous slice: Task 028
 
-- [Contract and evidence](tasks/027-one-journal-plane.md): turn payload
-  version 7 journals each fact once (ADR 0028 Phase C). Its gate passed on its
-  final tree (561 Rust tests).
+- [Contract and evidence](tasks/028-session-parallel-runs.md): session-parallel
+  runs, up to four sessions at once (ADR 0028 Phase D). Its gate passed on its
+  final tree (564 Rust tests).
 
 ## Known gaps
 
@@ -197,8 +206,10 @@ and checks establish a new fact.
   calling.
 
 - Sessions whose current memories exceed the context budget fall back to
-  lexical overlap, so a pure paraphrase can miss. Semantic retrieval (deferred)
-  or a larger budget (a cost decision for the user) would close it.
+  lexical overlap, so a pure paraphrase can miss. The model can now search the
+  left-out memories in its own words (Task 029), but that search is lexical
+  too and runs only when the model chooses. Semantic retrieval (deferred) or a
+  larger budget (a cost decision for the user) would close it.
 - Version-1 turns still replay through the frozen failure-message grammar;
   only historical traces depend on it.
 - The scheduler sleeps on a monotonic timer and has no resume wake-up, so a
@@ -232,7 +243,14 @@ and checks establish a new fact.
   without weakening its single-gate, single-rebuild or atomic-checkpoint
   semantics.
 - Three lexical tokenizers differ (context V1, capability search, retrieval
-  V2).
+  V2); `memory.search` reuses context V1.
+- Each builtin tool keeps its own journal events, run path and replay checks;
+  ADR 0028 defers one shared lifecycle until another effectful tool is added.
+- `capabilities.selected` records every offered builtin manifest in full:
+  4,910 of the 8,837 journal bytes of a short agent turn (Task 029). Replay
+  already pins each to its bundled contract, so recording a reference would
+  cut most of it; it is the largest remaining term in the journal-bytes
+  target of ADR 0028 Phase C.
 - Headerless capability packages still pay one bounded startup body read.
 - The injected embedding interface is synchronous and may make up to 513
   serial calls; a production worker needs rerank pools, batching and caching.

@@ -287,7 +287,9 @@ conversation events committed since the last turn; the turn's prelude commits
 with its first model request (ADR 0028 Phase B). From turn payload version 7
 streamed text is journaled in coalesced chunks, the first words of a burst at
 once, and each request as the SHA-256 of what was sent, which replay rebuilds
-from earlier durable events (Phase C).
+from earlier durable events (Phase C). Agent runs can also search the
+memories their compilation saw with the read-only `memory.search` tool, which
+replay recomputes (ADR 0029).
 Runs, sorts and the scheduler journal from blocking threads, and daemon
 handlers run kernel calls on the blocking pool, so no async runtime thread
 waits on SQLite; debug builds reject journal access on those threads.

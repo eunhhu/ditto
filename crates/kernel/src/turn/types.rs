@@ -17,8 +17,9 @@ use crate::KernelError;
 /// current conversation thread's recent exchanges to agent runs (ADR 0022).
 /// Version 7 (ADR 0028 Phase C) journals each fact once: streamed text in
 /// coalesced chunks, and requests, capsules and builtin schemas as what replay
-/// rebuilds from the rest of the journal.
-pub const TURN_PAYLOAD_VERSION: u16 = 7;
+/// rebuilds from the rest of the journal. Version 8 (ADR 0029) offers
+/// `memory.search` to agent runs.
+pub const TURN_PAYLOAD_VERSION: u16 = 8;
 /// Oldest turn contract that replay and run status still read. Version-1
 /// turns use positive-overlap context selection and message grammar.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -58,6 +59,9 @@ pub struct CapabilitiesSelectedPayload {
     /// Version 5: `web.fetch`, paged when the user's message holds URLs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_manifest: Option<CapabilityManifest>,
+    /// Version 8: `memory.search`, offered to every agent run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_manifest: Option<CapabilityManifest>,
     pub epoch: ExecutionEpochEvidence,
     /// Versions 1 to 6. Version 7 derives the builtin schemas of the selected
     /// manifests.
@@ -317,6 +321,8 @@ pub struct ReplayedReadOnlyTurn {
     pub sort_calls: Vec<super::sort::ReplayedSortCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fetch_calls: Vec<super::fetch::ReplayedFetchCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recall_calls: Vec<super::recall::ReplayedRecallCall>,
     pub terminal: ArtifactReadTurnReplay,
     pub sequence_span: TurnSequenceSpan,
 }

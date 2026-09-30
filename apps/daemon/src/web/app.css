@@ -92,6 +92,7 @@ textarea { resize: vertical; }
 .tag.unverified { color: var(--muted); }
 .tag.tool { color: var(--accent); }
 .typing::after { content: "●●●"; letter-spacing: 2px; color: var(--muted); animation: pulse 1.2s infinite; }
+.progress { color: var(--muted); font-style: italic; animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 
 .composer { display: flex; gap: 8px; padding: 12px 18px 18px; align-items: flex-end; }

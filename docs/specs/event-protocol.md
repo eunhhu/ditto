@@ -524,6 +524,17 @@ once:
 Replay rejects version-7 turns carrying the earlier forms and earlier versions
 carrying version-7 forms.
 
+Version 8 ([ADR 0029](../adr/0029-memory-search-tool.md)) offers
+`memory.search` to every agent run while its package is installed, and
+`capabilities.selected` records its manifest as `memory_manifest`. A call
+journals `agent.memory.requested` (model, version 1: `arguments` and the
+normalized `query`, or `null` when invalid) and `agent.memory.output`
+(capability, version 1: `result`, either `found` with `memories` of
+`{ id, text }` and `searched`, or `invalid_arguments`). The search reads the
+user's own assertions among the nodes the turn's compilation included and
+those it left out as irrelevant or over budget; replay rebuilds that set and
+recomputes the result exactly.
+
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished
 agent-run turns recorded after the latest reset. It deletes nothing and does

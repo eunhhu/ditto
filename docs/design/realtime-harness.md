@@ -4,8 +4,9 @@ Status: design, proposed on 2026-09-30 ([ADR 0028](../adr/0028-thin-realtime-har
 Phase A is implemented (Task 025, turn payload version 6: prefix reuse 50.6 %
 to 96.4 %), Phase B (Task 026: input to provider request 5–10 ms to 1 ms) and
 Phase C (Task 027, turn payload version 7: 1,006 events per 1,000-delta turn
-to 9) and Phase D (Task 028: three sessions at once, from one). The ADR lists
-what each deferred or replaced. Phase E is not implemented.
+to 9), Phase D (Task 028: three sessions at once, from one) and, in part,
+Phase E (Task 029: `memory.search` and tool progress). The ADR lists what each
+deferred or replaced.
 
 The goal is a harness that does as little as possible per turn, streams without
 delay, serves several conversations at once, and gives the model exactly the
