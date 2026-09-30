@@ -212,8 +212,8 @@ expiring, and bound to one invocation digest.
 `artifact.sort` is an explicitly requested closed local process profile. Its
 worker consumes the affine claim, validates exact registered revision/input,
 and starts the trusted OS sort lazily with bounded stdin/output, private scratch,
-cleared environment, and cancellable lifetime. The kernel shares one active slot
-across model and sort requests. An explicit per-run file attachment can grant
+cleared environment, and cancellable lifetime. Model and sort requests share
+each session's one active slot. An explicit per-run file attachment can grant
 one model-directed sort, with deduplication separately permitted. The kernel
 pages that tool only for the permitted run and derives its exact-resource lease;
 natural-language instructions never create authority. No arbitrary executable
@@ -277,7 +277,8 @@ response remains explicitly `unverified`, and the loop never emits
 
 Explicit personal-agent runs connect that loop to CLI/HTTP under ADR 0016. The
 kernel durably records one client retry identity before dispatch, owns one
-bounded active execution independent of the HTTP connection, and derives
+bounded active execution per session, up to four sessions at once (ADR 0028
+Phase D), independent of the HTTP connection, and derives
 terminal/interrupted state from indexed event boundaries. A verified context
 snapshot supplies current scoped memory; model inference is never housekeeping.
 A run reuses its session's verified context while no context node has been

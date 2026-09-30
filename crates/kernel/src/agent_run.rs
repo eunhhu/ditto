@@ -23,10 +23,29 @@ pub(crate) struct AgentRunMetadata {
     pub sort: Option<crate::turn::sort::SortGrant>,
 }
 
+/// Runs and sorts active at once across sessions (ADR 0028 Phase D).
+pub(crate) const MAX_ACTIVE_RUNS: usize = 4;
+
+/// The active run or sort of each session: runs in one session stay in
+/// order, and different sessions run at once up to [`MAX_ACTIVE_RUNS`].
 #[derive(Default)]
 pub(crate) struct RunSlot {
-    pub(crate) active: Option<ActiveRun>,
+    pub(crate) active: std::collections::HashMap<String, ActiveRun>,
     pub(crate) stopping: bool,
+}
+
+impl RunSlot {
+    /// Whether work may start in `session` now.
+    pub(crate) fn can_start(&self, session: &str) -> bool {
+        !self.active.contains_key(session) && self.active.len() < MAX_ACTIVE_RUNS
+    }
+
+    /// The session's active execution, if `input_event_id` started it.
+    pub(crate) fn active_for(&self, session: &str, input_event_id: &str) -> Option<&ActiveRun> {
+        self.active
+            .get(session)
+            .filter(|active| active.input_event_id == input_event_id)
+    }
 }
 
 pub(crate) struct ActiveRun {
@@ -41,7 +60,9 @@ pub enum AgentRunError {
     Invalid(&'static str),
     #[error("request identity is already used for different input")]
     Conflict,
-    #[error("another run is active; no work was queued")]
+    #[error(
+        "another run is active in this session, or four sessions are running; no work was queued"
+    )]
     Busy,
     #[error(
         "future schedule limit (100) reached; cancel a pending request or active repeat before adding another"
@@ -254,7 +275,7 @@ impl DittoKernel {
         if slot.stopping {
             return Err(AgentRunError::Stopping);
         }
-        if slot.active.is_some() {
+        if !slot.can_start(&query.session_id) {
             return Err(AgentRunError::Busy);
         }
         let sort = command
@@ -292,15 +313,19 @@ impl DittoKernel {
         let input = admitted.input().clone();
         let cancellation = CancellationToken::new();
         let finished = CancellationToken::new();
-        slot.active = Some(ActiveRun {
-            input_event_id: input.event_id.clone(),
-            cancellation: cancellation.clone(),
-            finished: finished.clone(),
-        });
+        slot.active.insert(
+            query.session_id.clone(),
+            ActiveRun {
+                input_event_id: input.event_id.clone(),
+                cancellation: cancellation.clone(),
+                finished: finished.clone(),
+            },
+        );
         // Construct the guard before spawning: even a dropped/unpolled future or
         // panic releases the slot. Durable nonterminal state then reads interrupted.
         let guard = ActiveGuard {
             kernel: self.clone(),
+            session_id: query.session_id.clone(),
             input_event_id: input.event_id.clone(),
             finished,
         };
@@ -363,15 +388,13 @@ impl DittoKernel {
             .run_boundary(&query, &task_id)?
             .ok_or(AgentRunError::NotFound)?;
         validate_agent_input(&input, &query)?;
-        if let Some(active) = &slot.active
-            && active.input_event_id == input.event_id
-        {
+        if let Some(active) = slot.active_for(&query.session_id, &input.event_id) {
             active.cancellation.cancel();
         }
         self.agent_status_from_boundary(query, input, last, &slot)
     }
 
-    /// Close admission and drain the one owned execution, without a heartbeat.
+    /// Close admission and drain every owned execution, without a heartbeat.
     pub async fn shutdown_agent_runs(&self) -> Result<(), AgentRunError> {
         let finished = {
             let mut slot = self
@@ -381,12 +404,15 @@ impl DittoKernel {
                 .map_err(|_| AgentRunError::Storage)?;
             slot.stopping = true;
             self.inner.scheduler_wake.notify_one();
-            slot.active.as_ref().map(|active| {
-                active.cancellation.cancel();
-                active.finished.clone()
-            })
+            slot.active
+                .values()
+                .map(|active| {
+                    active.cancellation.cancel();
+                    active.finished.clone()
+                })
+                .collect::<Vec<_>>()
         };
-        if let Some(finished) = finished {
+        for finished in finished {
             finished.cancelled().await;
         }
         Ok(())
@@ -406,6 +432,7 @@ impl DittoKernel {
 
 pub(crate) struct ActiveGuard {
     pub(crate) kernel: DittoKernel,
+    pub(crate) session_id: String,
     pub(crate) input_event_id: String,
     pub(crate) finished: CancellationToken,
 }
@@ -414,18 +441,16 @@ impl Drop for ActiveGuard {
     fn drop(&mut self) {
         if let Ok(mut slot) = self.kernel.inner.agent_runs.lock()
             && slot
-                .active
-                .as_ref()
-                .is_some_and(|active| active.input_event_id == self.input_event_id)
+                .active_for(&self.session_id, &self.input_event_id)
+                .is_some()
         {
-            slot.active = None;
+            slot.active.remove(&self.session_id);
         }
         self.finished.cancel();
         self.kernel.inner.scheduler_wake.notify_one();
     }
 }
 
-/// Run status reads every turn payload version that replay still accepts.
 fn ranked(nodes: Vec<ditto_context::ContextNode>) -> Vec<ditto_context::ContextCandidate> {
     nodes
         .into_iter()
@@ -433,6 +458,7 @@ fn ranked(nodes: Vec<ditto_context::ContextNode>) -> Vec<ditto_context::ContextC
         .collect()
 }
 
+/// Run status reads every turn payload version that replay still accepts.
 fn supported_turn_version(version: u16) -> bool {
     (crate::turn::MIN_TURN_PAYLOAD_VERSION..=crate::turn::TURN_PAYLOAD_VERSION).contains(&version)
 }
@@ -492,18 +518,10 @@ impl DittoKernel {
         last: EventRecord,
         slot: &RunSlot,
     ) -> Result<AgentRunResponse, AgentRunError> {
-        let sort = self.agent_sort_progress(
-            &input,
-            slot.active
-                .as_ref()
-                .is_some_and(|active| active.input_event_id == input.event_id),
-        )?;
+        let active = slot.active_for(&query.session_id, &input.event_id);
+        let sort = self.agent_sort_progress(&input, active.is_some())?;
         let turn_id = input.correlation_id.ok_or(AgentRunError::Storage)?;
         let task_id = input.task_id.ok_or(AgentRunError::Storage)?;
-        let active = slot
-            .active
-            .as_ref()
-            .filter(|active| active.input_event_id == input.event_id);
         let schedule_request_id = self
             .inner
             .events

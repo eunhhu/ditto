@@ -23,8 +23,9 @@ and after numbers, and the gate:
    requests as digests, turn payload version 7 - complete (1,006 → 9 events
    per 1,000-delta turn; journal bytes per answer byte 80–111 → 4.9–16.3,
    short of the target of 3; live plane and blobs replaced, see the ADR).
-4. 028 Phase D, session-parallel runs with provider lanes and a `queued`
-   status. Exit: three sessions at once all stream (today 1 of 3).
+4. [028](tasks/028-session-parallel-runs.md) Phase D, session-parallel
+   runs - complete (three sessions at once, from one; queue, `queued` status
+   and provider lanes replaced, see the ADR).
 5. 029 Phase E, one builtin tool lifecycle, parallel read-only calls, progress
    events, read-only `memory.search`.
 
@@ -41,6 +42,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [028](tasks/028-session-parallel-runs.md) Session-parallel runs (ADR 0028
+  Phase D).
 - [027](tasks/027-one-journal-plane.md) One journal plane, each fact once,
   turn payload version 7 (ADR 0028 Phase C).
 - [026](tasks/026-thin-turn-start.md) Thin turn start and storage off async

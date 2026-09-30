@@ -1,8 +1,8 @@
 # ADR 0028: Thin real-time harness
 
 Status: proposed on 2026-09-30 and decided per phase as each lands. Phase A
-was accepted with Task 025 (turn payload version 6), Phase B with Task 026 and
-Phase C with Task 027 (turn payload version 7).
+was accepted with Task 025 (turn payload version 6), Phase B with Task 026,
+Phase C with Task 027 (turn payload version 7) and Phase D with Task 028.
 The full design is in
 [docs/design/realtime-harness.md](../design/realtime-harness.md).
 
@@ -184,4 +184,32 @@ capability selection (3.3 KB) and the answer, recorded in its chunks and again
 in `turn.finished`, which status, history and clients read. Node references in
 the compiled context and an answer derived from its chunks would close it;
 they change several readers and are deferred until journal size matters.
+
+## Phase D as accepted (Task 028)
+
+The run slot is now per session: each session has at most one active run or
+sort, and up to four sessions run at once. A second run in a busy session, or
+a fifth session, gets HTTP 429 as before. Due scheduled work starts as soon as
+its own session can, so a run in one session never holds back another
+session's reminder. Cancellation, status and shutdown address each session's
+run, and shutdown drains all of them.
+
+Measured with `scripts/measure-harness.py` on the same machine, three sessions
+starting a run at once against a provider that answers after 0.5 s: before,
+one was accepted and two got HTTP 429; now all three are accepted, reach the
+provider within 2 ms of each other and all finish after 513 ms.
+
+Three parts of the design were replaced:
+
+- **Session actors and a kernel queue with a `queued` status.** Clients
+  already keep one session's messages in order: the Telegram gateway queues
+  each chat's messages for one worker and retries a busy answer, and the web
+  app sends one request at a time. A kernel queue would add a durable queued
+  state, dequeueing, cancellation and restart rules for no user-visible gain,
+  so a busy session still answers HTTP 429 and nothing new reaches the wire.
+- **Provider lanes.** Local servers such as Ollama and llama.cpp queue or
+  parallelize requests themselves; the four-run limit bounds the load the
+  kernel creates.
+- **A scheduler without a slot.** The scheduler keeps its one loop and index
+  and now checks each due item's own session.
 

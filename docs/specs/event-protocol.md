@@ -176,8 +176,9 @@ copied from client event fields.
 Acceptance precedes dispatch and returns HTTP 202 with `running`. Identical
 normalized text with the same session/request ID returns the existing run,
 including terminal or interrupted runs; changed text, attachment or permission
-is HTTP 409. One active
-run is allowed per kernel, and additional identities get HTTP 429 without
+is HTTP 409. One active run is allowed per session and four at once across
+sessions ([ADR 0028](../adr/0028-thin-realtime-harness.md) Phase D); another
+identity in a busy session, or beyond the limit, gets HTTP 429 without
 acceptance or a queue. Disabled execution and shutdown return HTTP 503 for new
 work. The daemon's default is disabled; input and memory routes remain free of
 model calls. POST is not automatically retried by the CLI.
@@ -201,8 +202,8 @@ OpenAI profile uses transport-only environment credentials and ephemeral remote
 storage. It is not free inference. The public run command has no provider,
 credential, timing, effect, lease, or trusted-context fields; unknown fields are
 rejected. Live provider execution is loopback-only. A client disconnect does not
-cancel accepted work. Graceful shutdown closes admission, cancels the one run,
-drains it, and closes event followers. Crashes/storage failure can leave an
+cancel accepted work. Graceful shutdown closes admission, cancels every active
+run, drains them, and closes event followers. Crashes/storage failure can leave an
 interrupted identity. The supported writer remains one kernel and its clones.
 
 Current session/task context comes from a bounded source-verified projection
@@ -233,7 +234,7 @@ fields. The provider may remain disabled. No program, environment, path,
 effect, lease, actor or evidence is client-selectable.
 
 The kernel derives `sort_<request_id>` task scope and fresh `turn_*` correlation,
-shares the existing model-run slot, stores the input artifact, then durably
+occupies its session's model-run slot, stores the input artifact, then durably
 accepts `sort.requested` (user, version 1) before dispatch. This event contains
 the request ID, input reference and unique option, not the source text or local
 filename. Exact retries return prior state, changed retries conflict, busy work
@@ -262,7 +263,7 @@ race; cancellation after completion returns that completion.
 
 HTTP statuses are 202 for running admission, 200 for prior/terminal results,
 400 invalid input, 404 absent/wrong scope, 409 changed retry, 422 unknown fields,
-429 occupied slot, 503 shutdown and 500 unavailable storage. Non-loopback
+429 busy session or run limit, 503 shutdown and 500 unavailable storage. Non-loopback
 listeners do not mount these routes. See [ADR 0017](../adr/0017-bounded-local-sort.md).
 
 ## One-shot scheduled requests

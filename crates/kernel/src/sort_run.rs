@@ -76,7 +76,7 @@ impl DittoKernel {
         if slot.stopping {
             return Err(AgentRunError::Stopping);
         }
-        if slot.active.is_some() {
+        if !slot.can_start(&query.session_id) {
             return Err(AgentRunError::Busy);
         }
         // Page only the selected implementation contract; malformed installation
@@ -119,13 +119,17 @@ impl DittoKernel {
         })?;
         let cancellation = CancellationToken::new();
         let finished = CancellationToken::new();
-        slot.active = Some(ActiveRun {
-            input_event_id: input.event_id.clone(),
-            cancellation: cancellation.clone(),
-            finished: finished.clone(),
-        });
+        slot.active.insert(
+            query.session_id.clone(),
+            ActiveRun {
+                input_event_id: input.event_id.clone(),
+                cancellation: cancellation.clone(),
+                finished: finished.clone(),
+            },
+        );
         let guard = ActiveGuard {
             kernel: self.clone(),
+            session_id: query.session_id.clone(),
             input_event_id: input.event_id.clone(),
             finished,
         };
@@ -173,10 +177,7 @@ impl DittoKernel {
             .sort_boundary(&query, &task)?
             .ok_or(AgentRunError::NotFound)?;
         validate_input_event(&input, &query)?;
-        if cancel
-            && let Some(active) = &slot.active
-            && active.input_event_id == input.event_id
-        {
+        if cancel && let Some(active) = slot.active_for(&query.session_id, &input.event_id) {
             active.cancellation.cancel();
         }
         self.sort_status(query, input, last, &slot)
@@ -340,10 +341,7 @@ impl DittoKernel {
         slot: &RunSlot,
     ) -> Result<SortRunResponse, AgentRunError> {
         let source = validate_input_event(&input, &query)?;
-        let active = slot
-            .active
-            .as_ref()
-            .filter(|active| active.input_event_id == input.event_id);
+        let active = slot.active_for(&query.session_id, &input.event_id);
         let mut response = SortRunResponse {
             request_id: query.request_id,
             session_id: query.session_id,

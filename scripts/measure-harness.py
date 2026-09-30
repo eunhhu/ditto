@@ -262,6 +262,9 @@ def streaming(args):
 
 
 def concurrency(_args):
+    """Three sessions start a run at once against a provider that answers
+    after 0.5 s: which are accepted, how far apart they reach the provider,
+    and how long until all three finish."""
     Mock.deltas, Mock.delay, Mock.prompts, Mock.marks = 1, 0.5, [], {}
     daemon = Daemon()
     try:
@@ -271,15 +274,23 @@ def concurrency(_args):
             try:
                 results[f"session{i}"] = daemon.post(
                     "/v1/commands/run",
-                    {"request_id": f"01K{i:023d}", "session_id": f"session{i}", "text": "hello"})[0]
+                    {"request_id": f"01K{i:023d}", "session_id": f"session{i}", "text": f"hello {i}"})[0]
             except urllib.error.HTTPError as error:
                 results[f"session{i}"] = error.code
+        started = time.perf_counter()
         threads = [threading.Thread(target=start, args=(i,)) for i in range(1, 4)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
-        return {"three_sessions_at_once": dict(sorted(results.items()))}
+        for i in range(1, 4):
+            if results[f"session{i}"] == 202:
+                daemon.run(f"01K{i:023d}", f"hello {i}", session=f"session{i}")
+        finished = time.perf_counter()
+        arrivals = [mark["arrived"] for mark in Mock.marks.values()]
+        return {"three_sessions_at_once": dict(sorted(results.items())),
+                "provider_arrival_spread_ms": round((max(arrivals) - min(arrivals)) * 1e3, 2),
+                "all_finished_after_ms": round((finished - started) * 1e3, 1)}
     finally:
         daemon.close()
 

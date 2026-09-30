@@ -1,6 +1,8 @@
 # ADR 0020: Bounded recurring read-only schedules
 
 Status: accepted for Task 013. Extends ADR 0019 without changing one-shot inputs.
+Amended by [ADR 0028](0028-thin-realtime-harness.md) Phase D: occurrences wait only for their own
+session's slot and the four-run limit.
 
 ## Contract and limits
 

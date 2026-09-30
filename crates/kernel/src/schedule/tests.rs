@@ -322,6 +322,67 @@ async fn busy_slot_defers_work_and_expiry_is_exclusive_even_without_provider() {
 }
 
 #[tokio::test]
+async fn a_busy_session_holds_back_only_its_own_scheduled_work() {
+    let root = tempfile::tempdir().unwrap();
+    let kernel = DittoKernel::open(config(root.path())).unwrap();
+    let driver: Arc<dyn ModelDriver> = Driver::new(true);
+    kernel
+        .start_agent_run(
+            StartAgentRunCommand {
+                request_id: ulid::Ulid::new().to_string(),
+                session_id: "elsewhere".into(),
+                text: "wait".into(),
+                sort: None,
+            },
+            driver.clone(),
+        )
+        .unwrap();
+    // Due in the busy session: it waits for that session, not for its due time.
+    let mut blocked = command();
+    blocked.session_id = "elsewhere".into();
+    blocked.due_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis() + 100).unwrap();
+    blocked.expires_at = blocked.due_at + chrono::Duration::minutes(5);
+    kernel.schedule_run(blocked.clone()).unwrap();
+    // Due in an idle session: it starts although another session is running.
+    let mut free = command();
+    free.due_at = blocked.due_at + chrono::Duration::seconds(1);
+    free.expires_at = free.due_at + chrono::Duration::minutes(5);
+    kernel.schedule_run(free.clone()).unwrap();
+    assert!(matches!(
+        kernel
+            .scheduler_step(Some(&driver), || free.due_at)
+            .unwrap(),
+        Step::Again
+    ));
+    assert_eq!(
+        kernel.inspect_schedule(identity(&free)).unwrap().status,
+        ScheduleStatus::Running
+    );
+    // As reported, once due, while a scheduler with a provider runs.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    kernel.inner.scheduler_state.store(2, Ordering::SeqCst);
+    let waiting = kernel.inspect_schedule(identity(&blocked)).unwrap();
+    assert_eq!(waiting.status, ScheduleStatus::Pending);
+    assert_eq!(waiting.waiting_for, Some(ScheduleWaitReason::RuntimeBusy));
+    let mut idle = command();
+    idle.session_id = "third".into();
+    kernel.schedule_run(idle.clone()).unwrap();
+    assert_eq!(
+        kernel
+            .inspect_schedule(identity(&idle))
+            .unwrap()
+            .waiting_for,
+        Some(ScheduleWaitReason::DueTime)
+    );
+    kernel.inner.scheduler_state.store(0, Ordering::SeqCst);
+    assert!(matches!(
+        kernel.scheduler_step(Some(&driver), || free.due_at).unwrap(),
+        Step::Wait(Some(at)) if at == blocked.expires_at.min(idle.due_at)
+    ));
+    kernel.shutdown_agent_runs().await.unwrap();
+}
+
+#[tokio::test]
 async fn timer_and_admission_wake_one_owner_and_disabled_provider_only_expires() {
     let root = tempfile::tempdir().unwrap();
     let kernel = DittoKernel::open(config(root.path())).unwrap();
