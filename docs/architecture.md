@@ -282,6 +282,8 @@ context, and active provider settings are not self-editable.
 - Rust: daemon, storage, context, capability index, policy, model IR, executor,
   scheduler, and protocol.
 - TypeScript/Bun: integration SDKs, browser/app connectors, and gateways.
+- Plain JavaScript: the local web app embedded in the daemon, with no build
+  step; Node checks it in the gate (ADR 0024).
 - Python: optional out-of-process worker only for workloads that require it.
 - SQLite and local object storage: mandatory persistence.
 - MCP: external capability/resource boundary.

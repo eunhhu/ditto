@@ -947,3 +947,75 @@ async fn conversation_history_keeps_only_the_newest_bounded_exchanges() {
     assert_eq!(texts[16], ("User".into(), "latest".into()));
     replay_artifact_read_turn(&fixture.events_for_session("personal"), &last.turn_id).unwrap();
 }
+
+#[tokio::test]
+async fn conversation_view_lists_the_current_thread_unabridged_oldest_first() {
+    use ditto_protocol::{ConversationQuery, ResetConversationCommand};
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let view = |session: &str, limit: Option<usize>| {
+        kernel
+            .conversation_view(ConversationQuery {
+                session_id: session.into(),
+                limit,
+            })
+            .unwrap()
+    };
+    assert!(view("personal", None).exchanges.is_empty());
+
+    let (first, _) = ask(kernel, "personal", "first", final_script(&["one"])).await;
+    let failing = vec![ModelEvent::Failed {
+        failure: ditto_model::ModelFailure::new(FailureKind::Provider, "fixture outage"),
+    }];
+    ask(kernel, "personal", "lost", failing).await;
+    ask(kernel, "elsewhere", "other", final_script(&["other"])).await;
+    let long_answer = "y".repeat(10_000);
+    let (second, _) = ask(kernel, "personal", "second", final_script(&[&long_answer])).await;
+    let (third, _) = ask(kernel, "personal", "third", final_script(&["three"])).await;
+
+    let thread = view("personal", None);
+    let summary = thread
+        .exchanges
+        .iter()
+        .map(|exchange| (exchange.user.as_str(), exchange.turn_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summary,
+        [
+            ("first", first.turn_id.as_str()),
+            ("second", second.turn_id.as_str()),
+            ("third", third.turn_id.as_str()),
+        ]
+    );
+    // Display text is unabridged, unlike the model's bounded history.
+    assert_eq!(thread.exchanges[1].assistant, long_answer);
+    assert_eq!(thread.exchanges[0].task_id, first.task_id);
+    assert!(thread.exchanges[2].finished_seq <= thread.through_seq);
+    assert_eq!(thread.through_seq, kernel.latest_event_seq().unwrap());
+    assert_eq!(view("elsewhere", None).exchanges.len(), 1);
+
+    let newest = view("personal", Some(2));
+    assert_eq!(newest.exchanges[0].user, "second");
+    assert_eq!(newest.exchanges[1].user, "third");
+    assert_eq!(view("personal", Some(0)).exchanges.len(), 1);
+
+    kernel
+        .reset_conversation(ResetConversationCommand {
+            session_id: "personal".into(),
+        })
+        .unwrap();
+    assert!(view("personal", None).exchanges.is_empty());
+    let (after, _) = ask(kernel, "personal", "after", final_script(&["new"])).await;
+    let thread = view("personal", None);
+    assert_eq!(thread.exchanges.len(), 1);
+    assert_eq!(thread.exchanges[0].turn_id, after.turn_id);
+    assert!(
+        kernel
+            .conversation_view(ConversationQuery {
+                session_id: " not canonical".into(),
+                limit: None,
+            })
+            .is_err()
+    );
+    kernel.shutdown_agent_runs().await.unwrap();
+}

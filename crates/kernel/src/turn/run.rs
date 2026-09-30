@@ -36,7 +36,7 @@ mod sort_tool;
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
-    Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, agent_run_text,
+    Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, ThreadExchange, agent_run_text,
     append_assistant_text, bounded_turn_failure_message, history_messages, select_history,
     stable_system_prefix, turn_failure_code_for_model,
 };
@@ -325,32 +325,50 @@ impl DittoKernel {
         scope: &TurnScope,
         input: &EventRecord,
     ) -> Result<Vec<HistoryExchange>, KernelError> {
-        let finished = self.inner.events.conversation_finished_turns(
-            &scope.session_id,
-            input.seq,
-            MAX_HISTORY_CANDIDATES,
-        )?;
+        let exchanges =
+            self.thread_exchanges(&scope.session_id, input.seq, MAX_HISTORY_CANDIDATES)?;
+        Ok(select_history(
+            exchanges.into_iter().map(|thread| thread.exchange),
+        ))
+    }
+
+    /// Finished agent-run exchanges of the session's current thread before
+    /// `before_seq`, newest first. At most `candidates` finished turns are
+    /// examined; other turns in the thread are skipped.
+    pub(crate) fn thread_exchanges(
+        &self,
+        session: &str,
+        before_seq: i64,
+        candidates: usize,
+    ) -> Result<Vec<ThreadExchange>, KernelError> {
+        let finished = self
+            .inner
+            .events
+            .conversation_finished_turns(session, before_seq, candidates)?;
         let mut exchanges = Vec::with_capacity(finished.len());
         for event in finished {
             let payload: TurnFinishedPayload = serde_json::from_value(event.payload)?;
             let task = event
                 .task_id
-                .as_deref()
                 .ok_or_else(|| KernelError::InvalidCommand("finished turn has no task".into()))?;
             let turn_input = self
                 .inner
                 .events
-                .turn_input(&scope.session_id, task, &payload.turn_id)?
+                .turn_input(session, &task, &payload.turn_id)?
                 .ok_or_else(|| KernelError::InvalidCommand("finished turn has no input".into()))?;
             if let Some(user) = agent_run_text(&turn_input) {
-                exchanges.push(HistoryExchange {
-                    turn_id: payload.turn_id,
-                    user: user.to_owned(),
-                    assistant: payload.outcome.response,
+                exchanges.push(ThreadExchange {
+                    task_id: task,
+                    finished_seq: event.seq,
+                    exchange: HistoryExchange {
+                        turn_id: payload.turn_id,
+                        user: user.to_owned(),
+                        assistant: payload.outcome.response,
+                    },
                 });
             }
         }
-        Ok(select_history(exchanges))
+        Ok(exchanges)
     }
 
     /// Page the permitted capabilities into one sealed execution epoch,

@@ -13,7 +13,8 @@ ADR when a contract changes, and evidence:
 1. [018](tasks/018-conversation-threads.md) Conversation threads - complete.
 2. [019](tasks/019-openai-compatible-provider.md) OpenAI-compatible model
    provider - complete.
-3. 020 Local web app: chat, memories, schedules and a per-answer inspector.
+3. [020](tasks/020-local-web-app.md) Local web app: chat, memories, schedules
+   and a per-answer inspector - complete.
 4. 021 Telegram gateway and delivery of scheduled results.
 5. 022 Builtin tool interface with model-callable memory tools.
 6. 023 Web fetch and search tools behind network leases.
@@ -26,6 +27,8 @@ General approval fulfillment remains deferred.
 
 One line per slice; each task file and its evidence hold the details.
 
+- [020](tasks/020-local-web-app.md) Local web app, conversation view and
+  loopback host guard (ADR 0024).
 - [019](tasks/019-openai-compatible-provider.md) OpenAI-compatible chat
   provider for local and hosted models (ADR 0023).
 - [018](tasks/018-conversation-threads.md) Conversation threads, `ditto chat`

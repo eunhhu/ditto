@@ -15,8 +15,9 @@ use axum::{
 use clap::Parser;
 use ditto_kernel::{DittoKernel, KernelConfig, KernelError};
 use ditto_protocol::{
-    CapabilitySearchQuery, ConversationResetResponse, EventQuery, EventRecord, HealthResponse,
-    ResetConversationCommand, SubmitInputCommand, SubmitInputResponse,
+    CapabilitySearchQuery, ConversationQuery, ConversationResetResponse, ConversationView,
+    EventQuery, EventRecord, HealthResponse, ResetConversationCommand, SubmitInputCommand,
+    SubmitInputResponse,
 };
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -32,6 +33,7 @@ mod memory;
 mod runs;
 mod schedules;
 mod sorts;
+mod web;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -130,17 +132,24 @@ async fn main() -> anyhow::Result<()> {
 /// Every HTTP route. The daemon and the offline fixture server share this
 /// assembly so their surfaces cannot drift apart.
 fn api_routes(loopback: bool) -> Router<AppState> {
-    Router::new()
+    let routes = Router::new()
         .merge(memory::routes())
         .merge(runs::routes())
         .merge(schedules::routes(loopback))
         .merge(sorts::routes(loopback))
+        .merge(web::routes())
         .route("/health", get(health))
         .route("/v1/commands/input", post(submit_input))
         .route("/v1/commands/conversation/reset", post(reset_conversation))
+        .route("/v1/conversation", get(conversation))
         .route("/v1/events", get(list_events))
         .route("/v1/stream", get(stream_events))
-        .route("/v1/capabilities", get(capabilities))
+        .route("/v1/capabilities", get(capabilities));
+    if loopback {
+        routes.layer(axum::middleware::from_fn(web::loopback_host_only))
+    } else {
+        routes
+    }
 }
 
 fn validate_bind(bind: SocketAddr, allow_unauthenticated_remote: bool) -> anyhow::Result<()> {
@@ -175,6 +184,13 @@ async fn reset_conversation(
 ) -> Result<(StatusCode, Json<ConversationResetResponse>), ApiError> {
     let reset = state.kernel.reset_conversation(command)?;
     Ok((StatusCode::CREATED, Json(reset)))
+}
+
+async fn conversation(
+    State(state): State<AppState>,
+    Query(query): Query<ConversationQuery>,
+) -> Result<Json<ConversationView>, ApiError> {
+    Ok(Json(state.kernel.conversation_view(query)?))
 }
 
 async fn list_events(

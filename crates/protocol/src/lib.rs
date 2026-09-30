@@ -368,6 +368,38 @@ pub struct ConversationResetResponse {
     pub event_seq: i64,
 }
 
+/// Most exchanges one conversation view returns.
+pub const MAX_CONVERSATION_VIEW_EXCHANGES: usize = 50;
+
+/// Read the session's current thread for display. `limit` defaults to and is
+/// clamped by [`MAX_CONVERSATION_VIEW_EXCHANGES`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationQuery {
+    pub session_id: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// One finished agent-run exchange of the current thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationExchange {
+    pub task_id: String,
+    pub turn_id: String,
+    pub user: String,
+    pub assistant: String,
+    pub finished_seq: i64,
+}
+
+/// The newest finished exchanges after the latest reset, oldest first. Every
+/// event through `through_seq` was considered, so a follower streams after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationView {
+    pub session_id: String,
+    pub exchanges: Vec<ConversationExchange>,
+    pub through_seq: i64,
+}
+
 pub const MAX_USER_MEMORY_BYTES: usize = 4_096;
 pub const MAX_USER_MEMORY_PAGE_SIZE: usize = 100;
 
