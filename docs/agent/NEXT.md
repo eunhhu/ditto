@@ -5,15 +5,13 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-Task 016 is complete as a bounded corpus measurement: five fixed synthetic
-lexical ContextCapsule cases pass after restart at zero and 1,000 unrelated
-memories, with exact ordered expectations and durable query/identity evidence.
-This does not establish the first personal-agent milestone. Next, define broader
-personal-task outcomes and representative evaluation needs before claiming that
-milestone or adding another runtime surface. Model-answer quality, task
-completion, semantic recall, tool-task success, live cost, first useful progress,
-general agent quality and v0.1 readiness remain unavailable/open. General
-approval fulfillment remains deferred.
+Task 017 is the active [personal-task outcomes and evaluation
+specification](tasks/017-evaluation-outcomes.md). It defines representative
+semantic recall, answer-quality, tool/schedule, safety, resource and cost/latency
+evaluation needs after Task 016's bounded lexical corpus. This is a specification
+only: the broader suite, calibrated budgets, live model-answer assessment,
+semantic retrieval, tool-task success and v0.1 readiness are not verified.
+General approval fulfillment remains deferred.
 
 ## Completed
 
