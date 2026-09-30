@@ -30,6 +30,11 @@ and checks establish a new fact.
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
   are done. Model-invoked memory saving (024) awaits the user's decision
   because it reverses ADR 0015's exclusion of model tool invocation.
+- Still on 2026-09-30 the user asked for the thinnest harness designed around
+  concurrency, real-time streaming and context injection timing and scope. The
+  design ([realtime-harness](../design/realtime-harness.md), ADR 0028
+  proposed) is committed on `dev/design-realtime-harness`; nothing of it is
+  implemented.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
   validator wording. The user prioritized fixing both, trimming process
@@ -146,6 +151,16 @@ and checks establish a new fact.
   passed on its final tree (532 Rust tests).
 
 ## Known gaps
+
+- Measured harness baseline (2026-09-30, Raspberry Pi 5, release build,
+  instant loopback model, `scripts/measure-harness.py`):
+  - 5–10 ms of work before dispatch;
+  - 74–80 µs and one SQLite transaction per streamed delta, 206 or 1,006
+    events per turn, 81–107 journal bytes per answer byte;
+  - median prompt prefix reuse between turns of 50.6 %;
+  - one of three simultaneous sessions accepted, the others HTTP 429.
+
+  ADR 0028's phases target each of these.
 
 - After a reload the web app restores only finished exchanges of the current
   thread: failed or cancelled turns are not restored, and a run still in
