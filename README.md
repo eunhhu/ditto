@@ -43,7 +43,8 @@ The executable foundation includes:
   working-set retrieval, with production lexical ranking and an explicit
   injected embedding seam for tests and explicit local composition;
 - orthogonal effect profiles and fail-closed lease primitives;
-- versioned provider-neutral model IR, a closed OpenAI Responses adapter, and an
+- versioned provider-neutral model IR, a closed OpenAI Responses adapter, an
+  OpenAI-compatible chat adapter for local and hosted models, and an
   injected-driver read-only artifact continuation loop;
 - explicit CLI/HTTP model runs with current session context (the complete
   memory set when it fits the context budget), durable retry identity,
@@ -64,8 +65,8 @@ The executable foundation includes:
   model-facing capsules after restart, comparing minimal and longer histories;
 - repository-native instructions for long-running coding agents.
 
-Calendar cron, indefinite repeats, scheduled effect grants, additional model
-providers, general effectful model-tool continuation, SSH, a production embedding
+Calendar cron, indefinite repeats, scheduled effect grants, general effectful
+model-tool continuation, SSH, a production embedding
 worker/cache, authenticated remote gateways, additional completion verifiers, and the
 improvement compiler are still deferred. They are not represented by fake
 success paths.
@@ -100,13 +101,31 @@ The daemon refuses non-loopback binding without the explicitly unsafe
 `--allow-unauthenticated-remote` escape hatch. That flag does not add
 authentication; use loopback until an authenticated gateway exists.
 
-To answer requests, explicitly start the daemon with `--provider openai` and
-provide `OPENAI_API_KEY` through its environment. This selects the existing
-closed `gpt-5.6` adapter and may incur provider charges. The default is
+To answer requests, start the daemon with an explicit provider. The default is
 `--provider disabled`; input recording, memory operations, and schedule maintenance
 make no model calls. With an enabled provider, startup can dispatch previously
 accepted due schedules inside their start windows. Model execution requires loopback even with the
 remote escape hatch.
+
+`--provider openai-compatible` works with any server exposing the
+OpenAI-compatible `/chat/completions` API, including free local models. Give the
+API root and model name. Plain HTTP is accepted only for loopback hosts. A
+hosted provider's key is read only from `DITTO_MODEL_API_KEY`, and hosted calls
+may incur provider charges. Tools need a model with function calling;
+`--include-usage` asks for token usage if the server supports it.
+
+```bash
+# Local model through Ollama (no key, no cost)
+cargo run -p ditto-daemon -- --provider openai-compatible \
+  --base-url http://127.0.0.1:11434/v1 --model qwen2.5:7b
+
+# Hosted, for example xAI or OpenRouter
+DITTO_MODEL_API_KEY=... cargo run -p ditto-daemon -- --provider openai-compatible \
+  --base-url https://api.x.ai/v1 --model grok-4
+```
+
+`--provider openai` with `OPENAI_API_KEY` in the daemon environment selects the
+closed `gpt-5.6` Responses adapter and may incur provider charges.
 
 ```bash
 cargo run -p ditto-cli -- run "What is my meeting preference?"

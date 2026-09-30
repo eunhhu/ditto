@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. [ADR 0023](0023-openai-compatible-provider.md) adds a separate
+OpenAI-compatible chat driver to the same crate; this profile is unchanged.
 
 ## Context
 

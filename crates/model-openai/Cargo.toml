@@ -20,5 +20,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["io-util"] }
 ditto-capability = { path = "../capability" }
 ditto-context = { path = "../context" }

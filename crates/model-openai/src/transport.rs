@@ -47,13 +47,13 @@ impl OpenAiApiKey {
         Ok(Self(value))
     }
 
-    fn authorization_value(&self) -> Result<HeaderValue, OpenAiTransportError> {
+    pub(crate) fn authorization_value(&self) -> Result<HeaderValue, OpenAiTransportError> {
         HeaderValue::from_str(&format!("Bearer {}", self.0)).map_err(|_| {
             OpenAiTransportError::protocol("configured API key is not a valid authorization header")
         })
     }
 
-    fn sanitize_error(&self, value: &str) -> String {
+    pub(crate) fn sanitize_error(&self, value: &str) -> String {
         sanitize_credential_text(value, &self.0)
     }
 }
@@ -77,6 +77,10 @@ pub enum OpenAiConfigError {
     HttpClient { message: String },
     #[error("OpenAI retry policy is outside its bounded attempt/delay limits")]
     InvalidRetryPolicy,
+    #[error("chat completions endpoint is invalid: {reason}")]
+    InvalidEndpoint { reason: &'static str },
+    #[error("model name must be non-empty, bounded, and contain no controls or surrounding space")]
+    InvalidModel,
 }
 
 /// Non-secret transport headers scoped to one OpenAI organization/project.
@@ -434,7 +438,11 @@ impl OpenAiTransport for OpenAiReqwestTransport {
 }
 
 fn classify_reqwest_error(error: reqwest::Error, api_key: &OpenAiApiKey) -> OpenAiTransportError {
-    let message = api_key.sanitize_error(&error.to_string());
+    classify_error(&error, api_key.sanitize_error(&error.to_string()))
+}
+
+/// Classify a transport error whose message was already credential-sanitized.
+pub(crate) fn classify_error(error: &reqwest::Error, message: String) -> OpenAiTransportError {
     if error.is_timeout() {
         OpenAiTransportError::timeout(message)
     } else if error.is_connect() {
