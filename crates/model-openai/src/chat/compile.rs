@@ -188,9 +188,16 @@ fn system_message(request: &ModelRequest) -> Result<String, CompileError> {
     Ok(parts.join("\n\n"))
 }
 
+/// One text part is sent as is and one structured part (such as a tool
+/// result) as its canonical JSON; anything else is tagged.
 fn render_content(content: &[ContentPart]) -> Result<String, CompileError> {
-    if let [ContentPart::Text { text }] = content {
-        return Ok(text.clone());
+    match content {
+        [ContentPart::Text { text }] => return Ok(text.clone()),
+        [ContentPart::Structured { value }] => {
+            return serde_json::to_string(&canonical(value))
+                .map_err(|error| CompileError::Serialization(error.to_string()));
+        }
+        _ => {}
     }
     let tagged = content
         .iter()

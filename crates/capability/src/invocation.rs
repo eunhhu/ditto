@@ -26,6 +26,8 @@ pub const MAX_DERIVER_ERROR_BYTES: usize = 4096;
 
 const ARTIFACT_PREFIX: &str = "artifact:sha256:";
 const ARTIFACT_RESOURCE_FAMILY: &str = "artifact:{artifact_id}";
+const URL_RESOURCE_FAMILY: &str = "url:{url}";
+const MAX_URL_RESOURCE_BYTES: usize = 2_048;
 
 /// Strict, authority-free model tool-call input.
 ///
@@ -701,11 +703,52 @@ impl Serialize for CanonicalPathResource {
     }
 }
 
+/// An http(s) URL in the canonical spelling of the capability that fetches
+/// it. This type fixes only its shape: printable ASCII, an http(s) scheme, no
+/// fragment, at most 2 KiB.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UrlResourceId(String);
+
+impl UrlResourceId {
+    pub fn new(value: impl Into<String>) -> Result<Self, CanonicalResourceError> {
+        let value = value.into();
+        if !(value.starts_with("https://") || value.starts_with("http://"))
+            || value.len() > MAX_URL_RESOURCE_BYTES
+            || !value.bytes().all(|byte| byte.is_ascii_graphic())
+            || value.contains('#')
+        {
+            return Err(CanonicalResourceError::InvalidUrl);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for UrlResourceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("url:")?;
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Serialize for UrlResourceId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum CanonicalResource {
     Artifact(ArtifactResourceId),
     Path(CanonicalPathResource),
+    Url(UrlResourceId),
 }
 
 impl CanonicalResource {
@@ -713,10 +756,14 @@ impl CanonicalResource {
         ArtifactResourceId::new(value).map(Self::Artifact)
     }
 
+    pub fn url(value: impl Into<String>) -> Result<Self, CanonicalResourceError> {
+        UrlResourceId::new(value).map(Self::Url)
+    }
+
     pub fn as_artifact(&self) -> Option<&ArtifactResourceId> {
         match self {
             Self::Artifact(resource) => Some(resource),
-            Self::Path(_) => None,
+            Self::Path(_) | Self::Url(_) => None,
         }
     }
 }
@@ -726,6 +773,7 @@ impl fmt::Display for CanonicalResource {
         match self {
             Self::Artifact(resource) => resource.fmt(formatter),
             Self::Path(resource) => resource.fmt(formatter),
+            Self::Url(resource) => resource.fmt(formatter),
         }
     }
 }
@@ -748,6 +796,8 @@ pub enum CanonicalResourceError {
     ExpectedRelativePath,
     #[error("path resource is outside the canonical root")]
     PathOutsideRoot,
+    #[error("URL resource is not a bounded printable http(s) URL without fragment")]
+    InvalidUrl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -1161,6 +1211,8 @@ fn validate_derived_resources(
             declaration == &resource.to_string()
                 || matches!(resource, CanonicalResource::Artifact(_))
                     && declaration == ARTIFACT_RESOURCE_FAMILY
+                || matches!(resource, CanonicalResource::Url(_))
+                    && declaration == URL_RESOURCE_FAMILY
         });
         if !declared {
             return Err(InvocationError::ResourceDeclarationMismatch);

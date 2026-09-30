@@ -68,6 +68,8 @@ complements = ["artifact.read"]
 
 [effects]
 resources = ["device:{device_id}", "path:{cwd}/**"]
+# Families the invocation compiler matches by kind: "artifact:{artifact_id}"
+# and "url:{url}" (an exact canonical http(s) URL, ADR 0027).
 
 [effects.minimum]
 access = "metadata"

@@ -15,7 +15,7 @@ use crate::KernelError;
 /// context with the complete-set selection (ADR 0021) and records a typed
 /// [`TurnFailureReason`] for validator-derived failures. Version 3 prepends the
 /// current conversation thread's recent exchanges to agent runs (ADR 0022).
-pub const TURN_PAYLOAD_VERSION: u16 = 4;
+pub const TURN_PAYLOAD_VERSION: u16 = 5;
 /// Oldest turn contract that replay and run status still read. Version-1
 /// turns use positive-overlap context selection and message grammar.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -50,6 +50,9 @@ pub struct CapabilitiesSelectedPayload {
     pub manifest: CapabilityManifest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_manifest: Option<CapabilityManifest>,
+    /// Version 5: `web.fetch`, paged when the user's message holds URLs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_manifest: Option<CapabilityManifest>,
     pub epoch: ExecutionEpochEvidence,
     pub schemas: Vec<CapabilitySchema>,
 }
@@ -285,6 +288,8 @@ pub struct ReplayedReadOnlyTurn {
     pub calls: Vec<ReplayedArtifactReadCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sort_calls: Vec<super::sort::ReplayedSortCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fetch_calls: Vec<super::fetch::ReplayedFetchCall>,
     pub terminal: ArtifactReadTurnReplay,
     pub sequence_span: TurnSequenceSpan,
 }

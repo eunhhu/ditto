@@ -32,7 +32,9 @@ impl ResourceScope {
         match (self, resource) {
             (Self::Exact(expected), actual) => expected == actual,
             (Self::PathSubtree(root), CanonicalResource::Path(path)) => root.contains(path),
-            (Self::PathSubtree(_), CanonicalResource::Artifact(_)) => false,
+            (Self::PathSubtree(_), CanonicalResource::Artifact(_) | CanonicalResource::Url(_)) => {
+                false
+            }
         }
     }
 }

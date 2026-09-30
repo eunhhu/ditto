@@ -94,11 +94,22 @@ fn compile_projects_messages_tools_and_controls_deterministically() {
     );
     assert_eq!(body["messages"][3]["role"], "tool");
     assert_eq!(body["messages"][3]["tool_call_id"], "call_1");
-    assert!(
-        body["messages"][3]["content"]
-            .as_str()
-            .unwrap()
-            .starts_with("DITTO_CONTENT_V1\n")
+    // A single structured tool result is plain canonical JSON.
+    assert_eq!(body["messages"][3]["content"], "{\"ok\":true}");
+    let mixed = self::request(vec![ConversationItem::Message {
+        role: MessageRole::User,
+        content: vec![
+            ContentPart::Text {
+                text: "sort".into(),
+            },
+            ContentPart::Structured {
+                value: json!({"b": 1, "a": 2}),
+            },
+        ],
+    }]);
+    assert_eq!(
+        self::body(&mixed, false)["messages"][1]["content"],
+        "DITTO_CONTENT_V1\n[{\"text\":\"sort\",\"type\":\"text\"},{\"type\":\"structured\",\"value\":{\"a\":2,\"b\":1}}]"
     );
     assert_eq!(body["tools"][0]["function"]["name"], "artifact_read");
     assert_eq!(body["tool_choice"], "auto");

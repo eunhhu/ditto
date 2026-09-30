@@ -19,6 +19,7 @@ ditto-model = { path = "../model" }
 ditto-policy = { path = "../policy" }
 ditto-protocol = { path = "../protocol" }
 ditto-retrieval = { path = "../retrieval" }
+ditto-web-fetch = { path = "../web-fetch" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true

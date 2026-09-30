@@ -35,7 +35,7 @@ pub use invocation::{
     EpochAuthorizationTicket, IdempotencyKey, InvocableCapabilityBinding, InvocationCompiler,
     InvocationDigest, InvocationError, InvocationId, LiveExecutionEpoch, ManifestDigest,
     ResolvedPlacement, SchemaDigest, ToolCallId, UntrustedToolCall, UntrustedToolCallError,
-    canonical_manifest_digest, canonical_schema_digest,
+    UrlResourceId, canonical_manifest_digest, canonical_schema_digest,
 };
 pub use schema_instance::{
     InvocationSchemaError, MAX_INVOCATION_ARGUMENT_BYTES, MAX_INVOCATION_SCHEMA_BYTES,

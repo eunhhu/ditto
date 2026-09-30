@@ -55,6 +55,9 @@ pub struct KernelConfig {
     pub capabilities_dir: PathBuf,
     pub event_buffer: usize,
     pub artifact_max_object_bytes: u64,
+    /// Reach of `web.fetch` for links in the user's message; `None` never
+    /// offers the tool (ADR 0027).
+    pub web_fetch: Option<ditto_web_fetch::FetchPolicy>,
 }
 
 impl KernelConfig {
@@ -64,6 +67,7 @@ impl KernelConfig {
             capabilities_dir: capabilities_dir.into(),
             event_buffer: 1_024,
             artifact_max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            web_fetch: Some(ditto_web_fetch::FetchPolicy::public_only()),
         }
     }
 }
@@ -133,6 +137,7 @@ struct KernelInner {
     agent_runs: Mutex<agent_run::RunSlot>,
     scheduler_wake: tokio::sync::Notify,
     scheduler_state: std::sync::atomic::AtomicU8,
+    web_fetch: Option<ditto_web_fetch::FetchPolicy>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -193,6 +198,7 @@ impl DittoKernel {
                 agent_runs: Mutex::new(agent_run::RunSlot::default()),
                 scheduler_wake: tokio::sync::Notify::new(),
                 scheduler_state: std::sync::atomic::AtomicU8::new(0),
+                web_fetch: config.web_fetch,
             }),
         })
     }

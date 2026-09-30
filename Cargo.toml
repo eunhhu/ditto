@@ -16,6 +16,7 @@ members = [
   "crates/policy",
   "crates/protocol",
   "crates/retrieval",
+  "crates/web-fetch",
 ]
 default-members = ["apps/cli", "apps/daemon"]
 

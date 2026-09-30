@@ -57,6 +57,9 @@ The executable foundation includes:
 - a Telegram gateway (`ditto telegram`) for allowed private chats: streamed
   answers with a stop button, memory commands, and delivery of scheduled
   results, with the bot token kept out of the daemon;
+- reading links: when a message contains http(s) URLs, the model may fetch
+  those pages (and only those) as bounded text, with public addresses only and
+  every fetch journaled;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - model-directed sorting of one explicitly attached file, with separate permission
@@ -189,6 +192,13 @@ including newlines displayed as `\n`, so content cannot impersonate status lines
 The model is told it is the user's personal assistant, what the memory block
 means, what it cannot do (such as saving memories itself), and the current
 local time; set `TZ` for the daemon if the machine's zone is not yours.
+
+Links in a message can be read: "Summarize https://example.com/article" lets
+the model fetch that page, and only pages linked in the message. Fetches
+reach public addresses only (never this machine or the local network), follow
+at most five redirects and return at most 24,000 characters of text; pages
+that need JavaScript or a login yield little. Start the daemon with
+`--disable-web-fetch` to turn this off.
 
 Runs default to the `personal` session. Current session memory is compiled
 into context: while the whole set fits the context budget (about a dozen short
