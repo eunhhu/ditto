@@ -29,6 +29,10 @@ use super::sort::{ReplayedSortCall, SortGrant};
 mod fetch_replay;
 use super::fetch::ReplayedFetchCall;
 
+#[path = "recall_replay.rs"]
+mod recall_replay;
+use super::recall::ReplayedRecallCall;
+
 use super::run::turn_signature;
 use super::shared::{
     Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, RequestInputs, agent_run_text,
@@ -210,6 +214,12 @@ struct ReplayProjector<'turn, 'snapshot> {
     fetch_selected: bool,
     fetch_claims: u32,
     fetch_calls: Vec<ReplayedFetchCall>,
+    /// Whether the recorded selection paged `memory.search`.
+    memory_selected: bool,
+    /// Version 8: the memories `memory.search` read, rebuilt at the first
+    /// search.
+    recall_space: Option<Vec<ditto_context::ContextNode>>,
+    recall_calls: Vec<ReplayedRecallCall>,
     events: &'turn [EventRecord],
     snapshot: &'snapshot [EventRecord],
     index: usize,
@@ -344,6 +354,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             fetch_selected: false,
             fetch_claims: 0,
             fetch_calls: Vec::new(),
+            memory_selected: false,
+            recall_space: None,
+            recall_calls: Vec::new(),
             events,
             snapshot,
             index: 1,
@@ -508,6 +521,29 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             expected_cards.push(CapabilityCard::from(manifest));
             self.fetch_selected = true;
         }
+        if let Some(manifest) = &selected.memory_manifest {
+            // Version 8 offers memory.search to every agent run.
+            if self.version.is_none_or(|version| version < 8)
+                || !self.agent_run
+                || !super::recall::validate_manifest(manifest)
+            {
+                return Err(replay_invalid(
+                    "selected memory search contradicts the turn version",
+                ));
+            }
+            let schema = super::recall::schema();
+            expected_revisions.push(
+                CapabilityRevision::from_contract(
+                    manifest,
+                    &schema,
+                    super::recall::RecallDeriver::default().revision().clone(),
+                )
+                .map_err(|error| replay_invalid(error.to_string()))?,
+            );
+            expected_schemas.push(schema);
+            expected_cards.push(CapabilityCard::from(manifest));
+            self.memory_selected = true;
+        }
         // Version 7 records no schemas: they are the builtins' own.
         let recorded_schemas = if self.version.is_some_and(|version| version >= 7) {
             selected.schemas.is_empty()
@@ -521,7 +557,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         }
         if (!selected.epoch.invocation_revisions().is_empty()
             || self.sort.is_some()
-            || self.fetch_selected)
+            || self.fetch_selected
+            || self.memory_selected)
             && selected.epoch.invocation_revisions() != expected_revisions
         {
             return Err(replay_invalid("selected invocation revisions changed"));
@@ -721,6 +758,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         if capability_id != ARTIFACT_READ_ID
                             && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
                             && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
+                            && !(self.memory_selected && capability_id == super::recall::ID)
                         {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
@@ -771,6 +809,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         if capability_id != ARTIFACT_READ_ID
                             && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
                             && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
+                            && !(self.memory_selected && capability_id == super::recall::ID)
                         {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
@@ -954,6 +993,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         if let Some(failure) = self.replay_sort_call(request_index as u8, &call)? {
                             return Ok(ArtifactReadTurnReplay::Failed { failure });
                         }
+                        request_index += 1;
+                        continue;
+                    }
+                    if call.capability_id == super::recall::ID {
+                        self.replay_recall_call(request_index as u8, &call)?;
                         request_index += 1;
                         continue;
                     }
@@ -1383,6 +1427,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             calls: self.calls,
             sort_calls: self.sort_calls,
             fetch_calls: self.fetch_calls,
+            recall_calls: self.recall_calls,
             terminal,
 
             sequence_span: TurnSequenceSpan {

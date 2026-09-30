@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeSet,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -39,6 +39,9 @@ mod sort_tool;
 #[path = "fetch_run.rs"]
 mod fetch_tool;
 
+#[path = "recall_run.rs"]
+mod recall_tool;
+
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
@@ -71,6 +74,8 @@ pub(super) struct TurnScope {
     fetch_offered: bool,
     /// URLs from the user's message that `web.fetch` may read.
     fetch: Vec<String>,
+    /// Whether `memory.search` is offered: from version 8, to every agent run.
+    memory_offered: bool,
     /// Prelude transitions awaiting the turn's next append, which commits
     /// them with it in one transaction (ADR 0028 Phase B).
     staged: RefCell<Vec<(String, NewEvent)>>,
@@ -110,6 +115,11 @@ struct TurnRun<'d> {
     /// The host's UTC offset recorded with the context; it fixes the local
     /// time the latest message's note states.
     utc_offset_minutes: i32,
+    /// The compilation and the session snapshot it chose from, kept without
+    /// copying for `memory.search`.
+    recall_source: Option<(CompiledContext, Arc<[ditto_context::ContextNode]>)>,
+    /// The memories `memory.search` reads, gathered at the first search.
+    recall_space: Option<Vec<ditto_context::ContextNode>>,
 }
 
 /// The sealed execution epoch and the authority derived from it.
@@ -252,6 +262,7 @@ pub(crate) struct ToolContracts {
     read: OnceLock<InvocableContract>,
     fetch: OnceLock<InvocableContract>,
     sort: OnceLock<InvocableContract>,
+    memory: OnceLock<InvocableContract>,
 }
 
 fn cached_contract<E>(
@@ -306,6 +317,7 @@ impl DittoKernel {
                 .as_ref()
                 .and_then(|metadata| metadata.sort.clone()),
             fetch_offered: agent_run.is_some() && self.inner.web_fetch.is_some(),
+            memory_offered: agent_run.is_some(),
             fetch: if agent_run.is_some() && self.inner.web_fetch.is_some() {
                 super::fetch::grant(&text)
             } else {
@@ -376,6 +388,8 @@ impl DittoKernel {
             driver,
             system_prefix: StableSystemPrefix::default(),
             utc_offset_minutes: 0,
+            recall_source: None,
+            recall_space: None,
         };
 
         self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
@@ -395,14 +409,18 @@ impl DittoKernel {
         context_candidates: Option<impl IntoIterator<Item = ContextCandidate>>,
         input_event: &EventRecord,
     ) -> Result<(ContextCapsule, Vec<HistoryExchange>), TurnRunError> {
-        let (context_candidates, sources_verified) = match context_candidates {
-            Some(candidates) => (candidates.into_iter().collect(), false),
+        let (context_candidates, sources_verified, snapshot) = match context_candidates {
+            Some(candidates) => (candidates.into_iter().collect(), false, None),
             None => match self.agent_context_candidates(
                 &run.scope.session_id,
                 &run.scope.task_id,
                 run.accepted_at,
             ) {
-                Ok(context) => (context.candidates, context.sources_verified),
+                Ok(context) => (
+                    context.candidates,
+                    context.sources_verified,
+                    Some(context.nodes),
+                ),
                 Err(_) => {
                     return Err(self.fail_with(
                         run,
@@ -469,24 +487,28 @@ impl DittoKernel {
             Some(utc_offset_minutes),
         )
         .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
+        let payload = ContextCompiledPayload {
+            event_version: TURN_PAYLOAD_VERSION,
+            turn_id: run.scope.turn_id.clone(),
+            provenance_through_seq,
+            compiled,
+            capsule: None,
+            history_turn_ids: history
+                .iter()
+                .map(|exchange| exchange.turn_id.clone())
+                .collect(),
+            utc_offset_minutes: Some(utc_offset_minutes),
+        };
         self.stage_turn_event(
             run,
             EventActor::System,
             event_kind::CONTEXT_COMPILED,
-            &ContextCompiledPayload {
-                event_version: TURN_PAYLOAD_VERSION,
-                turn_id: run.scope.turn_id.clone(),
-                provenance_through_seq,
-                compiled,
-                capsule: None,
-                history_turn_ids: history
-                    .iter()
-                    .map(|exchange| exchange.turn_id.clone())
-                    .collect(),
-                utc_offset_minutes: Some(utc_offset_minutes),
-            },
+            &payload,
             None,
         )?;
+        if run.scope.memory_offered {
+            run.recall_source = Some((payload.compiled, snapshot.unwrap_or_default()));
+        }
         Ok((capsule, history))
     }
 
@@ -528,8 +550,34 @@ impl DittoKernel {
             run.scope.fetch_offered = false;
             run.scope.fetch.clear();
         }
+        // An unavailable or altered memory.search package withdraws the tool.
+        let memory = if run.scope.memory_offered {
+            cached_contract(&self.inner.tool_contracts.memory, || {
+                self.inner
+                    .capabilities
+                    .page_manifest(super::recall::ID)
+                    .ok()
+                    .flatten()
+                    .filter(super::recall::validate_manifest)
+                    .and_then(|manifest| {
+                        InvocableContract::new(
+                            &manifest,
+                            &super::recall::schema(),
+                            super::recall::RecallDeriver::default().revision().clone(),
+                        )
+                        .ok()
+                    })
+                    .ok_or(())
+            })
+            .ok()
+        } else {
+            None
+        };
+        run.scope.memory_offered = memory.is_some();
         let mut live_epoch = LiveExecutionEpoch::new(
-            1 + usize::from(run.scope.sort.is_some()) + usize::from(fetch.is_some()),
+            1 + usize::from(run.scope.sort.is_some())
+                + usize::from(fetch.is_some())
+                + usize::from(memory.is_some()),
         );
         let paged = live_epoch.page_in_contract(read).map_err(|error| {
             self.fail_with(
@@ -609,6 +657,11 @@ impl DittoKernel {
                 TurnRunError::Internal("fetch capability could not enter the live epoch")
             })?;
         }
+        if let Some(contract) = memory {
+            live_epoch.page_in_contract(contract).map_err(|_| {
+                TurnRunError::Internal("memory search could not enter the live epoch")
+            })?;
+        }
         let authorization_ticket = live_epoch.seal_for_authorization().map_err(|error| {
             self.fail_with(
                 run,
@@ -637,8 +690,10 @@ impl DittoKernel {
         let mut schemas = vec![binding.schema().clone()];
         schemas.extend(sort.map(|contract| contract.schema().clone()));
         schemas.extend(fetch.map(|contract| contract.schema().clone()));
+        schemas.extend(memory.map(|contract| contract.schema().clone()));
         let sort_manifest = sort.map(|contract| contract.manifest().clone());
         let fetch_manifest = fetch.map(|contract| contract.manifest().clone());
+        let memory_manifest = memory.map(|contract| contract.manifest().clone());
         self.stage_turn_event(
             run,
             EventActor::System,
@@ -649,6 +704,7 @@ impl DittoKernel {
                 manifest,
                 sort_manifest,
                 fetch_manifest,
+                memory_manifest,
                 epoch: live_epoch.evidence().clone(),
                 schemas: Vec::new(),
             },
@@ -1293,6 +1349,27 @@ impl DittoKernel {
                 )
                 .await?;
             (result.model_value(), result.is_error())
+        } else if call.capability_id == super::recall::ID {
+            let binding = tools
+                .live_epoch
+                .invocable_binding(super::recall::ID)
+                .ok_or(TurnRunError::Internal("missing memory search binding"))?;
+            let space = run
+                .recall_space
+                .get_or_insert_with(|| match &run.recall_source {
+                    Some((compiled, snapshot)) => super::recall_space(compiled, snapshot.iter()),
+                    None => Vec::new(),
+                });
+            let result = self.run_recall_tool(
+                &run.scope,
+                &mut run.cause,
+                request_index as u8,
+                &call,
+                binding,
+                &tools.authorizer,
+                space,
+            )?;
+            (result.model_value(), result.is_error())
         } else if call.capability_id == ditto_artifact_sort::ID {
             let binding = tools
                 .live_epoch
@@ -1606,6 +1683,7 @@ impl DittoKernel {
         if capability_id == ARTIFACT_READ_ID
             || (run.scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
             || (run.scope.fetch_offered && capability_id == ditto_web_fetch::ID)
+            || (run.scope.memory_offered && capability_id == super::recall::ID)
         {
             return Ok(());
         }

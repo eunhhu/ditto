@@ -38,6 +38,8 @@ use tempfile::TempDir;
 mod agent_runs;
 #[path = "read_only_turn/model_sort.rs"]
 mod model_sort;
+#[path = "read_only_turn/recall.rs"]
+mod recall;
 #[path = "read_only_turn/reuse.rs"]
 mod reuse;
 #[path = "read_only_turn/sessions.rs"]
@@ -255,6 +257,8 @@ impl ModelDriver for OutputBudgetDriver {
 
 struct Fixture {
     _directory: TempDir,
+    /// A private capabilities directory, kept while manifests may be paged.
+    _capabilities: Option<TempDir>,
     config: KernelConfig,
     kernel: DittoKernel,
 }
@@ -304,14 +308,39 @@ impl Fixture {
     }
 
     fn with_web_fetch(web_fetch: Option<ditto_web_fetch::FetchPolicy>) -> Self {
-        let directory = tempfile::tempdir().expect("temporary directory");
         let capabilities =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities");
+        Self::with_capabilities(capabilities, web_fetch)
+    }
+
+    /// Only `artifact.read` installed: the tool surface of every version.
+    fn artifact_read_only() -> Self {
+        let installed = tempfile::tempdir().expect("capabilities directory");
+        let package = installed.path().join("core/artifact-read");
+        fs::create_dir_all(&package).expect("package directory");
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../capabilities/core/artifact-read");
+        for file in ["capability.toml", ditto_capability::PACKAGE_HEADER_FILENAME] {
+            fs::copy(source.join(file), package.join(file)).expect("copy package file");
+        }
+        let root = installed.path().to_owned();
+        Self {
+            _capabilities: Some(installed),
+            ..Self::with_capabilities(root, None)
+        }
+    }
+
+    fn with_capabilities(
+        capabilities: std::path::PathBuf,
+        web_fetch: Option<ditto_web_fetch::FetchPolicy>,
+    ) -> Self {
+        let directory = tempfile::tempdir().expect("temporary directory");
         let mut config = KernelConfig::new(directory.path().join("data"), capabilities);
         config.web_fetch = web_fetch;
         let kernel = DittoKernel::open(config.clone()).expect("open kernel");
         Self {
             _directory: directory,
+            _capabilities: None,
             config,
             kernel,
         }
@@ -543,8 +572,9 @@ async fn run_success(
 async fn successful_two_request_continuation_persists_exact_epoch_schema_history_and_replays() {
     let fixture = Fixture::new();
     let loaded = fixture.kernel.capability_load_metrics();
-    // artifact.read, artifact.sort, device.process.run and web.fetch.
-    assert_eq!(loaded.headers_read, 4);
+    // artifact.read, artifact.sort, device.process.run, memory.search and
+    // web.fetch.
+    assert_eq!(loaded.headers_read, 5);
     assert_eq!(loaded.legacy_manifests_read, 0);
     assert_eq!(loaded.manifests_paged, 0);
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));

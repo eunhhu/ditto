@@ -13,6 +13,7 @@ use thiserror::Error;
 
 const MAX_POLICY_ID_BYTES: usize = 256;
 const STATIC_ARTIFACT_POLICY_ID: &str = "builtin.artifact-read.no-approval.v1";
+const STATIC_MEMORY_SEARCH_POLICY_ID: &str = "builtin.memory-search.no-approval.v1";
 const STATIC_ARTIFACT_PERMIT_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,18 @@ impl StaticPolicy {
             resources: resource.into_iter().collect(),
             permit_ttl: Duration::seconds(STATIC_ARTIFACT_PERMIT_SECONDS),
         })
+    }
+
+    /// No-approval policy for `memory.search`: a local read of the session's
+    /// own memories, which names no resource (ADR 0029).
+    pub fn memory_search() -> Self {
+        Self {
+            id: STATIC_MEMORY_SEARCH_POLICY_ID.into(),
+            capability_id: "memory.search".into(),
+            effect_ceiling: EffectProfile::read_content(),
+            resources: BTreeSet::new(),
+            permit_ttl: Duration::seconds(STATIC_ARTIFACT_PERMIT_SECONDS),
+        }
     }
 
     pub fn id(&self) -> &str {

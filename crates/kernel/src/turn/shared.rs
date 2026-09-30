@@ -196,8 +196,8 @@ pub(super) fn system_prefix(
             ));
             segments
         }
-        // Version 7 changes only the journal, not what the model reads.
-        (6 | 7, Some(offset)) if offset.abs() <= MAX_UTC_OFFSET_MINUTES => {
+        // Versions 7 and 8 change the journal and the tools, not the text.
+        (6..=8, Some(offset)) if offset.abs() <= MAX_UTC_OFFSET_MINUTES => {
             let mut segments = ASSISTANT_PREFIX_SEGMENTS.map(str::to_owned).to_vec();
             segments.push(WEB_CONTENT_SEGMENT.to_owned());
             segments.push(TURN_NOTE_SEGMENT.to_owned());

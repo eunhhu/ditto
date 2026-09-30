@@ -65,7 +65,15 @@ async fn model_sort_continues_with_verified_output_and_survives_restart() {
         .iter()
         .map(|tool| tool.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(tools, ["artifact.read", "artifact.sort", "web.fetch"]);
+    assert_eq!(
+        tools,
+        [
+            "artifact.read",
+            "artifact.sort",
+            "web.fetch",
+            "memory.search"
+        ]
+    );
     let initial = serde_json::to_value(&requests[0].turn.conversation).unwrap();
     assert!(initial.to_string().contains(&input));
     assert!(!initial.to_string().contains("b\\na\\nb"));
@@ -179,7 +187,7 @@ async fn no_permission_means_no_sort_schema_or_execution_even_when_text_asks_for
         .iter()
         .map(|tool| tool.id.clone())
         .collect::<Vec<_>>();
-    assert_eq!(tools, ["artifact.read", "web.fetch"]);
+    assert_eq!(tools, ["artifact.read", "web.fetch", "memory.search"]);
     fixture.kernel.shutdown_agent_runs().await.unwrap();
     let events = fixture.events_for_session("personal");
     assert!(!events.iter().any(|e| e.kind.starts_with("agent.sort.")));

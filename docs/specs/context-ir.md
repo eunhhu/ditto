@@ -146,6 +146,10 @@ text alone. Version-1 runs also
 appended the fixed text `local content read`; replay reconstructs that legacy
 query only for version-1 turns. Neither contract is semantic: at session sizes
 beyond the budget, a paraphrase without shared content words is not selected.
+From turn payload version 8, agent runs can search the nodes a compilation
+left out as irrelevant or over budget with the read-only `memory.search` tool,
+ranked by the same complete-set tokens
+([ADR 0029](../adr/0029-memory-search-tool.md)).
 
 The receipt explains source events, epistemic status, inclusion directive,
 score, derived token cost, and exclusion reason. Pinning and policy-required

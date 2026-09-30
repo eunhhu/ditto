@@ -736,8 +736,8 @@ async fn over_budget_sessions_keep_only_lexically_relevant_memory() {
 
 #[tokio::test]
 async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
-    // Without web.fetch the tool surface is the same in every version.
-    let fixture = Fixture::with_web_fetch(None);
+    // With artifact.read alone the tool surface is the same in every version.
+    let fixture = Fixture::artifact_read_only();
     let driver = ScriptedDriver::new(vec![final_script(&["hello"])]);
     let command = start_command("hello");
     fixture

@@ -112,7 +112,10 @@ async fn a_linked_page_is_read_once_and_replays_without_network() {
     assert_eq!(status.response.as_deref(), Some("Rust 2.0 shipped."));
     assert_eq!(page.hits(), 1);
     let requests = driver.requests();
-    assert_eq!(tool_ids(&requests[0]), ["artifact.read", "web.fetch"]);
+    assert_eq!(
+        tool_ids(&requests[0]),
+        ["artifact.read", "web.fetch", "memory.search"]
+    );
     let result = &tool_results(&requests[1])[0];
     assert_eq!(result["title"], "Rust news");
     assert_eq!(result["text"], "Release\n\nRust 2.0 is out.");
@@ -196,7 +199,10 @@ async fn link_free_messages_get_the_tool_without_authority_and_disabling_hides_i
     .await;
     assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
     let requests = driver.requests();
-    assert_eq!(tool_ids(&requests[0]), ["artifact.read", "web.fetch"]);
+    assert_eq!(
+        tool_ids(&requests[0]),
+        ["artifact.read", "web.fetch", "memory.search"]
+    );
     assert_eq!(
         tool_results(&requests[1])[0],
         json!({"error": "permission_denied"})
@@ -212,7 +218,10 @@ async fn link_free_messages_get_the_tool_without_authority_and_disabling_hides_i
         vec![final_script(&["I cannot open links."])],
     )
     .await;
-    assert_eq!(tool_ids(&driver.requests()[0]), ["artifact.read"]);
+    assert_eq!(
+        tool_ids(&driver.requests()[0]),
+        ["artifact.read", "memory.search"]
+    );
     assert_eq!(page.hits(), 0);
 }
 

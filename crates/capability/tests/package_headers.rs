@@ -277,7 +277,7 @@ fn bundled_headers_match_the_generator() {
         .join("../../capabilities/core")
         .canonicalize()
         .unwrap();
-    for name in ["artifact-read", "device-process-run"] {
+    for name in ["artifact-read", "device-process-run", "memory-search"] {
         let path = root.join(name);
         let expected =
             ditto_capability::generate_package_header(path.join("capability.toml")).unwrap();

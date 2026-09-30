@@ -35,6 +35,8 @@ const STRINGS = {
     deadline_exceeded: 'took too long', model_failure: 'the model failed', driver_contract: 'unsupported model response',
     protocol: 'invalid model response', bound_exceeded: 'response too large', context_compilation: 'memory could not be read',
     capability_unavailable: 'a tool is unavailable', capability_contract: 'a tool call was invalid', invalid_input: 'invalid request',
+    'memory.search': 'Searching memories…', 'web.fetch': 'Reading the linked page…',
+    'artifact.read': 'Reading the attachment…', 'artifact.sort': 'Sorting the attachment…',
   },
   ko: {
     newThread: '새 대화', memories: '기억', schedules: '예약',
@@ -64,6 +66,8 @@ const STRINGS = {
     deadline_exceeded: '시간 초과', model_failure: '모델 오류', driver_contract: '지원하지 않는 모델 응답',
     protocol: '잘못된 모델 응답', bound_exceeded: '응답이 너무 큼', context_compilation: '기억을 읽지 못함',
     capability_unavailable: '도구를 사용할 수 없음', capability_contract: '잘못된 도구 호출', invalid_input: '잘못된 요청',
+    'memory.search': '기억을 찾는 중…', 'web.fetch': '링크한 페이지를 읽는 중…',
+    'artifact.read': '첨부를 읽는 중…', 'artifact.sort': '첨부를 정렬하는 중…',
   },
 };
 const LANG = (navigator.language || 'en').toLowerCase().startsWith('ko') ? 'ko' : 'en';
@@ -194,7 +198,7 @@ function failureText(failure) {
 }
 function finishBubble(bubble, text, failure) {
   bubble.done = true;
-  bubble.body.classList.remove('typing');
+  bubble.body.classList.remove('typing', 'progress');
   if (failure) {
     bubble.node.classList.add('failed');
     bubble.body.textContent = failureText(failure);
@@ -336,11 +340,17 @@ function onEvent(event) {
       }
       if (model.type === 'text_delta') {
         bubble.text += model.text;
-        bubble.body.classList.remove('typing');
+        bubble.body.classList.remove('typing', 'progress');
         bubble.body.innerHTML = markdown(bubble.text);
         scrollToEnd();
       } else if (model.type === 'tool_call_started') {
         bubble.tool = model.capability_id;
+        // Say what the tool is doing until the model writes again.
+        if (!bubble.text) {
+          bubble.body.classList.remove('typing');
+          bubble.body.classList.add('progress');
+          bubble.body.textContent = t(model.capability_id);
+        }
       }
       return;
     }
@@ -553,7 +563,7 @@ async function inspect(taskId) {
     section(t('excluded'), [...excluded].map(([reason, count]) => [`${t(reason)}: ${count}`]));
     section(t('history'), (context.payload.history_turn_ids || []).map((turn) => [userTextByTurn.get(turn) || t('earlier')]));
   }
-  const toolKinds = { 'capability.requested': null, 'agent.fetch.requested': 'web.fetch', 'agent.sort.requested': 'artifact.sort' };
+  const toolKinds = { 'capability.requested': null, 'agent.fetch.requested': 'web.fetch', 'agent.sort.requested': 'artifact.sort', 'agent.memory.requested': 'memory.search' };
   const tools = events
     .filter((event) => event.kind in toolKinds)
     .map((event) => [toolKinds[event.kind] || event.payload.capability_id, JSON.stringify(event.payload.arguments)]);

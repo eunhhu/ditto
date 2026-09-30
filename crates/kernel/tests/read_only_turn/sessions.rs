@@ -104,13 +104,21 @@ async fn different_sessions_stream_at_once_up_to_four() {
             AgentRunStatus::Running
         );
     }
-    assert_eq!(
-        kernel
-            .start_agent_run(fifth.clone(), driver.clone())
-            .unwrap()
-            .status,
-        AgentRunStatus::Running
-    );
+    // The slot frees once the cancelled run's task ends, just after its
+    // terminal is durable; a client retries a busy start.
+    let started = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match kernel.start_agent_run(fifth.clone(), driver.clone()) {
+                Err(AgentRunError::Busy) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                result => return result.unwrap(),
+            }
+        }
+    })
+    .await
+    .expect("the freed slot admits the fifth session");
+    assert_eq!(started.status, AgentRunStatus::Running);
     streaming(&gate, 5).await;
 
     gate.release.cancel();
