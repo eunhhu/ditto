@@ -7,6 +7,74 @@ pub(super) const STABLE_PREFIX_SEGMENTS: [&str; 2] = [
     "You are Ditto's model strategy component. The harness owns context, capability authority, effects, persistence, and verification.",
     "Use only the complete capability schemas supplied for this execution epoch. A model terminal is not verified task completion.",
 ];
+/// Kernel-owned cancellation and deadline checkpoints of the turn loop.
+///
+/// Runtime and replay share these exact messages; each stage-specific pair is
+/// part of the durable failure contract, so wording changes need a new turn
+/// payload version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Checkpoint {
+    BeforeContextCompilation,
+    BeforeModelRequest,
+    AfterModelRequestPersisted,
+    AwaitingModelOutput,
+    BeforeCapabilityRequest,
+    AfterCapabilityRequest,
+    AfterExecutionStarted,
+    AfterArtifactRead,
+    AfterFinalOutput,
+}
+
+impl Checkpoint {
+    pub(super) const fn cancelled_message(self) -> &'static str {
+        match self {
+            Self::BeforeContextCompilation => "turn was cancelled before context compilation",
+            Self::BeforeModelRequest => "turn was cancelled before a model request",
+            Self::AfterModelRequestPersisted => {
+                "turn was cancelled after persisting a model request and before driver invocation"
+            }
+            Self::AwaitingModelOutput => "turn was cancelled while awaiting model output",
+            Self::BeforeCapabilityRequest => "turn was cancelled before capability request",
+            Self::AfterCapabilityRequest => {
+                "turn was cancelled after capability request and before execution started"
+            }
+            Self::AfterExecutionStarted => {
+                "turn was cancelled after execution started and before its result"
+            }
+            Self::AfterArtifactRead => {
+                "turn was cancelled after the artifact read and before its result"
+            }
+            Self::AfterFinalOutput => {
+                "turn was cancelled after final model output and before turn completion"
+            }
+        }
+    }
+
+    pub(super) const fn deadline_message(self) -> &'static str {
+        match self {
+            Self::BeforeContextCompilation => "turn deadline elapsed before context compilation",
+            Self::BeforeModelRequest => "turn deadline elapsed before a model request",
+            Self::AfterModelRequestPersisted => {
+                "turn deadline elapsed after persisting a model request and before driver invocation"
+            }
+            Self::AwaitingModelOutput => "turn deadline elapsed while awaiting model output",
+            Self::BeforeCapabilityRequest => "turn deadline elapsed before capability execution",
+            Self::AfterCapabilityRequest => {
+                "turn deadline elapsed after capability request and before execution started"
+            }
+            Self::AfterExecutionStarted => {
+                "turn deadline elapsed after execution started and before its result"
+            }
+            Self::AfterArtifactRead => {
+                "turn deadline elapsed after the artifact read and before its result"
+            }
+            Self::AfterFinalOutput => {
+                "turn deadline elapsed after final model output and before turn completion"
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ReadyCall {
     pub(super) call_id: ProviderCallId,

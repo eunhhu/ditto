@@ -65,7 +65,12 @@ and checks establish a new fact.
   `artifact.read` (plus `artifact.sort` only for a permitted attachment), runs
   at most eight model requests, journals versioned transitions (turn payload
   version 1) before publication and replays without provider or artifact I/O.
-  Answers stay `unverified`; model runs never emit `task.completed`.
+  Answers stay `unverified`; model runs never emit `task.completed`. The loop
+  is split into stage functions (context, capability selection, request
+  dispatch, stream admission, tool execution, finish); cancellation/deadline
+  checkpoint messages are one shared `Checkpoint` table used by runtime and
+  replay. The split changed no behavior: all 485 workspace tests and the five
+  built-CLI scenarios passed on 2026-09-30.
 - **Local work and schedules.** The closed `/usr/bin/sort` profile (64 KiB /
   4,096 lines, five seconds, cleared environment, private scratch,
   process-group cleanup) has an independent verifier and a sort-specific
@@ -97,9 +102,9 @@ and checks establish a new fact.
   `What is my meeting preference?`; paraphrases fail the same way. The Task
   015/016 corpus used literal queries without function words, so it could not
   detect this.
-- `continue_read_only_turn` is one ~1,250-line function whose failure paths
-  are mirrored by replay; replay validates validator-derived failure text by
-  string grammar.
+- Replay validates validator-derived failure text (context compiler, manifest
+  and driver-contract errors) by string grammar, so upstream wording changes
+  can invalidate recorded turns.
 - The scheduler sleeps on a monotonic timer and has no resume wake-up, so a
   suspended laptop may delay or miss a start window. Not reproduced.
 
