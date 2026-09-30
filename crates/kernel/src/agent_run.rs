@@ -409,7 +409,13 @@ impl DittoKernel {
             .active
             .as_ref()
             .filter(|active| active.input_event_id == input.event_id);
+        let schedule_request_id = self
+            .inner
+            .events
+            .schedule_for_run(&query.session_id, &query.request_id)
+            .map_err(|_| AgentRunError::Storage)?;
         let mut response = AgentRunResponse {
+            schedule_request_id,
             request_id: query.request_id,
             session_id: query.session_id,
             task_id,

@@ -115,6 +115,23 @@ impl EventStore {
         Ok(entries)
     }
 
+    /// The schedule or repeat occurrence in `session` that owns a run identity.
+    pub fn schedule_for_run(
+        &self,
+        session: &str,
+        run_request: &str,
+    ) -> Result<Option<String>, EventStoreError> {
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT request_id FROM schedule_index
+                 WHERE run_request_id = ?1 AND session_id = ?2",
+                params![run_request, session],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn is_scheduled_run(&self, request: &str) -> Result<bool, EventStoreError> {
         Ok(self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM schedule_index WHERE run_request_id = ?1)",

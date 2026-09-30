@@ -471,6 +471,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "chrono",
  "clap",
  "ditto-capability",
  "ditto-kernel",
@@ -487,6 +488,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
+ "ulid",
 ]
 
 [[package]]

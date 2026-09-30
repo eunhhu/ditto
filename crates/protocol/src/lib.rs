@@ -113,6 +113,9 @@ pub struct AgentRunResponse {
     pub response: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
+    /// The schedule or repeat occurrence that started this run, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_request_id: Option<String>,
 }
 
 pub mod event_kind {

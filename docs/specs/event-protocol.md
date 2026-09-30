@@ -191,7 +191,10 @@ while the matching live token is signalled. A durable cancellation becomes
 response. If the original input exists without a terminal or live owner, state
 is `interrupted`, not success or pending automatic restart. Status inspection
 projects indexed trusted journal boundaries; complete trace verification is the
-separate existing replay API.
+separate existing replay API. A run started by a schedule or repeat occurrence
+also reports that schedule's `schedule_request_id` (additive; absent
+otherwise), so clients such as the Telegram gateway
+([ADR 0025](../adr/0025-telegram-gateway.md)) can deliver scheduled results.
 
 Only explicit operator provider selection enables dispatch. The installed
 OpenAI profile uses transport-only environment credentials and ephemeral remote

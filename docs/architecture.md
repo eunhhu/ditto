@@ -281,9 +281,11 @@ context, and active provider settings are not self-editable.
 
 - Rust: daemon, storage, context, capability index, policy, model IR, executor,
   scheduler, and protocol.
-- TypeScript/Bun: integration SDKs, browser/app connectors, and gateways.
+- TypeScript/Bun: integration SDKs and browser/app connectors.
 - Plain JavaScript: the local web app embedded in the daemon, with no build
   step; Node checks it in the gate (ADR 0024).
+- The Telegram gateway is a Rust CLI client of the public API (ADR 0025); new
+  gateways follow it unless they need a runtime the CLI lacks.
 - Python: optional out-of-process worker only for workloads that require it.
 - SQLite and local object storage: mandatory persistence.
 - MCP: external capability/resource boundary.
