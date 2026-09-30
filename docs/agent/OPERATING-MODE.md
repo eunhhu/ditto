@@ -7,7 +7,10 @@ without replacing judgment with a rigid planner pipeline.
 
 At any moment keep one active vertical slice, one explicit next action, and one
 short risk list. Record durable state in `HANDOFF.md`; do not rely on a long chat
-history to remember project facts.
+history to remember project facts. `HANDOFF.md` holds the current state only:
+replace superseded facts instead of appending per-slice history, which already
+lives in task evidence files and git. Every session reads it, so its size is a
+recurring context cost.
 
 Before reading another large file, state internally which unresolved question it
 will answer. Prefer symbol search and narrow ranges over whole-repository reads.

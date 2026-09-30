@@ -91,7 +91,9 @@ the Task 014 two-server smoke and Task 015 two-profile smoke. Local logs are
 and `recorded.log` in that directory. No test or required measurement remains
 blocked. The initial sandbox socket denial was resolved by localhost access.
 
-The full default [raw report](015-quality-history.json) was recorded at
+The full default raw report (removed from the working tree; retrieve it with
+`git show 58b2b02:docs/agent/tasks/015-quality-history.json`, SHA-256
+`3da5b170e5ac6a38c87136a8fe2a7064f5f0b9365cadbd4a753bf21701f2b6f9`) was recorded at
 `2026-09-18T02:49:37.586427+00:00`, after the gate finished. Its base Git head is
 `d1575bfd0f018bdfdee8dcccbdbd2b674d5026dd`; source digests bind the uncommitted implementation.
 Environment: `Linux-6.18.39+rpt-rpi-2712-aarch64-with-glibc2.41`, 4 CPUs, reported CPU part

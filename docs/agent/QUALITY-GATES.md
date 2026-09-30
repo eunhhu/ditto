@@ -6,8 +6,8 @@ Run the canonical gate from the repository root:
 ./scripts/agent-check.sh
 ```
 
-The script checks tracked-artifact, developer-path, and credential-shaped
-canaries before formatting, strict Clippy, workspace tests, and required agent
+The script checks tracked-artifact, raw-report, tracked-file-size (1 MiB),
+developer-path, and credential-shaped canaries before formatting, strict Clippy, workspace tests, and required agent
 control files. It also runs the five existing actual-CLI fixture scenarios,
 baseline accounting regressions and a small offline baseline scenario (two
 repeated requests per server), plus context-assessment/process regressions and
@@ -58,7 +58,7 @@ python3 scripts/test-personal-baseline.py
 python3 scripts/personal-quality.py --history-size 4 --samples 2 --output target/task016/smoke.json
 ./scripts/agent-check.sh
 cargo +1.88.0 check --offline --locked --workspace --all-targets
-python3 scripts/personal-quality.py --output docs/agent/tasks/016-personal-task-corpus.json
+python3 scripts/personal-quality.py --output target/task016/report.json
 ```
 
 Use cached dependencies/toolchains only. Set `CARGO_NET_OFFLINE=true`,
@@ -91,6 +91,15 @@ general agent quality and v0.1 readiness remain unavailable/open.
 Task 015's [report and commands](tasks/015-evidence.md) are historical and are
 **not reproduced** by the new corpus/sample semantics. Task 014 compatibility
 remains tested; no production observer or runtime change is introduced here.
+
+## Raw measurement reports
+
+Keep raw JSON reports, logs and transcripts out of the tracked tree (write them
+under `target/` or attach them to the pull request). Commit only the evidence
+summary: the command, workload settings, source/artifact identity, the measured
+values that support a claim and the report's SHA-256. The canary rejects tracked
+`docs/**/*.json` files and any tracked file above 1 MiB. Reports committed before
+this rule remain retrievable from git history, as recorded in their evidence.
 
 ## Review questions
 

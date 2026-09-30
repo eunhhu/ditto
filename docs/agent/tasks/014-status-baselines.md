@@ -50,5 +50,6 @@ repository-delivery steps outside this runtime contract.
 
 Complete for this pre-v0.1 slice. Eleven CLI regressions, eight Python regressions,
 the canonical gate and the full 12-request offline baseline passed. See
-[evidence](014-evidence.md) and the [raw measurement report](014-baseline.json).
+[evidence](014-evidence.md); the raw measurement report is retained in git
+history (`git show 58b2b02:docs/agent/tasks/014-baseline.json`).
 Live-agent quality and broader first-milestone criteria remain open.

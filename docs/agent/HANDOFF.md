@@ -1,829 +1,142 @@
 # Verified handoff
 
-## Confirmed product intent
+Current state only. Per-slice history lives in `tasks/*-evidence.md` and git;
+replace superseded facts instead of appending. Update this file only after code
+and checks establish a new fact.
 
-- On 2026-09-06, the user confirmed a personal general-purpose agent, with
-  Hermes as a positioning reference. The target problems are process memory
-  overhead, context inefficiency, memory and scheduled-job reliability,
-  long-use self-improvement degradation, task performance, and latency.
-  [Product intent](../product.md) records that clarification and separates
-  proposed measurements from implemented guarantees. This is user-provided
-  positioning, not a benchmark of Hermes or evidence of achieved superiority.
-- The user additionally made zero cost and zero overhead primary premises,
-  including implementation effort and future technical debt converging toward
-  zero. Product guidance now evaluates lifetime development and maintenance
-  burden alongside runtime efficiency. Whether eliminating external model/API
-  charges is included remains an open clarification; no free-inference policy
-  or achieved zero-cost result is asserted.
-- Product framing is now explicit in the root README and agent guidance.
-  Runtime contracts, deferred subsystems, and the Task 006 frontier are
-  unchanged by this documentation clarification.
-- Documentation verification: `rtk ./scripts/agent-check.sh` passed the canary,
-  formatting, strict Clippy, 351 unit/integration tests, and 24 compile-fail
-  doctests. The new product document passed the staged canary and diff checks;
-  all 27 local Markdown link targets across the five changed documents resolve.
+## Product intent
 
-## Canonical state
+- On 2026-09-06 the user confirmed a local-first personal general-purpose agent,
+  with Hermes as a positioning reference (not a benchmark). Target problems:
+  process memory, context efficiency, memory and scheduled-job reliability,
+  sustainable self-improvement, task performance and latency. See
+  [product intent](../product.md).
+- Zero cost and zero overhead, including implementation effort and future debt,
+  are primary premises. Whether external model/API charges must also be zero is
+  an open clarification; no zero-cost or superiority result is claimed.
 
-- Current slice: [Task 016](tasks/016-personal-task-corpus.md) on
-  `dev/task-016-personal-task-corpus`, based on
-  `5e9d5345a666bddcc85c482bd0ed5cfa9d313ed2`. Eighteen quality regressions, Task 014 compatibility, the
-  bounded smoke, full canonical gate, cached Rust 1.88 check and fifty-run
-  default report/audit passed. [Evidence](tasks/016-evidence.md) and the
-  [report](tasks/016-personal-task-corpus.json) bind the measured source and
-  artifacts. Independent review rejected permissive boolean/float version
-  equality; adversarial regressions and exact integer/full-round checks closed
-  that blocker before final review and repository delivery.
-- Task 015 [PR #20](https://github.com/eunhhu/ditto/pull/20) is **MERGED**, squash
-  commit `5e9d5345a666bddcc85c482bd0ed5cfa9d313ed2` (user-provided merge state;
-  current local HEAD agrees; no network readback). Its pre-merge implementation
-  commit was `0a272936c722409cb635d39e814b97ce4cd38b7f`, based on
-  `d1575bfd0f018bdfdee8dcccbdbd2b674d5026dd`. The final implementation head passed
-  the then-recorded local review and Linux `rust`/`msrv` CI. Task 015's
-  [evidence](tasks/015-evidence.md), [report](tasks/015-quality-history.json) and
-  old commands are historical; Task 016's five-case/repetition semantics do not
-  reproduce those measurements.
-- Previous slice: Task 014 on `dev/task-014-status-baselines`, base
-  `786a0587bdfed175579289309f9a938bb63f7424`; its
-  [evidence](tasks/014-evidence.md) and [raw baseline](tasks/014-baseline.json)
-  remain historical measurements of that source.
-- Earlier slice branch: `dev/task-013-recurring-schedules`, based on main merge
-  `e1771763fbd82ba60b830827cfed0cd436e99ad5` (Task 012, PR #17).
-  The user authorized merge and continued implementation and explicitly asked
-  for a Goal through completion. On 2026-09-09 the Goal was recreated for Task
-  013 implementation, verification, PR and merge. Task 012 is merged and its
-  final head passed [Linux CI](https://github.com/eunhhu/ditto/actions/runs/34072060758).
-  Task 013, including its final cache guard, passed local and Linux CI
-  verification. [PR #18](https://github.com/eunhhu/ditto/pull/18) records final-head
-  checks and merge state. No live paid-model call was used.
-- Runtime: Rust daemon and CLI.
-- Durable stores: SQLite event spine (schema 6 extends rebuildable schedule indexes
-  with finite-repeat progress)
-  plus local SHA-256 artifact objects. Context projection remains schema 4.
-- Public mutation ingress: typed user-input and explicit input-to-memory
-  promotion commands; arbitrary event append and trusted drafts are not public
-  routes. The memory command derives node metadata and exact user provenance.
-  Explicit run commands separately admit a bounded model turn, inspect a durable
-  request identity, or signal cancellation; ordinary input remains record-only.
-  A separate explicit sort command accepts bounded file content and unique mode,
-  with typed status/cancel and kernel-owned authority. Sort routes are loopback-only.
-  Model runs can additionally carry one exact sort attachment and a separate
-  deduplication permission. The kernel derives authority; model text cannot grant it.
-- Streaming design: subscribe-first, high-water-bounded, paginated durable
-  replay with sequence-gap and lag recovery.
-- Capability state: generated file-backed package headers with selected-only
-  full-manifest paging and explicit bounded headerless compatibility. The
-  catalogue retains headers and source paths; selected bodies must pass exact
-  byte-digest, full validation, and header-projection checks before existing
-  invocation validation. The Rust capability crate is version 0.2.0; event and
-  serialized capability versions are unchanged. It retains default-active
-  active/retired/quarantined lifecycle, active-only bounded retrieval,
-  validated complements, strict runtime hard filters, append-only bounded
-  execution-epoch evidence, and validated provider-neutral level-2 input/output
-  schema records. Provider-neutral disclosure remains structurally checked
-  Draft 2020-12 data, while live invocation accepts only the explicitly closed,
-  byte/depth/work-preflighted Ditto Invocation Schema Profile V1.
-  `ExecutionEpochEvidence` is replayable and has no invocation authority.
-  A sealed process-local `LiveExecutionEpoch` alone issues an
-  `InvocableCapabilityBinding` that owns the exact epoch ID, model-visible card,
-  manifest, schema, capability ID/version and their digests, and deriver
-  revision. Legacy card-only entries remain discoverable and replayable but
-  cannot authorize a new live invocation.
-- Context state: typed provenance graph, deterministic compiler, one cumulative
-  V2 retrieval-work budget, and a standalone rebuildable SQLite projection of
-  canonical `context.node.recorded` events. A typed source-verified snapshot is
-  distinct from a derived cache snapshot. Schema 4 binds the exact event anchor
-  and a canonical global digest to compact per-session identity, provenance,
-  causation, scope, and supersession state. Open/recovery performs bounded-page
-  full replay; normal retrieval and admission use only the checkpoint delta,
-  bounded exact source lookups, and a process-verified compact index. New
-  durable validity is millisecond-canonical while legacy version-1 source
-  events retain exact fine-precision semantics. Pinning and policy-required
-  inclusion remain trusted ephemeral directives; token cost is derived locally.
-  A compact model-facing capsule projects ordered selected nodes without
-  exposing the compiler receipt, lens, or supersession metadata; its exact
-  serialized fields are charged locally and revalidated for trust, time, and
-  the absolute budget at the model boundary. V2 embedded ordering is carried
-  only by an opaque, non-serializable context-owned ranking and is revalidated
-  after compilation.
-- Policy state: sealed canonical invocations carry only harness-derived effect,
-  typed resource, and local builtin/process placement authority. A live epoch moves
-  monotonically from paging to authorization-sealed and issues exactly one
-  non-wire, non-cloneable authorization ticket. Policy consumes that ticket
-  into one expiring ledger whose cloned handles share one mutex; dropping any
-  ticket or handle never rearms paging or creates another ledger. The daemon
-  owns no authorizer. The mutex atomically binds invocation IDs to digests,
-  evaluates a trusted static policy or harness-selected lease, consumes a
-  successful lease at most once, and issues a sealed epoch- and invocation-
-  bound permit or approval-required outcome. The closed `artifact.sort` process
-  worker consumes a sealed non-cloneable one-shot `ExecutionClaim` by value.
-  The existing bounded `artifact.read` executor still requires a
-  matching no-approval static-policy permit.
-- Model state: `ditto-model` owns version 1 of the provider-neutral request,
-  driver, and backpressured stream-event contract. It preserves ordered stable
-  prefix/volatile turn data, structured tool-call lifecycles, final structured
-  output, delta-or-cumulative usage, warnings, finish reasons, bounded redacted
-  continuation and reasoning replay state, typed generation controls, deadline,
-  and cancellation. A concrete validated stream owns sequence, terminal,
-  tool-argument, and reasoning-item lifecycle checks. Driver descriptors keep
-  exact request capabilities separate from emitted features, and the
-  deterministic fixture driver derives emitted features only from reachable
-  semantic frames. `ditto-model-openai` adds a closed `gpt-5.6` Responses
-  profile with deterministic request projection, a fixed-origin
-  redirect-disabled reqwest/rustls transport, redacted transport-only
-  credentials, bounded SSE decoding and correlation, exact model/storage/
-  continuation checks, optional-versus-required usage handling, and explicit
-  ephemeral or provider-managed remote response state. The kernel now owns an
-  injected-driver artifact-read/explicitly permitted sort continuation loop and pure replay projector;
-  provider completion still is not task completion.
+## Repository state
+
+- Base: main `58b2b02` (Task 016, PR #21). Work branch
+  `dev/task-016-1-personal-recall` preserves the drafted
+  [Task 017](tasks/017-evaluation-outcomes.md) specification unchanged.
+- On 2026-09-30 a codebase review found that production run context misses
+  paraphrased or inflected questions and admits unrelated memories (details
+  under known gaps). The user prioritized fixing it, trimming process overhead
+  and splitting the turn loop before Task 017's measured runs.
+- Raw measurement reports are no longer tracked. Tasks 014–016 reports remain
+  retrievable with `git show 58b2b02:docs/agent/tasks/<report>.json`; their
+  evidence files record the digests. The canary rejects tracked
+  `docs/**/*.json` and any tracked file above 1 MiB.
+
+## Current system
+
+- **Runtime and storage.** Rust daemon (axum, loopback by default) and CLI. The
+  SQLite event spine (schema 6) is append-only by trigger and the sole durable
+  authority; schedule and repeat indexes are projected in the same transaction.
+  Artifacts are SHA-256 content-addressed with verified reads. The context
+  projection (`context-projection.db`, schema 4) is a rebuildable,
+  digest-verified cache replayed once at open, then delta-verified.
+- **Ingress.** Typed commands only: record-only input, memory save/list/correct,
+  run/status/cancel, and loopback-only sort, schedule and repeat. Clients never
+  choose actors, kinds or internal metadata; the kernel derives all authority,
+  including an attached file's sort permission. SSE subscribes first, replays a
+  bounded high-water snapshot in pages and recovers gaps or lag from storage.
+- **Context.** Explicit memories promote exact same-session user input; a
+  correction supersedes one active memory; listing rechecks source text. Runs
+  compile the verified active session/task snapshot with the V1 lexical
+  compiler (default budget 900 estimated tokens, absolute 1,800). There is no
+  transcript injection, cross-session memory or production semantic retrieval.
+  The separate V2 joint working-set query is lexical in production with an
+  injected embedding seam for tests.
+- **Capabilities.** Generated package headers keep full manifests out of
+  startup and search; a selected manifest is paged after digest and projection
+  checks. Live invocation uses the closed Invocation Schema Profile V1 through a
+  sealed `LiveExecutionEpoch`; replayable `ExecutionEpochEvidence` carries no
+  authority. `device.process.run` is a discovery-only manifest with no runner.
+- **Policy.** Sealed canonical invocations carry harness-derived effect,
+  resource and placement. One affine ticket per epoch creates one expiring
+  ledger. `artifact.read` uses a static no-approval permit; `artifact.sort`
+  consumes a one-shot `ExecutionClaim` under an exact-resource, one-call lease.
+- **Model and turns.** `ditto-model` owns the provider-neutral request/stream
+  contract; `ditto-model-openai` is a closed `gpt-5.6` Responses profile with a
+  redacted transport-only key and ephemeral storage. The daemon defaults to a
+  disabled provider. The kernel turn loop compiles context, pages
+  `artifact.read` (plus `artifact.sort` only for a permitted attachment), runs
+  at most eight model requests, journals versioned transitions (turn payload
+  version 1) before publication and replays without provider or artifact I/O.
+  Answers stay `unverified`; model runs never emit `task.completed`.
+- **Local work and schedules.** The closed `/usr/bin/sort` profile (64 KiB /
+  4,096 lines, five seconds, cleared environment, private scratch,
+  process-group cleanup) has an independent verifier and a sort-specific
+  completion. One-shot schedules (ADR 0019) and finite repeats (ADR 0020) share
+  a bounded index of 100 future intents, one event/timer-driven scheduler,
+  at-most-once claims, visible missed/interrupted states and no automatic
+  retry or housekeeping model call. Runs, sorts and scheduled dispatch share
+  one execution slot; other immediate requests are rejected as busy.
+- **Measurement.** Task 014 recorded an offline RAM/latency/accounting
+  baseline; Tasks 015–016 recorded five literal synthetic queries at zero and
+  1,000 unrelated memories. They do not measure paraphrase recall, answer
+  quality, tool-task success, live cost or v0.1 readiness.
 
 ## Latest verified slice: Task 016
 
-- The existing standard-library harness now emits schema 2,
-  `task016-offline-personal-task-corpus-v1`, with a complete frozen corpus and
-  digest. Seven synthetic seeds and five literal queries exercise correction,
-  strict reversed trip-memory ranking, food preference and empty context.
-  Samples mean repetitions per query: smoke 20 runs, default 50 across two
-  fresh 0/1,000-noise profiles. Client request IDs are unique across profiles.
-- Actual CLI save/correct/restart/list/run paths passed with no seed/recovery
-  model/tool calls. Each default profile reconciles 25 planned inputs, model
-  requests, independent calls and observations. Exact set/order and identity
-  are 25/25, nontrivial order 10/10, micro Recall@2 and returned precision 30/30.
-  All leak numerators are zero. Empty denominators are null with reasons.
-  Durable query/session/task/turn/event/causal identity and exact observed
-  capsule bytes are checked; source provenance resolves original user input.
-- Required RED logs preceded implementation: missing assessment/reconciliation
-  API and an actual two-versus-ten request coverage failure. Local socket denial
-  was resolved through loopback execution; it was not counted as workflow RED.
-  Final review regressions also cover malformed records, full frozen rounds,
-  extra inputs, atomic publication diagnostics and cross-profile identity uniqueness. Ten assessor
-  tests plus eight workflow tests pass; Task 014's eight tests remain green.
-- The unchanged canonical gate passed canaries, format, strict Clippy, 490 Rust
-  tests, both Python suites and both smoke workloads. Cached Rust 1.88 offline
-  workspace/all-target checking passed. The final full report was generated
-  after gates and independently audited against literal expectations, raw
-  aggregates, 113 source files, three exact Cargo artifacts and the corpus hash.
-  Measured values and RED/GREEN log digests are in the task evidence.
-- Cleanup tests verify server reaping and store removal on SIGTERM before/after
-  restart, SIGINT after restart and assessment failure. Failed assessment/final
-  hash checks preserve an older report; atomic publication occurs only after
-  complete pass and final hashes. Final scope/link/canary/diff and process/store
-  audits passed; no blocker or required unrun check remains.
-- No Rust, production surface, observer/call-log contract, dependency or ADR
-  changed. The measured workload used no live provider, credentials, external
-  network or download. Task 015's report/commands remain historical;
-  its old sample semantics are not reproduced by the new corpus.
-- This establishes only five-case synthetic lexical ContextCapsule conformance
-  after restart. Model-answer quality, task completion, semantic recall,
-  tool-task success, live cost, first useful progress, isolated Ditto overhead,
-  general agent quality and v0.1 readiness remain unavailable/open. Listing
-  warms recovery and fixture logging adds I/O; no latency superiority is claimed.
+- Offline harness schema 2 with a frozen seven-seed/five-query corpus, zero and
+  N unrelated memories, exact capsule set/order/metadata/provenance, durable
+  identity reconciliation and atomic report publication.
+- Verified 2026-09-18: 18 quality and 8 baseline Python regressions, the
+  canonical gate (490 Rust tests), cached Rust 1.88 check and the fifty-run
+  default report. Details: [evidence](tasks/016-evidence.md).
 
-## Previous verified slice: Task 015
+## Known gaps found by review (2026-09-30)
 
-- The standard-library offline workload compares identical synthetic facts with
-  zero versus 1,000 unrelated same-session memories, then queries five unique
-  requests per profile after process restart and source-verified memory listing.
-  Actual CLI/HTTP/kernel paths perform every save, exact correction and run.
-- An opt-in `cfg(test)` driver JSONL log captures the exact ContextCapsule and
-  request ID separately from the unchanged call counter. Every observation is
-  reconciled with a durable model-request payload and the originating run.
-  All ten capsules contained exactly the corrected memory (one node, 227 bytes),
-  excluding superseded/irrelevant/other-session/noise memories. Seed/recovery
-  made no model call; queries made five driver calls per profile and no tool call.
-- Five assessment/argument tests and three real-process tests pass, including
-  opt-in compatibility and SIGTERM cleanup. RED evidence preceded implementation:
-  four missing-harness errors and, after allowing loopback access, an actual
-  save/correct/restart/query failure at the absent context log. Both Task 014 and
-  Task 015 eight-test Python suites passed. The canonical gate passed canaries,
-  format, strict Clippy, 490 Rust tests (460 unit/integration, 25 compile-fail
-  doctests, five actual-CLI tests), both Python suites and both smoke workloads.
-- The default 1,000-memory/five-query recorded workload passed. Exact values,
-  raw samples and limitations live in the [evidence](tasks/015-evidence.md) and
-  [report](tasks/015-quality-history.json); 113 source hashes and three artifact
-  hashes bind the measurement. Capsule assessment measures one V1 lexical
-  scenario, not model-answer quality or semantic/cross-session recall.
-- No production runtime surface, context logging, wire/policy/authority
-  contract, dependency or architecture changed. The workload itself used no
-  live provider, credential or download; publication happened only after the
-  measured source passed local checks and independent review. External provider
-  spend is zero; model-answer quality, live tokens/cost, first useful progress
-  and isolated timing remain unavailable. Broader v0.1 criteria remain open.
-
-## Previous verified slice: Task 014
-
-- `--human` presents existing run/sort/schedule/repeat start, status, cancel and
-  list responses. JSON stdout and exit semantics remain the default. Model
-  answers are explicitly unverified; model/sort/schedule/repeat outcomes stay
-  independent. Requested cancellation is distinct from terminal cancellation,
-  and timetable exhaustion is not a success claim.
-- Submission prints exact-file/deduplication scope and recoverable identity plus
-  inspection instructions. Run inspection shows the attached artifact and
-  original permission. Standalone sort status honestly reports that its current
-  response omits input/mode. Human text and diagnostics escape terminal controls,
-  including CR/LF, ANSI/OSC/C1 and bidi formatting.
-- The standard-library offline harness runs production-disabled and injected
-  fixture test servers separately through the actual CLI. It records raw
-  samples, hardware/build/source identity, process RAM, latency, call accounting
-  and restart evidence. No core crate, wire/policy/event/kernel contract,
-  production provider, dependency or endpoint changed.
-- The Rust 1.88 canonical gate passed 489 Rust tests (459 unit/integration,
-  25 compile-fail doctests, five actual-CLI scenarios), eight Python
-  accounting/artifact/process tests and the two-server offline smoke workload.
-  The new focused CLI target passed eleven tests after RED; Clippy's initial unchecked test read was fixed.
-- The full 12-request Linux/aarch64 debug baseline passed. Canonical measured
-  values live in the [evidence table](tasks/014-evidence.md) and
-  [raw report](tasks/014-baseline.json) rather than being duplicated here.
-  Repeated-phase model/tool counts were 0/12 and 24/12; both had zero
-  startup/idle model/tool calls. Full-workload fixture driver calls independently
-  matched all 29 durable model requests.
-- Independent-review fixes redact API userinfo from every recovery command,
-  use shell-safe `--session=` assignments, and execute/hash exact named Cargo
-  artifacts. Regressions first reproduced all blockers. A test-only disabled
-  scheduler driver prevents pre-shutdown scheduled claims; recorded sequence
-  boundaries and independent driver counts prove work starts after restart.
-  SIGTERM exits through cleanup; subprocess tests prove both server types are
-  reaped and temporary stores removed.
-- Exact retry, terminal-result recovery, disabled expiry, fixture scheduled
-  dispatch, durable repeat cancellation and abrupt active owner-loss inspection
-  passed without automatic re-execution. No live provider, credential use or
-  download occurred. Offline external provider spend is known zero; fixture
-  usage/live-equivalent cost, quality, isolated model/tool timing and Ditto-only
-  overhead remain unavailable. A short fixed-catalogue sample is not v0.1
-  readiness or a long-use performance/quality claim.
-
-## Previous verified slice: Task 013
-
-- A final local review found that internally consistent old repeat checkpoints
-  could be accepted after cache rewind. A regression reproduced the stale-read
-  gap; an immutable-chain tip check and unique successor/identity constraints
-  now reject a stale checkpoint, a second branch or re-admission after deleting
-  a parent cache. The final source passed local regression and canonical checks.
-
-- [ADR 0020](../adr/0020-bounded-recurring-schedules.md) and
-  [Task 013](tasks/013-recurring-schedules.md) define finite fixed-interval
-  read-only repeats, shared future-work capacity and aggregate missed ranges.
-- The event-store projection atomically advances parent progress and creates
-  each claimed child. Existing run identities, context verification, single-slot
-  admission and scheduler wakeup handle execution and cancellation.
-- The canonical gate passed **478 tests across 47 suites**: 448 unit/integration,
-  25 compile-fail doctests and five required actual CLI scenarios. Twelve new
-  kernel tests and seven storage tests cover recurrence; the HTTP boundary and
-  actual repeat CLI add two further regression scenarios.
-- Rust 1.88 workspace/all-target check and both production daemon/CLI smoke
-  scripts passed. Disabled-provider repeat expiry creates no child/model work;
-  cancellation survives reopen. [Evidence](tasks/013-evidence.md) binds the
-  tested source trees. Linux `rust` and `msrv` passed on final implementation
-  commit `2304e81f952bb5bc536b0f83c9c389efa43b1c4d` in
-  [run 34335704096](https://github.com/eunhhu/ditto/actions/runs/34335704096).
-  Completion-document changes preserve those source trees; the PR requires
-  successful final-head checks before merge.
-- No dependency or service was added. Existing untracked `.omo/` and `.surf/`
-  directories were preserved and are outside this change.
-
-## Previous verified slice: Task 012
-
-- [ADR 0019](../adr/0019-one-shot-scheduled-runs.md) defines explicit one-shot
-  read-only requests with canonical UTC millisecond due/latest-start times,
-  at-most-once durable claims, no automatic retry and a 100-pending cap.
-- CLI/loopback HTTP support schedule, status, pending-list and cancellation.
-  The existing provider-disabled daemon accepts future intent without invoking
-  a model. An enabled provider can dispatch previously accepted due work at
-  startup. Recurrence and scheduled sort grants remain deferred.
-- The authoritative journal and derived schedule index change in one transaction.
-  Startup rebuild streams only schedule events through a dedicated partial index;
-  steady-state selection retains at most 100 headers and no pending prompt pool.
-  Exact run reservations prevent public manual admission from bypassing time or
-  cancellation. The existing slot serializes claim, dispatch and cancellation.
-- One scheduler future waits for due/expiry, queue changes, slot release or
-  shutdown. Empty queues have no timer; disabled/busy paths make no housekeeping
-  model calls. Expiry remains serviced while the execution slot is occupied.
-- Restart before claim retains pending work. A claim without a live owner or
-  durable terminal is interrupted, including the claim/admission crash gap.
-  Original run terminals remain inspectable and are never automatically rerun.
-  Current memory is compiled at execution time through the existing verifier.
-- The canonical gate passed **457 tests across 46 suites**: 428 unit/integration,
-  25 compile-fail doctests, and 4 required actual CLI scenarios. Rust 1.88
-  `cargo check --locked --workspace --all-targets` and both production binary
-  smoke scripts passed. [Evidence](tasks/012-evidence.md) binds the source trees.
-- Linux CI passed both `rust` and `msrv` on implementation commit
-  `7347e0cc33e2fd08cbbc0307326a49f3704f1708` in
-  [run 34071827827](https://github.com/eunhhu/ditto/actions/runs/34071827827).
-  Subsequent completion-document changes preserve the tested source trees.
-- Local sandbox attempts initially rejected loopback binds; approved reruns of
-  the full gate and production smoke scripts passed. There is no remaining
-  unrun local check. The PR requires green final-head checks before merge.
-
-## Previous verified slice: Task 011
-
-- Task 011 is complete under [ADR 0018](../adr/0018-user-scoped-model-sort.md).
-  [Evidence](tasks/011-evidence.md) identifies the tested source trees and checks.
-- `run REQUEST --sort-file FILE [--allow-deduplicate]` attaches bounded exact
-  content and authorizes one model-directed sort until the turn deadline. Only
-  the reference and actual user permission enter initial context. The same
-  bounded loop conditionally pages read/sort schemas and dispatches the existing
-  worker through one exact-resource lease and affine claim. Invalid arguments,
-  another artifact and unapproved deduplication do not consume the lease; a
-  repeated allowed call cannot execute again.
-- Version-2 agent-run metadata binds exact attachment bytes and the permission
-  to retry identity; no-attachment requests retain version 1. Distinct causal
-  sort request/start/output events and rooted artifacts preserve evidence. The
-  model answer remains unverified, without a model-task completion producer.
-- Run status independently rechecks bounded input/output hashes, causal roots
-  and the line contract. A verified sort survives later model failure or runtime
-  loss; restart and exact retry never reissue it. Denied attempts remain not-run
-  with a failure code and cannot erase prior executed results. The schema-4
-  partial index bounds sort inspection to nine rows, including a corruption
-  sentinel, without full transcript scans or a growing result cache. Legacy
-  event records are not rewritten and context projection stays schema 4.
-- Pure replay validates source permission, selected contracts, normalization,
-  causal dispatch/result and exact model continuation without process/provider
-  or artifact I/O. Artifact content verification remains a status/worker duty.
-  Cancellation before authorization or after claim cannot publish new success;
-  the existing child cancellation/cleanup path is used.
-- Final macOS/aarch64 canonical gate passed canaries, format, strict Clippy,
-  416 unit/integration tests, 25 compile-fail doctests and three required actual
-  CLI tests: **444 tests across 45 suites**. Rust 1.88 workspace/all-target check
-  passed. Production daemon/CLI smoke passed disabled attachment with no
-  artifact/admission, memory/restart/SSE shutdown, and the existing provider-free
-  sort workflow. No live/paid model call, provider credential access, new crate,
-  dependency or service was used. Review was local; no external model approval
-  or measured performance superiority is claimed.
-
-- The first Linux CI combined this branch with separately updated main and
-  exposed sha2 0.11's removed LowerHex implementation. That base was integrated,
-  the failure reproduced locally, and bounded explicit encoding restored the
-  identical persisted hash format. Known-vector regressions cover artifacts,
-  sort inputs and package digests. The final checks use all updated dependencies;
-  those independent main changes are retained.
-
-## Earlier verified slices
-
-- Task 010 is complete under [ADR 0017](../adr/0017-bounded-local-sort.md).
-  [Evidence](tasks/010-evidence.md) maps authority, real-process, verifier,
-  recovery and CLI/HTTP checks to the implementation.
-- CLI `sort FILE [--unique]`, `sort-status` and `sort-cancel` perform a closed
-  local operation with no provider. Canonical identity binds exact input bytes
-  and unique mode. Input artifacts and versioned request/dispatch/result events
-  use the existing spine and task indexes; schema versions are unchanged.
-  Model and sort requests share the existing one-active-run slot, including
-  cancellation, shutdown and guard cleanup. Same-ID retry/restart never reruns
-  accepted work, and there is no growing terminal-result map.
-- `ditto-artifact-sort` is the new capability-owned execution/verification crate.
-  It validates exact manifest/schema/deriver revision, canonical input hash and
-  one-shot claim before starting `/usr/bin/sort` with fixed arguments, cleared
-  environment, C locale, private scratch and piped bounded I/O. Input is at most
-  64 KiB / 4096 lines, output at most 65537 bytes, lease at most 30 seconds and
-  owned process execution at most five seconds. CPU/file/core limits apply;
-  cancellation/error/drop terminate the process group and the direct child is
-  reaped. No shell, arbitrary program, PATH lookup, inherited credentials,
-  background process or new service is enabled. OS sort is trusted code; this
-  does not claim an OS sandbox or wall-clock containment after daemon SIGKILL.
-- The independent verifier checks byte order, LF termination and line
-  multiplicities or unique set equality. Only its sealed result reaches the
-  new sort-specific `task.completed` producer. Status verifies exact causal
-  artifact roots, bounded content hashes and line evidence before returning
-  `verified`; exit code alone is insufficient. Broader model answers remain
-  unverified. Task 011 subsequently adds explicit per-run model dispatch.
-- The macOS canonical gate passed canary, format, strict Clippy, 403
-  unit/integration tests, 25 compile-fail doctests, and both required built-CLI
-  tests: 430 total across 44 suites. The new CLI test is part of the gate.
-  Rust 1.88 workspace/all-target checking also passed.
-  Production binary smoke passed sort/unique, retry/conflict, status/cancel,
-  FIFO rejection and restart without execution. It recorded exactly one
-  process dispatch, one verified completion and zero model requests. New code
-  received local review; no separate model-review approval is claimed.
-
-- Task 009 is complete under [ADR 0016](../adr/0016-explicit-agent-runs.md).
-  [Evidence](tasks/009-evidence.md) maps domain, HTTP, real CLI, migration, and
-  replay checks to the implementation. The roadmap now places the local personal
-  workflow before ecosystem expansion and explicitly includes scheduled-work
-  reliability and repeated-use cost/RAM/latency baselines.
-- CLI `run`, `run-status`, and `run-cancel` connect explicit requests to the
-  existing model/artifact loop. The kernel derives task identity from a canonical
-  session/request ID, appends input before dispatch, owns at most one public
-  run, and keeps no growing terminal-result cache. Identical retries never
-  restart the loop; changed text conflicts, and excess work is rejected without
-  a queue. Indexed event boundaries provide terminal or interrupted status.
-  Partial indexes cover `turn_*` correlations and the lookup explicitly selects
-  them; prior record-only input in the same task cannot occupy run identity or
-  turn a boundary lookup into a transcript sort.
-- Current scoped context comes from the existing verified projection with
-  supersession filtering and V1 lexical compilation. Selected provenance now
-  uses exact event-ID lookups rather than scanning session history. A direct
-  answer uses Auto tool choice; the legacy injected API retains Required first
-  tool behavior, including cancellation before lazy context materialization.
-  Both modes replay and retain explicitly unverified answers.
-- Request lifetime survives HTTP disconnect. Scoped cancellation and concurrent
-  shutdown drains share the loop token; guard cleanup on panic or dropped work
-  leaves a visible interrupted identity. No crash recovery reissues a provider
-  request. The CLI waits on SSE, retaining at most 128 bytes of event-name line,
-  and prints a recoverable ID before POST. SIGTERM closes event followers.
-- Final macOS canonical gate passed canaries, formatting, strict Clippy, 388
-  unit/integration tests and 24 compile-fail doctests, then the built-CLI smoke
-  test (413 total, 39 suites). That CLI test is now part of the canonical gate.
-  Rust 1.88 workspace/all-target checking passed. The rebuilt CLI/daemon Python
-  smoke passed six scenarios, including disabled execution without admission,
-  record-only input, open-SSE shutdown, and restart with memory retained.
-- The daemon defaults to a disabled provider. Explicit OpenAI selection uses
-  the existing closed profile and transport-only environment key with ephemeral
-  remote storage; enabled execution requires loopback. No paid/live model call
-  or provider credential access was performed during verification. Existing workspace
-  dependencies are reused; no new package, database, service, or runtime was
-  introduced. Linux results are recorded by the associated PR checks. Review
-  was local; no separate model-review approval is claimed.
-
-- Task 008 is complete under [ADR 0015](../adr/0015-explicit-user-memory.md).
-  [Verification evidence](tasks/008-evidence.md) identifies the exact tested
-  crates/apps/scripts trees and maps the contract to domain, HTTP, and real CLI
-  scenarios. CLI `memory save`, `memory list`, and `memory from-input` now use
-  existing input events, context admission, and source-verified snapshots.
-- Memories contain the exact same-session, task-free user input, with a
-  deterministic lowercase ID and kernel-fixed User/Asserted/Personal metadata.
-  A correction supersedes one active memory. An identical input/replacement
-  retry returns the original event without a second append or publication;
-  concurrent stale corrections conflict under the shared context gate.
-- Text is bounded to 4 KiB and pages to 100 entries. Reads recheck exact source
-  text and preserve scope isolation. The CLI distinguishes captured input from
-  saved memory; HTTP 202 explicitly reports an accepted durable memory whose
-  projection is unavailable. Projection deletion/restart, cache drift, and
-  retry recovery use the existing canonical event spine.
-- The final macOS gate passed canaries, formatting, strict workspace Clippy,
-  374 unit/integration tests and 24 compile-fail doctests across 38 suites.
-  Rust 1.88 workspace/all-target checking passed. The built CLI/daemon smoke
-  script passed eight scenarios, including partial-input recovery and cache
-  deletion/restart. New code was reviewed locally for source equality, scope,
-  idempotency, gate lifetime, error translation, and bounded reads; no separate
-  model-review approval is claimed. Linux CI is reported on the associated PR.
-- There is no new runtime dependency, database, provider invocation, embedding,
-  scheduler, or background process. Two daemon test dependencies reuse existing
-  workspace packages. The `personal` default is a session name, not global
-  memory, and no automatic model request or memory injection was added.
-
-- Task 007 is complete under
-  [ADR 0014](../adr/0014-capability-package-headers.md). The tracked
-  [verification evidence](tasks/007-evidence.md) maps its exit criteria to
-  implementation and regression tests. Implementation commit:
-  `a2efcd3d073ea6eaa3411712e46eaff5e9d8a796`; tested tree:
-  `47c94e7086b50dc714352300d5534316d9586f8d`.
-- Compact `CapabilityHeader` values are distinct from executable manifests.
-  Startup/search of generated packages reads zero full bodies. Headerless
-  packages read and discard one bounded body at startup, and selected paging
-  reads again. No history-dependent full-manifest cache, daemon header writer,
-  worker, model call, database, or background process was added.
-- Linux/macOS descriptor-relative discovery and paging reject symlinks and
-  non-regular metadata. The configured root's parent is resolved once to allow
-  platform aliases; the root and descendants are opened with no-follow flags.
-  Fixed limits cover depth, entries, packages, file bytes, aggregate startup
-  bytes, and retained header data. Tests cover exact N/N+1 limits and later
-  symlink replacements, missing bodies, digest changes, and contradictory headers.
-- The 1,000-package fixture searches without reading any full body and pages
-  exactly one selected body. A separate fixture keeps a 400,000-byte
-  verification field out of the catalogue, with startup bytes and accounted
-  retained header data each below 4 KiB. Successful artifact turns and all
-  historical replay tests pass; selected-package failures occur before model
-  invocation and replay after package removal using stable path-free evidence.
-- The final local canonical gate passed canaries, formatting, strict Clippy,
-  366 unit/integration tests, and 24 compile-fail doctests across 37 suites.
-  Rust 1.88 workspace/all-target checking and staged/unstaged diff checks passed
-  on aarch64 macOS. PR #12 Linux Actions run `33983282889` passed both `rust`
-  and `msrv` on `50c9474829203a0a05937f94658c8e7368c3bed2`, with the same
-  runtime and test code. Devin reported that its full review was skipped because
-  credits were unavailable; no independent model-review approval is claimed.
-  Local counters are not RSS or latency benchmarks and no percentage
-  improvement is asserted.
-
-- Task 006 is complete under
-  [ADR 0013](../adr/0013-compact-source-verified-session-index.md). The tracked
-  [verification evidence](tasks/006-evidence.md) maps every exit criterion to
-  schema-4 implementation, adversarial fixtures, deterministic work counters,
-  local gates, and independent PR checks. The contract and implementation are
-  commits `5a7402f46a4044022238f06cc32c7d1a2cee05f2` and
-  `71a41791dfbf3e5c7affca38d8a4fa1de90c045f`; the tested code tree is
-  `4f4a2fce9187439d3f7c81fa604fd6659ba21be3`.
-- Projection schema 4 stores a compact immutable identity/provenance index,
-  per-session ordered digest/count/byte state, and a global digest in the exact
-  sequence/event-ID checkpoint. Retrieval rows, supersession edges, index rows,
-  session state, and checkpoint advance atomically per 500-event page. Schema
-  1-3 caches reset and rebuild without rewriting the event spine.
-- A non-serialized process-local proof binds the checkpoint, event anchor,
-  digest, SQLite data version, and compact identities. Normal synchronization
-  visits only the ordered delta; admission uses proof-gated identity lookups and
-  at most 64 exact source-event lookups. External cache drift is internally
-  revalidated or gets one source replay/recheck and cannot return an identity or
-  snapshot on persistent mismatch.
-- Fixed checked limits are 65,536 identities and 256 MiB accounted bytes per
-  session, plus 65,536 events, 64 MiB context payload, and 2,000,000 work units
-  per normal delta. Exact N succeeds and N+1 fails before its operation or page
-  commit. The scale fixture replays 1,000,000 ordinary events plus 10,000
-  context identities once, then records exactly one delta event and one
-  admission index lookup for steady-state retrieval/admission.
-- Focused runs passed 45 context-projection tests and all 15 durable-kernel
-  projection/working-set tests. The canonical `rtk ./scripts/agent-check.sh`
-  gate passed its canary, formatting, strict workspace Clippy, 351
-  unit/integration tests, and 24 compile-fail doctests across 36 suites.
-  Rust 1.88 workspace/all-target checking and diff hygiene passed. PR #7 Actions
-  run `33868899639` independently passed both `rust` and `msrv` on the exact
-  implementation commit.
-
-- Task 005.1 has a verified final review-closure implementation under
-  [ADR 0012](../adr/0012-canonical-capability-invocation.md). The tracked
-  [verification evidence](tasks/005-1-evidence.md) maps every amended exit
-  criterion to implementation and adversarial, concurrency, integration, and
-  compile-fail tests. The original contract, implementation, and adversarial
-  closure are commits `ad18b33`,
-  `85fde0ad862220435f28a1effdc52bb7f2136183`,
-  and `cb4c71ecfb64bc69445fc91ed49263d896131676`. The final review contract and
-  implementation are `ddf9a6cccaefd016b1f0775b6292fc9d4cb0ea28` and
-  `98e8f676fc325bf4400aae324c2447e56098bcdb`; normalized-output work
-  preflight is pinned by `7b5e4b9528c17d08953d2de1d1bb8ca6bf824f90`. The tested code tree is
-  `d3ba3e14e136921106a5d5431f1abc3530ecf64a`.
-- Replayable `ExecutionEpochEvidence` is now distinct from sealed,
-  non-wire `LiveExecutionEpoch`. Only the latter issues a sealed
-  `InvocableCapabilityBinding`; it owns one epoch's exact model card, manifest,
-  schema, revision, and digests. The compiler cannot accept deserialized
-  evidence and rederives the whole relationship before normalization.
-- Live invocation uses closed Ditto Invocation Schema Profile V1 rather than a
-  Draft 2020-12 evaluator claim. Iterative byte/depth/work preflight precedes
-  recursion. Exact `i64`/`u64` integer semantics cover values beyond 2^53 and
-  integer `multipleOf`; equality keywords distinguish `1` from `1.0`, and
-  `artifact.read` `length = 1.0` preserves the Task 003 `invalid_arguments`
-  result and continuation behavior.
-- A live epoch now seals paging exactly once and moves its sole affine
-  `EpochAuthorizationTicket` into policy. Every cloned authorizer handle shares
-  that ticket's one `Arc`-owned ledger, while second ticket issuance, post-seal
-  paging, and reissue after ticket or authorizer drop fail closed. The ledger is
-  constructed inside the turn rather than `KernelInner`; permit and approval
-  expiry remains capped at the epoch boundary. Its mutex transaction preserves
-  failed-without-consumption, consume-once, idempotent retry, digest-conflict,
-  and one-call concurrency guarantees.
-- `ExecutionClaim` is a sealed, non-cloneable, non-deserializable one-shot token
-  bound to the epoch, permit, and invocation digest. Atomic claim issuance
-  succeeds at most once. It defines the mandatory ingress for a future
-  effectful worker but no worker or dispatch path was added. The existing
-  bounded `artifact.read` path still requires its sealed static-policy permit,
-  and Task 003 durable execution and no-I/O replay semantics are unchanged.
-- Recursive profile equality now charges each compared JSON node, including
-  nested `uniqueItems`, and direct number comparison allocates no representation
-  strings. Raw and normalized values pass iterative byte/depth/work preflight
-  before recursive canonical projection. The compiler is the only raw
-  `artifact.read` normalizer; the kernel decodes its sealed normalized value,
-  while Task 003 invalid-reference/invalid-arguments codes and no-read
-  continuation behavior remain unchanged.
-- Focused capability, policy, and kernel runs passed 57, 14, and 60 tests
-  respectively, including compile-fail doctests. The canonical
-  `rtk ./scripts/agent-check.sh` gate passed its tracked canary, formatting,
-  strict workspace/all-target/all-feature Clippy, workspace tests, and
-  doctests. `rtk cargo +1.88.0 check --locked
-  --workspace --all-targets` and `rtk git diff --check` passed. PR #6 Actions
-  run `33522132273` independently passed `msrv` and `rust` on final code commit
-  `7b5e4b9528c17d08953d2de1d1bb8ca6bf824f90`. No compact session-index
-  work, capability worker, subprocess, network, model, credential, provider,
-  SSH, approval fulfillment, file mutation, or billable operation ran.
-- The original Task 005 evidence remains at
-  [tasks/005-evidence.md](tasks/005-evidence.md); its initial dual-purpose epoch,
-  evaluator, and daemon-ledger descriptions are superseded by Task 005.1 above.
-- Task 004.2 is complete under the ADR 0011 amendment. The tracked
-  [verification evidence](tasks/004-2-evidence.md) maps both post-review
-  correctness findings to implementation and adversarial tests.
-- A verified-snapshot cache repair no longer resets candidate work to the
-  caller's pre-attempt budget. The repaired capture continues from the first
-  capture's charged budget, so combined N+1 work returns a typed dimension error
-  without a partial `VerifiedContextSnapshot`.
-- New trusted durable `valid_from` and `valid_until` values must be exact
-  milliseconds and fail with a field-specific typed error before append or
-  publication. The schema-3 implementation introduced both the millisecond
-  value and exact sub-millisecond nanosecond remainder; schema 4 retains that
-  representation. Legacy version-1 events with finer precision therefore keep
-  Rust's inclusive-start/exclusive-end behavior in SQL, and older caches rebuild
-  automatically without changing events.
-- Focused Task 004.2 runs passed 38 projection tests across two suites and all 15
-  durable-kernel projection/working-set tests. The canonical
-  `rtk ./scripts/agent-check.sh` gate passed the tracked canary, formatting,
-  strict all-target/all-feature Clippy, and 328 tests across 35 suites.
-  `rtk cargo +1.88.0 check --locked --workspace --all-targets` and
-  `rtk git diff --check` passed. No network, model, credential, provider, or
-  billable embedding operation ran.
-- Task 004.1 is complete under ADR 0011. The tracked
-  [verification evidence](tasks/004-1-evidence.md) maps every exit criterion to
-  implementation and regression tests. The reviewed implementation is commit
-  `bf58d7a3a001c0505460919a61fa6cc722dc5269`, tree
-  `3c38444eaad0e5065888edcea4e5dc4f6430174a`.
-- One request-local `RetrievalWorkBudget` is shared by query construction,
-  verified context retrieval/ranking, and capability ranking. Version 1 fixes
-  cumulative candidate, document, and lexical work at 64 MiB each, provider
-  input at 32 MiB, and provider calls at 513 including the query. Checked
-  N/N+1 failures occur before the over-budget allocation, tokenization, or
-  provider call. Context uses bounded candidate materialization followed by
-  one-at-a-time document processing and top-K ranked retention plus bounded
-  exclusion metadata. Capability streams documents while retaining top-K roots.
-- V2 capacity now counts lifecycle-active values. Context scope, supersession,
-  disputed status, validity start, and expiry are applied in SQLite before the
-  10,000-row guard. Capability manifests default to active and retired or
-  quarantined manifests neither count nor page into roots, complements, or
-  execution cards. Hard runtime and positive lexical filters still precede
-  embedding work.
-- Projection schema 4 retains the active-filter fields and exact timestamp
-  remainder introduced by schema 3. Kernel open/recovery performs one canonical
-  rebuild and records a non-durable process-local verification generation.
-  Unchanged reads validate the checkpoint anchor, digest, compact index, and
-  SQLite data version without full replay; later events are canonical
-  delta-validated.
-  External cache drift causes at most one source rebuild/recheck and never
-  authorizes a result. Only `VerifiedContextSnapshot`, not
-  `DerivedContextSnapshot`, can enter the kernel ranking path. Verification
-  metrics expose full-replay events, delta events/bytes/work, admission index
-  lookups, fast snapshots, and cache repairs for regression evidence.
-- Working-set scope uses bounded canonical `SessionId`, `TaskId`, and
-  `RetrievalScope` values. New durable context admission additionally requires a
-  canonical exact `ContextNodeId`. `SearchContext` bounds and canonicalizes its
-  collections, requires complete runtime fields, and rejects an unavailable
-  preferred placement before the shared query embedding can call a provider.
-- Event and projection SQLite families reject symlink database targets and
-  symlink parents, require current-user ownership on Unix, set data directories
-  to `0700`, and set present database/WAL/SHM members to `0600`.
-  `scripts/agent-canary.sh` is tracked and runs first in the canonical gate; it
-  rejects tracked local-state/build/database artifacts, developer absolute
-  paths, and credential-shaped content.
-- The canonical `rtk ./scripts/agent-check.sh` gate passed the canary,
-  formatting, strict all-target/all-feature Clippy, and 326 tests across 35
-  suites. The all-feature workspace test inside that gate also passed 326 tests;
-  focused runs passed 14 retrieval, 27 capability, 51 context, 36 projection, 8
-  event-store, and 15 durable-kernel tests. `rtk cargo +1.88.0 check --locked
-  --workspace --all-targets` and `rtk git diff --check` passed. No model,
-  network, credential, or billable embedding operation ran.
-- Task 004 is complete under ADR 0010. The immutable event spine is the sole
-  durable authority for version-1, system-authored `context.node.recorded`
-  events. `ditto-context-projection` owns a separate WAL SQLite cache with
-  atomic page/checkpoint commits, stable high-water replay, anchor/schema
-  recovery, source-immutable rebuilds, and detached scope snapshots. The fixed
-  source filename `state.db` is rejected before filesystem mutation; the cache
-  can be deleted and rebuilt without changing source events.
-- Durable admission is limited to session- and task-scoped nodes. Identity is
-  session-wide `(session_id, node_id)` while supersession is exact-scope.
-  Provenance must resolve to prior same-session events, task provenance remains
-  task-compatible, and each origin requires matching actor evidence; user-origin
-  assertions require user-authored evidence and model-origin assertions are
-  rejected. The kernel derives causation from the greatest durable source
-  sequence, independent of source-list order.
-- `ditto-retrieval` owns `TaskSignatureV2`, version-1 `TaskQuery`, canonical
-  retrieval scope/identity types, and the fixed cumulative work budget. It
-  provides bounded canonical normalization, optional injected embeddings,
-  descriptor continuity, and typed fail-closed provider errors. Context
-  summaries accept at most 65,000 bytes and the fixed
-  `id=...\nkind=...\nsummary=...` document is bounded at 65,287 bytes. Active
-  context and capability candidate 10,001 fails. Context results and capability
-  roots accept 1 through 256, and expanded epoch cards accept 1 through 512.
-  Zero and N+1 are rejected without clamping or a partial value.
-- Historical five-field context signatures, compilers, and raw-string
-  capability searches remain separate V1 paths with their existing behavior.
-  The explicit fallible V1-to-V2 adapter supplies `resources = []` and applies
-  V2 bounds; legacy APIs do not silently delegate to V2.
-- `DittoKernel::retrieve_working_set` validates raw limits in fixed
-  context/root/epoch precedence, builds one V2 query, captures one canonical
-  high-water and one evaluation instant under the clone-shared admission gate,
-  then returns one detached projection checkpoint, compiled context and capsule,
-  and bounded execution epoch or one typed error. It appends no event, invokes
-  no model, persists no query/vector state, and never returns a partial working
-  set. Production `DittoKernel::open` is lexical-only. The explicit injected
-  provider constructor stores the caller-owned provider; each subsequent joint
-  retrieval performs one shared query embedding. Configured provider,
-  descriptor, dimension, or vector failures do not fall back, and embeddings
-  cannot revive candidates excluded by lexical eligibility or capability hard
-  filters.
-- Projection synchronization validates canonical delta semantics before cache
-  application, compares exact canonical rows, identities, and supersession edges
-  for the requested snapshot, and permits one rebuild and one recheck for
-  logical cache drift. Bounded affected-session history uses file-backed
-  temporary state. Cache-only rows, edges, event IDs, sequences, or a fake
-  10,001st row cannot authorize admission or forge a retrieval denial; malformed
-  canonical history and SQLite operational failures propagate without a repair
-  retry. Persistent drift is the typed
-  `ProjectionSnapshotIntegrityMismatch` failure.
-- `DittoKernel::admit_context_node` accepts only a non-deserializable trusted
-  draft with no actor, kind, causation, correlation, span, event identity,
-  sequence, or timestamp authority. One mutex shared by every clone of a
-  `KernelInner` orders pre-sync, canonical validation, durable append, exact
-  post-append projection catch-up, and one live publication attempt. Source
-  causation is the greatest durable cited sequence, identity is session-wide,
-  and unsupported scopes, unattested origins, invalid provenance, duplicate
-  identities, and exact bound failures are rejected before append or publish.
-- A durable append is acceptance. If post-append projection catch-up fails, the
-  exact committed record is still published once and returned inside the typed
-  `committed_but_projection_unavailable` outcome with a path-free diagnostic
-  bounded to 4,096 UTF-8 bytes. Recovery synchronizes canonical history without
-  another append or live publication; a retry returns the committed identity as
-  a duplicate without comparing payloads. Kernel open eagerly replays the
-  projection and publishes nothing. The single-writer support boundary is one
-  `KernelInner` and its clones for a data directory; separately opened kernels,
-  cross-process writers, and out-of-band event-store writers remain explicitly
-  unsupported.
-- The final focused command
-  `rtk cargo test -p ditto-retrieval -p ditto-context -p ditto-capability -p ditto-event-store -p ditto-context-projection -p ditto-protocol -p ditto-kernel --locked --all-targets`
-  passed 178 tests across 11 suites; the projection package passed 32 tests
-  across two suites and the durable kernel projection/working-set integration
-  target passed 13. The matching strict
-  `rtk cargo clippy -p ditto-retrieval -p ditto-context -p ditto-capability -p ditto-event-store -p ditto-context-projection -p ditto-protocol -p ditto-kernel --locked --all-targets -- -D warnings`
-  command was clean. `rtk cargo fmt --all -- --check`,
-  `rtk git diff --check`, and scoped `git grep -qE` secret,
-  absolute-path, database, and build-artifact canaries passed.
-- The canonical `rtk ./scripts/agent-check.sh` gate passed 310 workspace tests,
-  and
-  `rtk cargo +1.88.0 check --locked --workspace --all-targets`
-  passed the repository MSRV. Independent final code review approved with no
-  blockers after the source-authority repair, and post-fix manual QA cleared the
-  cache-collision, supersession, edge, malformed canonical-history, SQLite
-  no-retry, and one-rebuild-budget scenarios. No model, network, credential, or
-  billable embedding operation ran.
-- Task 003 is complete under ADR 0009. `DittoKernel::run_artifact_read_turn`
-  compiles trusted context, validates its provenance cutoff, pages the exact
-  installed manifest/card/full schema into one bounded execution epoch, accepts
-  at most one structured call per request, executes a same-scope bounded read,
-  and continues the complete provider-neutral conversation to an explicitly
-  `unverified` final response. The daemon remains record-only and does not select
-  a provider or trigger an automatic paid request.
-- `ditto-artifact-read` owns strict arguments, the canonical
-  `artifact:sha256:<hex>` resource, a 16 KiB range ceiling, binary-safe
-  deterministic projections, stable structured failures, and exact manifest/
-  schema validation. Artifact bytes are captured through the same sequential
-  descriptor pass that verifies their SHA-256 content. The invariant-safe Rust
-  package is version 0.2.0 with checked deprecated 0.1 API wrappers; the valid
-  serialized capability contract remains version 0.1.0.
-- Version-1 turn events durably record compiled context, selected capability
-  evidence, complete model requests and admitted outputs, calls/results, and the
-  terminal. Append timestamps and output admission evidence use canonical
-  millisecond precision. Kernel deadline failures carry the effective deadline;
-  provider deadline reports remain model failures. Cancellation/deadline stages,
-  journal/request/text bounds, manifest/epoch/schema continuity, task-completion
-  absence, and call correlation are all replay-validated.
-- `replay_artifact_read_turn` reconstructs an explicit turn from one session
-  snapshot without provider or artifact I/O. It rejects missing, reordered,
-  duplicated, out-of-scope, forged, temporally impossible, oversized, or
-  contradictory records. A pre-existing completion rejects live admission
-  without adding events; the loop itself never emits `task.completed`.
-- Focused Task 003 gates passed 95 tests across context, event store, artifact
-  store/read, protocol, and kernel. `./scripts/agent-check.sh` passed 213 workspace
-  tests, and `cargo +1.88.0 check --locked --workspace --all-targets` passed the
-  repository MSRV. Strict Clippy, formatting, diff hygiene, and secret/path
-  canaries were clean. Independent code and contract reviews approved with no
-  blockers, and repaired-edge manual QA passed. No live or billable provider
-  request was run.
+- V1 selection counts only exact token overlap (no stemming or function-word
+  filtering) and every run query also contains the fixed text
+  `local content read`. A probe of the real compiler selected four unrelated
+  memories, but not `I prefer afternoon meetings`, for
+  `What is my meeting preference?`; paraphrases fail the same way. The Task
+  015/016 corpus used literal queries without function words, so it could not
+  detect this.
+- `continue_read_only_turn` is one ~1,250-line function whose failure paths
+  are mirrored by replay; replay validates validator-derived failure text by
+  string grammar.
+- The scheduler sleeps on a monotonic timer and has no resume wake-up, so a
+  suspended laptop may delay or miss a start window. Not reproduced.
 
 ## Intentionally deferred
 
-- calendar recurrence, scheduled effect grants and additional effectful tool profiles;
-- additional providers, OpenAI model profiles, reasoning replay, remote cancel,
-  and explicit prompt-cache breakpoints;
-- additional capability derivers, durable/cross-process authorization,
-  approval fulfillment, and the capability worker protocol;
-- device registry, general process profiles, SSH transport, and secrets;
-- a production embedding worker/provider and persisted embedding cache;
-- additional completion verifiers and improvement compiler;
-- authenticated remote gateway and web inspector.
+- Calendar recurrence, notification delivery, scheduled effect grants and
+  additional effectful tool profiles.
+- Additional providers and model profiles, reasoning replay, remote cancel and
+  explicit prompt-cache breakpoints.
+- Additional capability derivers, durable/cross-process authorization, approval
+  fulfillment and the capability worker protocol.
+- Device registry, general process profiles, SSH transport and secrets.
+- A production embedding worker/provider and persisted embedding cache.
+- Additional completion verifiers and the improvement compiler.
+- Authenticated remote gateway and web inspector.
 
 ## Known engineering debt
 
-- Explicit runs compile the existing bounded active context snapshot using V1
-  lexical semantics; the separate V2 joint working-set contract is not silently
-  substituted into live epochs. There is no automatic transcript injection,
-  cross-session memory, or production semantic model-context retrieval.
-- Artifact-root authorization still searches paginated session history and
-  artifact reads verify the whole object. Measure the actual user workflow
-  before adding derived indexes/caches; the new run path is not evidence of
-  constant end-to-end latency or zero overhead.
-- Explicit memory listing materializes the existing bounded active session
-  snapshot before forming an ID page. Its 10,000-candidate and cumulative byte
-  limits also include other active context in that session; measure large-set
-  listing before introducing a separate projection paging path.
-- SQLite calls are synchronous and will need a measured async boundary before
-  high-concurrency gateways.
-- Artifact range reads verify the whole object for integrity; optimize only with
-  a design that preserves immutable-object trust.
-- Context graph edges are validated but not yet used in ranking.
-- The context-projection authority workflow is large; split it into internal
-  modules later without weakening its single-gate, single-rebuild, or atomic
-  checkpoint semantics.
-- V2 retrieval supports one injected provider, but production remains lexical
-  until the embedding worker slice.
-- Headerless capability packages still incur one bounded startup body read
-  until explicitly packaged with generated headers. Actual RSS and latency
-  measurements remain separate from Task 007's deterministic read/data counters.
-- The injected embedding interface is synchronous and may make up to 513 serial
-  calls within its fixed envelope. A production worker needs compact rerank
-  pools, batching, and descriptor/hash caching.
-- Version-1 replay recognizes several closed validator failures through stable
-  display-message grammar; introduce typed subcodes before changing those
-  messages.
-- Legacy excluded context receipts are trusted but do not yet have an
-  independent encoded payload ceiling; address that before making them a new
-  durable wire input.
-- Generic model-task completion admission remains a high-water check followed
-  by append rather than an atomic verifier/admission transaction. The new sort
-  producer uses dedicated `sort_*` tasks and the shared slot gate; it does not
-  add a completion producer for model `run_*` tasks.
-- The only process profile is bounded sort, explicitly invoked or attached to
-  a model run with scoped permission. Broader programs, host-crash containment
-  and additional task verifiers need separate contracts; do not widen the
-  current resource claim to arbitrary code.
-
-Update this file only after code and checks establish a new fact.
+- Artifact-root authorization pages through session history and range reads
+  verify the whole object; measure before adding indexes or caches.
+- Memory listing materializes the bounded active snapshot before paging; its
+  10,000-candidate and byte limits include other active session context.
+- SQLite calls are synchronous inside async handlers, and the run slot holds a
+  `std::sync::Mutex` across storage writes; measure before adding a
+  high-concurrency gateway.
+- Context graph edges are validated but unused in ranking.
+- The context-projection authority workflow is one large module; split it
+  without weakening its single-gate, single-rebuild or atomic-checkpoint
+  semantics.
+- Three lexical tokenizers differ (context V1, capability search, retrieval
+  V2).
+- Headerless capability packages still pay one bounded startup body read.
+- The injected embedding interface is synchronous and may make up to 513
+  serial calls; a production worker needs rerank pools, batching and caching.
+- Legacy excluded-context receipts have no independent encoded payload ceiling;
+  add one before accepting them as a new durable wire input.
+- Generic model-task completion admission is a high-water check followed by
+  append, not an atomic verifier/admission transaction.
+- The only process profile is bounded sort; broader programs, host-crash
+  containment and new verifiers need separate contracts.

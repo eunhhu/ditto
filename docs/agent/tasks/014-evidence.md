@@ -77,8 +77,10 @@ digests and all three measured binary digests. The executable paths used for
 both hashing and execution come from exact named Cargo JSON artifacts, including
 inherited alternate target directories. No generated Python cache is retained.
 
-The [recorded report](014-baseline.json) contains all raw samples, source/binary
-digests and recovery assertions. Base Git head:
+The recorded report contains all raw samples, source/binary digests and recovery
+assertions. It is kept out of the working tree; retrieve it with
+`git show 58b2b02:docs/agent/tasks/014-baseline.json` (SHA-256
+`06880af0c3ae5c66be8b4b75b526a3efa7ae80acea2823e7c3ea7a855d606995`). Base Git head:
 `786a0587bdfed175579289309f9a938bb63f7424`. Environment: Linux/aarch64,
 `6.18.39+rpt-rpi-2712`, four CPUs (reported CPU part `0xd0b`), 8,454,029,312
 bytes system RAM, Rust 1.88.0, Python 3.13.5, debug/default-feature builds,
