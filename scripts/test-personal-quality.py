@@ -45,10 +45,11 @@ class AssessmentTests(unittest.TestCase):
     def observation(self, nodes, identity="request-0"):
         return {"request_id": identity, "context_json": json.dumps({"nodes": nodes}, separators=(",", ":"))}
 
-    def assess(self, nodes, expected=None, forbidden=None):
+    def assess(self, nodes, expected=None, forbidden=None, relevant=None):
         return self.quality.assess_context(self.observation(nodes),
                                           self.nodes if expected is None else expected,
-                                          self.forbidden if forbidden is None else forbidden)
+                                          self.forbidden if forbidden is None else forbidden,
+                                          relevant)
 
     def failure(self, nodes, expected=None):
         with self.assertRaises(AssertionError) as caught:
@@ -107,6 +108,32 @@ class AssessmentTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(AssertionError):
                 self.quality.assess_context({"request_id": "r", "context_json": raw}, [], self.forbidden)
 
+    def test_item_tokens_follow_the_compiler_estimate_and_select_the_mode(self):
+        noise = self.node("memory-01k00000000000000000000000", "synthetic unrelated pebble 000000")
+        noise["source_event_ids"] = ["01K00000000000000000000000"]
+        # 227 serialized bytes, as observed by Task 015: ceil(227 / 4) + 16.
+        self.assertEqual(len(json.dumps(noise, separators=(",", ":")).encode()), 227)
+        self.assertEqual(self.quality.item_tokens(noise), 73)
+        relevant = [self.nodes[1]]
+        mode, expected = self.quality.expected_selection(relevant, [self.nodes[0], *relevant, self.nodes[0] | {"id": "a"}])
+        self.assertEqual(mode, "complete")
+        self.assertEqual([n["id"] for n in expected], ["train", "a", "packing"])
+        many = [dict(noise, id=f"memory-01k{i:023d}") for i in range(13)]
+        self.assertGreater(sum(map(self.quality.item_tokens, many)), 900)
+        self.assertEqual(self.quality.expected_selection(relevant, many + relevant), ("ranked", relevant))
+        self.assertEqual(self.quality.expected_selection([], many[:12])[0], "complete")
+
+    def test_relevant_subset_drives_recall_and_precision(self):
+        extra = self.node("banana", "bananas ripen tomorrow")
+        result = self.assess([self.nodes[1], extra, self.nodes[0]], [self.nodes[1], extra, self.nodes[0]],
+                             dict(self.forbidden, irrelevant=[], noise=[]), relevant=[self.nodes[1]])
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["metrics"]["recall_at_2"]["value"], 1.0)
+        self.assertEqual((result["metrics"]["returned_context_precision"]["numerator"],
+                          result["metrics"]["returned_context_precision"]["denominator"]), (1, 3))
+        with self.assertRaises(AssertionError):
+            self.assess(self.nodes, self.nodes, relevant=[extra])
+
     def test_all_leak_categories_match_id_or_embedded_text(self):
         for category, forbidden in self.forbidden.items():
             for node in (dict(forbidden[0], summary="changed"),
@@ -138,7 +165,7 @@ class AssessmentTests(unittest.TestCase):
                                payload={"text": query, "agent_run": {"version": 1, "request_id": identity}}))
             events.append(dict(common, seq=seq+1, event_id=f"model-{i}", actor="system", kind="model.requested",
                                span_id=request, causation_id=f"input-{i}",
-                               payload={"event_version": 1, "turn_id": turn, "request_index": 0,
+                               payload={"event_version": 2, "turn_id": turn, "request_index": 0,
                                         "request": {"request_id": request, "control": {"cancellation_id": turn},
                                                     "turn": {"context": {"nodes": nodes}, "conversation": [
                                                         {"type": "message", "role": "user", "content": [
@@ -179,7 +206,8 @@ class AssessmentTests(unittest.TestCase):
             lambda d: d[1][3].update(seq=4.0),
             lambda d: d[1][2]["payload"]["agent_run"].update(request_id="wrong"),
             lambda d: d[1][2]["payload"]["agent_run"].update(version=True),
-            lambda d: d[1][3]["payload"].update(event_version=1.0),
+            lambda d: d[1][3]["payload"].update(event_version=2.0),
+            lambda d: d[1][3]["payload"].update(event_version=1),
             lambda d: d[1][3]["payload"]["request"]["turn"]["context"].update(nodes=[]),
             lambda d: d[0][1].update(context_json=json.dumps(json.loads(d[0][1]["context_json"]), indent=2)),
         ]
@@ -261,9 +289,11 @@ class WorkflowTests(unittest.TestCase):
         cls.binaries = baseline.build()
 
     def test_corpus_workload_replays_all_five_queries_after_restart(self):
+        # Seventeen active memories exceed the budget: exact lexical fallback.
         quality = module("quality")
         with tempfile.TemporaryDirectory(prefix="ditto-corpus-regression-") as temporary:
-            result = quality.workload(Path(temporary), self.binaries, 4, 2)
+            result = quality.workload(Path(temporary), self.binaries, 12, 2)
+        self.assertEqual(result["selection_mode"], "ranked")
         self.assertEqual(len(result["requests"]), 10)
         expected = [
             ("cedar timezone", ["cedar timezone is KST"]),
@@ -279,7 +309,7 @@ class WorkflowTests(unittest.TestCase):
                              [{"type": "message", "role": "user", "content": [{"type": "text", "text": query}]}])
             self.assertEqual([n["summary"] for n in json.loads(run["context_json"])["nodes"]], summaries)
             self.assertGreater(run["input_event"]["seq"], result["recovery"]["last_seq_before_restart"])
-        self.assertEqual(result["seed_accounting"]["event_counts"], {"input.received": 11, "context.node.recorded": 11})
+        self.assertEqual(result["seed_accounting"]["event_counts"], {"input.received": 19, "context.node.recorded": 19})
         self.assertEqual(result["whole_workload_accounting"]["model_requests"], 10)
         self.assertEqual(result["whole_workload_accounting"]["injected_driver_calls"], 10)
         for key, value in (("exact_set", (10, 10)), ("exact_order", (10, 10)),
@@ -287,6 +317,37 @@ class WorkflowTests(unittest.TestCase):
                            ("returned_context_precision", (12, 12))):
             metric = result["metrics"][key]
             self.assertEqual((metric["numerator"], metric["denominator"]), value)
+
+    def test_small_history_sends_the_complete_personal_memory_set_after_restart(self):
+        quality = module("quality")
+        with tempfile.TemporaryDirectory(prefix="ditto-corpus-complete-") as temporary:
+            result = quality.workload(Path(temporary), self.binaries, 0, 2)
+        self.assertEqual(result["selection_mode"], "complete")
+        personal = {"cedar timezone is KST", "harbor packing checklist includes passport",
+                    "harbor train departs Friday", "supper preference is vegetarian", "bananas ripen tomorrow"}
+        relevant = {
+            "cedar timezone": ["cedar timezone is KST"],
+            "harbor packing": ["harbor packing checklist includes passport", "harbor train departs Friday"],
+            "harbor train": ["harbor train departs Friday", "harbor packing checklist includes passport"],
+            "supper preference": ["supper preference is vegetarian"],
+            "observatory telescope": [],
+        }
+        self.assertEqual(len(result["requests"]), 10)
+        for run in result["requests"]:
+            nodes = json.loads(run["context_json"])["nodes"]
+            summaries = [n["summary"] for n in nodes]
+            head = relevant[run["query"]]
+            # Lexical matches first, then every other current memory by ID.
+            self.assertEqual(summaries[:len(head)], head)
+            self.assertEqual(set(summaries), personal)
+            self.assertEqual(len(summaries), len(personal))
+            rest = [n["id"] for n in nodes[len(head):]]
+            self.assertEqual(rest, sorted(rest))
+            self.assertFalse({"cedar timezone is UTC", "cedar timezone is PRIVATE"} & set(summaries))
+        for key in ("exact_set", "exact_order", "stale_leaks", "scope_leaks"):
+            metric = result["metrics"][key]
+            self.assertEqual(metric["numerator"], 10 if key.startswith("exact") else 0)
+        self.assertNotIn("noise_leaks", result["metrics"])
 
     def test_profiles_use_distinct_client_request_identities(self):
         quality = module("quality")
@@ -328,8 +389,14 @@ class WorkflowTests(unittest.TestCase):
                 for observation, request in zip(observed, requests):
                     context = json.loads(observation["context_json"])
                     self.assertEqual(context, request["turn"]["context"])
-                    self.assertEqual([(n["id"], n["summary"]) for n in context["nodes"]],
-                                     [(corrected["memory_id"], "cedar timezone is KST")])
+                    # Six current memories fit the budget: the correction ranks
+                    # first; the superseded and other-session memories never appear.
+                    self.assertEqual((context["nodes"][0]["id"], context["nodes"][0]["summary"]),
+                                     (corrected["memory_id"], "cedar timezone is KST"))
+                    self.assertEqual({n["summary"] for n in context["nodes"][1:]},
+                                     {"bananas ripen tomorrow"} | {f"synthetic unrelated pebble {i:06d}" for i in range(4)})
+                    self.assertFalse({"cedar timezone is UTC", "cedar timezone is PRIVATE"}
+                                     & {n["summary"] for n in context["nodes"]})
             finally:
                 server.stop()
 

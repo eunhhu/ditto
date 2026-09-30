@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Offline lexical context selection after correction/restart, at two history sizes.
+"""Offline context selection after correction/restart, at two history sizes.
 
+Turn payload version 2 sends the complete current session memory set when it
+fits the budget and falls back to positive lexical overlap otherwise (ADR 0021).
 Only synthetic data, actual CLI/HTTP/kernel, and the cfg(test) fixture driver.
 No live provider, model-answer assessment, semantic retrieval or speed claim.
 """
@@ -24,7 +26,9 @@ spec = importlib.util.spec_from_file_location("baseline", Path(__file__).with_na
 baseline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(baseline)
 REPO = baseline.REPO
-# Frozen independently of runtime capsules and fixture answers (Task 016).
+TURN_PAYLOAD_VERSION = 2
+CAPSULE_ITEM_OVERHEAD_TOKENS = 16
+# Frozen independently of runtime capsules and fixture answers (Tasks 016, 016.1).
 CORPUS = {
     "session": "personal", "recall_k": 2,
     "seeds": [
@@ -46,8 +50,12 @@ CORPUS = {
         {"case": "no_match", "query": "observatory telescope", "expected": []},
     ],
     "exclusions": {"stale": ["OLD"], "scope": ["OTHER"],
-                   "irrelevant": "CURRENT, PACKING, TRAIN, FOOD, IRRELEVANT minus expected labels",
-                   "noise": "all NOISE[i]"},
+                   "irrelevant": "CURRENT, PACKING, TRAIN, FOOD, IRRELEVANT minus expected labels (ranked only)",
+                   "noise": "all NOISE[i] (ranked only)"},
+    "selection": {"contract": "turn payload version 2 complete-set", "token_budget": 900,
+                  "item_tokens": "ceil(UTF-8 compact capsule-item JSON bytes / 4) + 16",
+                  "complete": "all active personal memories fit: expected labels, then the rest by memory id",
+                  "ranked": "otherwise: expected labels only"},
 }
 NODE_FIELDS = ("id", "kind", "summary", "origin", "epistemic", "scope", "confidence", "source_event_ids")
 
@@ -83,8 +91,27 @@ def metric(numerator, denominator, contributors, empty_reason):
             "null_reason": None if denominator else empty_reason, "contributors": contributors}
 
 
-def assess_context(observation, expected, forbidden):
-    """Measure exact independently supplied items; diagnostics survive any failure."""
+def item_tokens(item):
+    """The compiler's conservative estimate for one serialized capsule item."""
+    body = json.dumps({field: item[field] for field in NODE_FIELDS}, ensure_ascii=False,
+                      separators=(",", ":"), allow_nan=False)
+    return -(-len(body.encode("utf-8")) // 4) + CAPSULE_ITEM_OVERHEAD_TOKENS
+
+
+def expected_selection(relevant, active):
+    """Frozen complete-set rule applied to the seeded items, never to observations."""
+    if sum(item_tokens(item) for item in active) > CORPUS["selection"]["token_budget"]:
+        return "ranked", list(relevant)
+    relevant_ids = {item["id"] for item in relevant}
+    rest = sorted((item for item in active if item["id"] not in relevant_ids), key=lambda item: item["id"])
+    return "complete", list(relevant) + rest
+
+
+def assess_context(observation, expected, forbidden, relevant=None):
+    """Measure exact independently supplied items; diagnostics survive any failure.
+
+    `expected` is the exact capsule; `relevant` (default: all expected) is the
+    subset that recall and precision count."""
     capsule = strict_json(observation.get("context_json"))
     require(isinstance(capsule, dict) and set(capsule) == {"nodes"}
             and isinstance(capsule["nodes"], list), "malformed capsule")
@@ -92,6 +119,9 @@ def assess_context(observation, expected, forbidden):
     expected_ids = [node["id"] for node in expected]
     require(len(set(expected_ids)) == len(expected_ids), "duplicate expected identity")
     by_id = {node["id"]: node for node in expected}
+    relevant = expected if relevant is None else relevant
+    relevant_ids = {node["id"] for node in relevant}
+    require(relevant_ids <= set(expected_ids), "relevant items outside expected capsule")
     ids, valid, malformed, mismatched = [], [], [], []
     for rank, node in enumerate(nodes, 1):
         if isinstance(node, dict) and isinstance(node.get("id"), str):
@@ -118,9 +148,12 @@ def assess_context(observation, expected, forbidden):
         "exact_order": metric(int(exact_order), 1, valid, "no assessed request"),
         "nontrivial_order": metric(int(exact_order and len(expected) > 1), int(len(expected) > 1),
                                    valid if len(expected) > 1 else [], "expected cardinality below two"),
-        "recall_at_2": metric(len({v["id"] for v in valid if v["rank"] <= 2}), len(expected),
-                              [v for v in valid if v["rank"] <= 2], "empty expected context"),
-        "returned_context_precision": metric(len(valid_ids), len(nodes), valid, "empty returned context"),
+        "recall_at_2": metric(len({v["id"] for v in valid if v["rank"] <= 2 and v["id"] in relevant_ids}),
+                              len(relevant), [v for v in valid if v["rank"] <= 2 and v["id"] in relevant_ids],
+                              "empty expected context"),
+        "returned_context_precision": metric(len(valid_ids & relevant_ids), len(nodes),
+                                             [v for v in valid if v["id"] in relevant_ids],
+                                             "empty returned context"),
     }
     for category, items in forbidden.items():
         leaks = []
@@ -217,7 +250,7 @@ def reconcile_observations(observations, events, plans, calls, boundary):
                     and source_run["request_id"] == plan["client_request_id"],
                     "durable input/query mismatch")
             require(event["actor"] == "system" and type(payload["event_version"]) is int
-                    and payload["event_version"] == 1
+                    and payload["event_version"] == TURN_PAYLOAD_VERSION
                     and payload["turn_id"] == plan["turn_id"] and type(payload["request_index"]) is int
                     and payload["request_index"] == 0 and event["span_id"] == request["request_id"]
                     and request["control"]["cancellation_id"] == plan["turn_id"], "model request identity mismatch")
@@ -374,14 +407,21 @@ def workload(root, binaries, noise_count, samples):
         observations = [strict_json(line) for line in observation_lines]
         reconciliation = reconcile_observations(observations, events, runs, calls, boundary)
         assessed = []
+        seeded = ("CURRENT", "PACKING", "TRAIN", "FOOD", "IRRELEVANT")
+        active_items = [memories[label]["expected_item"] for label in seeded] + [m["expected_item"] for m in memories["noise"]]
+        selection_mode = expected_selection([], active_items)[0]
         for run in reconciliation["records"]:
             case = next(c for c in CORPUS["cases"] if c["case"] == run["case"])
-            expected = [memories[label]["expected_item"] for label in case["expected"]]
-            forbidden = {"stale": [memories["OLD"]["expected_item"]], "scope": [memories["OTHER"]["expected_item"]],
-                         "irrelevant": [memories[label]["expected_item"] for label in
-                                        ("CURRENT", "PACKING", "TRAIN", "FOOD", "IRRELEVANT") if label not in case["expected"]],
-                         "noise": [m["expected_item"] for m in memories["noise"]]}
-            result = assess_context({"request_id": run["request_id"], "context_json": run["context_json"]}, expected, forbidden)
+            relevant = [memories[label]["expected_item"] for label in case["expected"]]
+            mode, expected = expected_selection(relevant, active_items)
+            forbidden = {"stale": [memories["OLD"]["expected_item"]], "scope": [memories["OTHER"]["expected_item"]]}
+            if mode == "ranked":
+                forbidden.update(
+                    irrelevant=[memories[label]["expected_item"] for label in seeded if label not in case["expected"]],
+                    noise=[m["expected_item"] for m in memories["noise"]])
+            result = assess_context({"request_id": run["request_id"], "context_json": run["context_json"]},
+                                    expected, forbidden, relevant)
+            result["selection_mode"] = mode
             result["metrics"]["identity_reconciliation"] = metric(1, 1, [run["client_request_id"]], "no planned request")
             assessed.append({**run, **result})
         total = samples * len(CORPUS["cases"])
@@ -390,6 +430,8 @@ def workload(root, binaries, noise_count, samples):
         counts["injected_driver_calls"] = len(calls)
         return {
             "profile": "minimal_history" if noise_count == 0 else "longer_history",
+            "selection_mode": selection_mode,
+            "active_personal_memory_tokens": sum(item_tokens(item) for item in active_items),
             "unrelated_memories": noise_count, "saved_memories_including_superseded": noise_count + 7,
             "samples_per_query": samples, "total_runs": total, "memories": memories, "seed_duration_ms": seed_ms,
             "startup_and_recovery_ms": server.startups, "initial": initial, "after_seed": after_seed,
@@ -406,7 +448,7 @@ def workload(root, binaries, noise_count, samples):
             "model_answer_quality": None, "task_completion": None, "semantic_recall": None, "tool_task_success": None,
             "first_useful_progress_ms": None, "isolated_model_time_ms": None, "isolated_tool_time_ms": None,
             "ditto_only_overhead_ms": None, "general_agent_quality": None, "v0_1_readiness": None,
-            "unavailable_basis": "five synthetic lexical ContextCapsule cases; fixture answers unassessed; no semantic, task-success, live usage/cost or isolated timing evidence",
+            "unavailable_basis": "five synthetic ContextCapsule cases (complete-set or lexical fallback); fixture answers unassessed; no semantic, task-success, live usage/cost or isolated timing evidence",
         }
     except (Exception, SystemExit, KeyboardInterrupt) as error:
         failure.update(type=type(error).__name__, diagnostics=getattr(error, "diagnostics", str(error)))
@@ -448,7 +490,7 @@ def main():
     except (OSError, KeyError, ValueError):
         pass
     report = {
-        "schema": 2, "workload": "task016-offline-personal-task-corpus-v1", "utc": datetime.now(timezone.utc).isoformat(),
+        "schema": 3, "workload": "task016-offline-personal-task-corpus-v2", "utc": datetime.now(timezone.utc).isoformat(),
         "history_size": args.history_size, "samples_per_query": args.samples,
         "corpus": CORPUS, "corpus_sha256": hashlib.sha256(json.dumps(CORPUS, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "corpus_hash_basis": "UTF-8 JSON, sorted keys, compact separators, no trailing newline",
@@ -471,7 +513,7 @@ def main():
             "storage": "live logical file sizes including WAL/SHM; fixture logs separately counted; excludes server stdout log",
             "comparison": "sequential fresh stores: 0 then N unrelated session memories; same frozen corpus and repetitions per query",
         },
-        "limits": "five-case synthetic lexical ContextCapsule conformance after restart; no general/model-answer quality, semantic retrieval, cross-session recall, live tokens/cost, superiority or v0.1 readiness claim",
+        "limits": "five-case synthetic ContextCapsule conformance after restart under the complete-set contract; no general/model-answer quality, semantic retrieval, cross-session recall, live tokens/cost, superiority or v0.1 readiness claim",
         "results": [],
     }
     for noise_count in (0, args.history_size):

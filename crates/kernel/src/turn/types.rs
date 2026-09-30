@@ -11,7 +11,13 @@ use thiserror::Error;
 
 use crate::KernelError;
 
-pub const TURN_PAYLOAD_VERSION: u16 = 1;
+/// Durable turn contract written by this kernel. Version 2 compiles run
+/// context with the complete-set selection (ADR 0021) and records a typed
+/// [`TurnFailureReason`] for validator-derived failures.
+pub const TURN_PAYLOAD_VERSION: u16 = 2;
+/// Oldest turn contract that replay and run status still read. Version-1
+/// turns use positive-overlap context selection and message grammar.
+pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
 pub const MAX_MODEL_REQUESTS: usize = 8;
 pub const MAX_MODEL_EVENTS_PER_REQUEST: usize = 4_096;
 pub const MAX_ASSISTANT_TEXT_BYTES: usize = 256 * 1_024;
@@ -150,6 +156,66 @@ pub struct TurnFailure {
     pub call_id: Option<ProviderCallId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<TurnFailureEvidence>,
+    /// Typed cause of a validator-derived failure; present only in version-2
+    /// turns. The message stays diagnostic text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<TurnFailureReason>,
+}
+
+/// Closed version-2 cause for failures whose message comes from a validator
+/// outside the turn state machine (context compiler, capability contracts,
+/// driver contracts, tool-call lifecycle). Replay checks this value and the
+/// stage it belongs to, never the validator's wording, so that wording can
+/// change without invalidating recorded turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnFailureReason {
+    SessionContextUnavailable,
+    DuplicateContextCandidate,
+    EmptyPolicyReason,
+    InvalidRequiredContext,
+    RequiredContextOverBudget,
+    MissingContextProvenance,
+    UnresolvedContextProvenance,
+    ArtifactReadUnavailable,
+    ArtifactReadPackageUnverified,
+    ArtifactReadManifestMismatch,
+    ArtifactReadSchemaMismatch,
+    ArtifactReadSelectionFailed,
+    SortPermissionSourceUnavailable,
+    SortContractUnavailable,
+    DriverFeaturesUnsupported,
+    DriverToolChoiceUnsupported,
+    DriverParallelCallsUnsupported,
+    RequestInvalidAtDispatch,
+    ToolCallLifecycle,
+}
+
+impl TurnFailureReason {
+    /// The failure code that always accompanies this reason.
+    pub const fn code(self) -> TurnFailureCode {
+        match self {
+            Self::SessionContextUnavailable
+            | Self::DuplicateContextCandidate
+            | Self::EmptyPolicyReason
+            | Self::InvalidRequiredContext
+            | Self::RequiredContextOverBudget
+            | Self::MissingContextProvenance
+            | Self::UnresolvedContextProvenance => TurnFailureCode::ContextCompilation,
+            Self::ArtifactReadUnavailable => TurnFailureCode::CapabilityUnavailable,
+            Self::ArtifactReadPackageUnverified
+            | Self::ArtifactReadManifestMismatch
+            | Self::ArtifactReadSchemaMismatch
+            | Self::ArtifactReadSelectionFailed
+            | Self::SortPermissionSourceUnavailable
+            | Self::SortContractUnavailable => TurnFailureCode::CapabilityContract,
+            Self::DriverFeaturesUnsupported
+            | Self::DriverToolChoiceUnsupported
+            | Self::DriverParallelCallsUnsupported
+            | Self::RequestInvalidAtDispatch => TurnFailureCode::DriverContract,
+            Self::ToolCallLifecycle => TurnFailureCode::Protocol,
+        }
+    }
 }
 
 /// Closed, typed evidence for terminal failures whose validity cannot be

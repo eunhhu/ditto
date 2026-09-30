@@ -385,7 +385,7 @@ impl ContextDirective {
 
     fn receipt_reason(&self) -> String {
         match self {
-            Self::Ranked => "task-relevance".into(),
+            Self::Ranked => TASK_RELEVANCE_REASON.into(),
             Self::UserPinned => "user-pinned".into(),
             Self::PolicyRequired { reason } => format!("policy-required: {reason}"),
         }
@@ -1031,6 +1031,36 @@ fn validate_context_query_provider(
     }
 }
 
+/// Deterministic selection contract of the five-field signature compiler.
+///
+/// A caller that persists compiled context records which contract produced it,
+/// so replay validates the receipt with the same tokenizer and inclusion rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContextSelection {
+    /// Ranked candidates need positive overlap with the query's tokens of two
+    /// or more characters. Zero-overlap candidates are excluded as irrelevant.
+    PositiveOverlap,
+    /// Common English function words never count as overlap. When required
+    /// context plus every eligible ranked candidate fits the selection budget,
+    /// all of them are included in canonical order and zero-overlap entries
+    /// carry the `complete-set` receipt reason. Otherwise selection falls back
+    /// to positive overlap within the budget.
+    CompleteSet,
+}
+
+impl ContextSelection {
+    fn tokens(self, input: &str) -> HashSet<String> {
+        let mut tokens = tokenize(input);
+        if self == Self::CompleteSet {
+            tokens.retain(|token| !is_function_word(token));
+        }
+        tokens
+    }
+}
+
+const TASK_RELEVANCE_REASON: &str = "task-relevance";
+const COMPLETE_SET_REASON: &str = "complete-set";
+
 #[derive(Debug, Clone, Copy)]
 pub struct ContextCompiler {
     pub default_budget: u32,
@@ -1047,6 +1077,7 @@ impl Default for ContextCompiler {
 }
 
 impl ContextCompiler {
+    /// Compile with the original [`ContextSelection::PositiveOverlap`] contract.
     pub fn compile(
         &self,
         signature: &TaskSignature,
@@ -1054,9 +1085,27 @@ impl ContextCompiler {
         token_budget: Option<u32>,
         now: DateTime<Utc>,
     ) -> Result<CompiledContext, ContextCompileError> {
+        self.compile_with(
+            ContextSelection::PositiveOverlap,
+            signature,
+            candidates,
+            token_budget,
+            now,
+        )
+    }
+
+    /// Compile trusted candidates under an explicit selection contract.
+    pub fn compile_with(
+        &self,
+        selection: ContextSelection,
+        signature: &TaskSignature,
+        candidates: impl IntoIterator<Item = ContextCandidate>,
+        token_budget: Option<u32>,
+        now: DateTime<Utc>,
+    ) -> Result<CompiledContext, ContextCompileError> {
         let token_budget = token_budget.unwrap_or(self.default_budget);
         let selection_budget = token_budget.min(self.absolute_budget);
-        let query_tokens = tokenize(&signature.searchable_text());
+        let query_tokens = selection.tokens(&signature.searchable_text());
         let candidates = candidates.into_iter().collect::<Vec<_>>();
         let mut candidate_ids = HashSet::with_capacity(candidates.len());
         for candidate in &candidates {
@@ -1073,6 +1122,7 @@ impl ContextCompiler {
         }
         let mut required = Vec::new();
         let mut ranked = Vec::new();
+        let mut unmatched = Vec::new();
         let mut excluded = Vec::new();
 
         for candidate in candidates {
@@ -1109,27 +1159,46 @@ impl ContextCompiler {
             let node = candidate.node;
             let capsule_item = ContextCapsuleItem::from(&node);
             let token_cost = capsule_item.token_cost();
-            let score = relevance_score(&node, &query_tokens);
-            if candidate.directive.is_required() {
-                required.push(PreparedCandidate {
-                    directive: candidate.directive,
-                    score,
-                    token_cost,
-                    node,
-                });
+            let score = relevance_score(&node, &query_tokens, selection);
+            let prepared = PreparedCandidate {
+                directive: candidate.directive,
+                score,
+                token_cost,
+                node,
+            };
+            if prepared.directive.is_required() {
+                required.push(prepared);
             } else if score > 0.0 {
-                ranked.push(PreparedCandidate {
-                    directive: candidate.directive,
-                    score,
-                    token_cost,
-                    node,
-                });
+                ranked.push(prepared);
+            } else if selection == ContextSelection::CompleteSet {
+                unmatched.push(prepared);
             } else {
                 excluded.push(ContextExclusion {
                     node_id,
                     reason: ContextExclusionReason::Irrelevant,
                     detail: None,
                 });
+            }
+        }
+
+        // Only the complete-set contract defers zero-overlap candidates: they
+        // are included when the whole eligible set fits, else irrelevant.
+        if !unmatched.is_empty() {
+            let complete_cost = required
+                .iter()
+                .chain(&ranked)
+                .chain(&unmatched)
+                .fold(0_u32, |total, candidate| {
+                    total.saturating_add(candidate.token_cost)
+                });
+            if complete_cost <= selection_budget {
+                ranked.append(&mut unmatched);
+            } else {
+                excluded.extend(unmatched.into_iter().map(|candidate| ContextExclusion {
+                    node_id: candidate.node.id,
+                    reason: ContextExclusionReason::Irrelevant,
+                    detail: None,
+                }));
             }
         }
 
@@ -1154,7 +1223,7 @@ impl ContextCompiler {
             used = used.saturating_add(candidate.token_cost);
             included.push(receipt_entry(
                 &candidate.node,
-                &candidate.directive,
+                candidate.directive.receipt_reason(),
                 candidate.score,
                 candidate.token_cost,
             ));
@@ -1171,9 +1240,14 @@ impl ContextCompiler {
                 continue;
             }
             used += candidate.token_cost;
+            let reason = if candidate.score > 0.0 {
+                candidate.directive.receipt_reason()
+            } else {
+                COMPLETE_SET_REASON.to_owned()
+            };
             included.push(receipt_entry(
                 &candidate.node,
-                &candidate.directive,
+                reason,
                 candidate.score,
                 candidate.token_cost,
             ));
@@ -1202,6 +1276,29 @@ impl ContextCompiler {
     /// directives or candidate inputs.
     pub fn validate_compiled(
         &self,
+        signature: &TaskSignature,
+        compiled: &CompiledContext,
+        capsule: &ContextCapsule,
+        token_budget: Option<u32>,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<(), CompiledContextValidationError> {
+        self.validate_compiled_with(
+            ContextSelection::PositiveOverlap,
+            signature,
+            compiled,
+            capsule,
+            token_budget,
+            accepted_at,
+        )
+    }
+
+    /// Validate a compiled context produced under an explicit selection
+    /// contract. The complete-set contract additionally requires every
+    /// `complete-set` entry to have zero overlap and forbids irrelevant or
+    /// token-budget exclusions beside it.
+    pub fn validate_compiled_with(
+        &self,
+        selection: ContextSelection,
         signature: &TaskSignature,
         compiled: &CompiledContext,
         capsule: &ContextCapsule,
@@ -1237,7 +1334,14 @@ impl ContextCompiler {
             });
         }
 
-        let query_tokens = tokenize(&signature.searchable_text());
+        let query_tokens = selection.tokens(&signature.searchable_text());
+        // A complete set leaves nothing eligible behind; find any contradiction once.
+        let incomplete_exclusion = compiled.receipt.excluded.iter().find(|exclusion| {
+            matches!(
+                exclusion.reason,
+                ContextExclusionReason::Irrelevant | ContextExclusionReason::TokenBudget
+            )
+        });
         let mut total_token_cost = 0_u32;
         let selection_budget = expected_token_budget.min(self.absolute_budget);
         let mut required_token_cost = 0_u32;
@@ -1282,14 +1386,15 @@ impl ContextCompiler {
                 });
             }
 
-            let expected_score = relevance_score(node, &query_tokens);
+            let expected_score = relevance_score(node, &query_tokens, selection);
             let expected_token_cost = capsule_item.token_cost();
-            let priority = receipt_reason_priority(&receipt.reason).ok_or_else(|| {
-                CompiledContextValidationError::InvalidReceiptReason {
-                    node_id: node.id.clone(),
-                    reason: receipt.reason.clone(),
-                }
-            })?;
+            let priority =
+                receipt_reason_priority(&receipt.reason, selection).ok_or_else(|| {
+                    CompiledContextValidationError::InvalidReceiptReason {
+                        node_id: node.id.clone(),
+                        reason: receipt.reason.clone(),
+                    }
+                })?;
 
             if receipt.node_id != node.id
                 || receipt.source_event_ids != node.source_event_ids
@@ -1311,10 +1416,23 @@ impl ContextCompiler {
                     node_id: node.id.clone(),
                 });
             }
-            if receipt.reason == "task-relevance" && receipt.score <= 0.0 {
+            if receipt.reason == TASK_RELEVANCE_REASON && receipt.score <= 0.0 {
                 return Err(CompiledContextValidationError::NonPositiveTaskRelevance {
                     node_id: node.id.clone(),
                 });
+            }
+            if receipt.reason == COMPLETE_SET_REASON {
+                if receipt.score != 0.0 {
+                    return Err(CompiledContextValidationError::CompleteSetOverlap {
+                        node_id: node.id.clone(),
+                    });
+                }
+                if let Some(exclusion) = incomplete_exclusion {
+                    return Err(CompiledContextValidationError::CompleteSetExclusion {
+                        node_id: exclusion.node_id.clone(),
+                        reason: exclusion.reason.clone(),
+                    });
+                }
             }
 
             let key = (priority, receipt.score, receipt.node_id.as_str());
@@ -1491,7 +1609,7 @@ impl ContextCompiler {
             used = used.saturating_add(candidate.token_cost);
             included.push(receipt_entry(
                 &candidate.node,
-                &candidate.directive,
+                candidate.directive.receipt_reason(),
                 candidate.score,
                 candidate.token_cost,
             ));
@@ -1510,7 +1628,7 @@ impl ContextCompiler {
             used += candidate.token_cost;
             included.push(receipt_entry(
                 &candidate.node,
-                &candidate.directive,
+                candidate.directive.receipt_reason(),
                 candidate.score,
                 candidate.token_cost,
             ));
@@ -1619,12 +1737,12 @@ impl ContextCompiler {
 
             let (expected_score, exact) = v2_relevance(node, query)?;
             let expected_token_cost = capsule_item.token_cost();
-            let priority = receipt_reason_priority(&receipt.reason).ok_or_else(|| {
-                CompiledContextValidationError::InvalidReceiptReason {
-                    node_id: node.id.clone(),
-                    reason: receipt.reason.clone(),
-                }
-            })?;
+            let priority =
+                receipt_reason_priority(&receipt.reason, ContextSelection::PositiveOverlap)
+                    .ok_or_else(|| CompiledContextValidationError::InvalidReceiptReason {
+                        node_id: node.id.clone(),
+                        reason: receipt.reason.clone(),
+                    })?;
 
             if receipt.node_id != node.id
                 || receipt.source_event_ids != node.source_event_ids
@@ -1646,7 +1764,7 @@ impl ContextCompiler {
                     node_id: node.id.clone(),
                 });
             }
-            if receipt.reason == "task-relevance" && receipt.score <= 0.0 {
+            if receipt.reason == TASK_RELEVANCE_REASON && receipt.score <= 0.0 {
                 return Err(CompiledContextValidationError::NonPositiveTaskRelevance {
                     node_id: node.id.clone(),
                 });
@@ -1898,7 +2016,7 @@ impl ContextCompiler {
                 node_id: candidate.node.id.clone(),
                 source_event_ids: candidate.node.source_event_ids.clone(),
                 epistemic: candidate.node.epistemic,
-                reason: "task-relevance".into(),
+                reason: TASK_RELEVANCE_REASON.into(),
                 score: candidate.relevance_score,
                 token_cost,
             });
@@ -1955,6 +2073,13 @@ pub enum CompiledContextValidationError {
     NonPositiveTaskRelevance { node_id: String },
     #[error("compiled context receipt for node {node_id} has an invalid reason {reason:?}")]
     InvalidReceiptReason { node_id: String, reason: String },
+    #[error("compiled context receipt marks lexically relevant node {node_id} as complete-set")]
+    CompleteSetOverlap { node_id: String },
+    #[error("compiled context claims a complete set but excludes node {node_id} as {reason:?}")]
+    CompleteSetExclusion {
+        node_id: String,
+        reason: ContextExclusionReason,
+    },
     #[error("compiled context receipt is not in canonical order at node {node_id}")]
     NonCanonicalOrder { node_id: String },
     #[error(
@@ -2056,7 +2181,7 @@ fn ranked_query_candidate_order(
 
 fn receipt_entry(
     node: &ContextNode,
-    directive: &ContextDirective,
+    reason: String,
     score: f32,
     token_cost: u32,
 ) -> ContextReceiptEntry {
@@ -2064,15 +2189,16 @@ fn receipt_entry(
         node_id: node.id.clone(),
         source_event_ids: node.source_event_ids.clone(),
         epistemic: node.epistemic,
-        reason: directive.receipt_reason(),
+        reason,
         score,
         token_cost,
     }
 }
 
-fn receipt_reason_priority(reason: &str) -> Option<u8> {
+fn receipt_reason_priority(reason: &str, selection: ContextSelection) -> Option<u8> {
     match reason {
-        "task-relevance" => Some(0),
+        TASK_RELEVANCE_REASON => Some(0),
+        COMPLETE_SET_REASON if selection == ContextSelection::CompleteSet => Some(0),
         "user-pinned" => Some(1),
         _ if reason
             .strip_prefix("policy-required: ")
@@ -2084,8 +2210,12 @@ fn receipt_reason_priority(reason: &str) -> Option<u8> {
     }
 }
 
-fn relevance_score(node: &ContextNode, query_tokens: &HashSet<String>) -> f32 {
-    let node_tokens = tokenize(&node.summary);
+fn relevance_score(
+    node: &ContextNode,
+    query_tokens: &HashSet<String>,
+    selection: ContextSelection,
+) -> f32 {
+    let node_tokens = selection.tokens(&node.summary);
     let overlap = if query_tokens.is_empty() {
         0.0
     } else {
@@ -2199,6 +2329,113 @@ fn tokenize(input: &str) -> HashSet<String> {
         .collect()
 }
 
+/// English function words that identify no fact. Spatial, temporal and
+/// quantity words stay meaningful. Sorted for binary search; the list is part
+/// of the complete-set contract, so changing it requires a new contract.
+const FUNCTION_WORDS: [&str; 97] = [
+    "about",
+    "all",
+    "am",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "because",
+    "been",
+    "being",
+    "but",
+    "by",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "doing",
+    "each",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "having",
+    "he",
+    "her",
+    "hers",
+    "herself",
+    "him",
+    "himself",
+    "his",
+    "how",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "itself",
+    "may",
+    "me",
+    "might",
+    "mine",
+    "must",
+    "my",
+    "myself",
+    "no",
+    "not",
+    "of",
+    "on",
+    "onto",
+    "or",
+    "our",
+    "ours",
+    "ourselves",
+    "shall",
+    "she",
+    "should",
+    "so",
+    "some",
+    "than",
+    "that",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "these",
+    "they",
+    "this",
+    "those",
+    "to",
+    "us",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "whom",
+    "whose",
+    "why",
+    "will",
+    "with",
+    "would",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+];
+
+fn is_function_word(token: &str) -> bool {
+    FUNCTION_WORDS.binary_search(&token).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2219,9 +2456,9 @@ mod tests {
         ContextCapsule, ContextCapsuleItem, ContextCapsuleValidationError, ContextCompileError,
         ContextCompiler, ContextEdge, ContextEdgeKind, ContextExclusion, ContextExclusionReason,
         ContextGraph, ContextLens, ContextNode, ContextNodeKind, ContextOrigin,
-        ContextQueryRanking, ContextQueryRankingError, ContextScope, ContextValidationError,
-        DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus, MAX_CONTEXT_NODE_ID_BYTES,
-        MAX_CONTEXT_NODE_SUMMARY_BYTES, MAX_CONTEXT_REFERENCE_ID_BYTES,
+        ContextQueryRanking, ContextQueryRankingError, ContextScope, ContextSelection,
+        ContextValidationError, DEFAULT_CONTEXT_ABSOLUTE_BUDGET, EpistemicStatus, FUNCTION_WORDS,
+        MAX_CONTEXT_NODE_ID_BYTES, MAX_CONTEXT_NODE_SUMMARY_BYTES, MAX_CONTEXT_REFERENCE_ID_BYTES,
         MAX_CONTEXT_SOURCE_EVENT_IDS, MAX_CONTEXT_SUPERSEDES, MAX_REQUEST_BYTES,
         MAX_RETRIEVAL_DOCUMENT_BYTES, MAX_SERIALIZED_CONTEXT_NODE_BYTES, RetrievalError, TaskQuery,
         TaskSignature, TaskSignatureV2, context_retrieval_document,
@@ -4481,6 +4718,289 @@ mod tests {
                 None,
             ),
             Err(CompiledContextValidationError::TokenAccountingMismatch { .. })
+        ));
+    }
+
+    fn memory(id: &str, summary: &str) -> ContextNode {
+        ContextNode {
+            kind: ContextNodeKind::Claim,
+            scope: ContextScope::Session,
+            lens: ContextLens::Personal,
+            ..node(id, summary)
+        }
+    }
+
+    fn personal_memories() -> Vec<ContextNode> {
+        vec![
+            memory("m-club", "Our book club now gathers in Birch Room."),
+            memory("m-dog", "The canine's name is Miso."),
+            memory("m-key", "The spare key is inside the saffron tin."),
+            memory("m-meeting", "I prefer afternoon meetings"),
+            memory("m-tin", "The saffron tin sits above the fridge."),
+        ]
+    }
+
+    fn request(text: &str) -> TaskSignature {
+        TaskSignature {
+            request: text.into(),
+            ..TaskSignature::default()
+        }
+    }
+
+    fn compile_complete_set(
+        signature: &TaskSignature,
+        nodes: &[ContextNode],
+        token_budget: Option<u32>,
+        now: chrono::DateTime<Utc>,
+    ) -> super::CompiledContext {
+        ContextCompiler::default()
+            .compile_with(
+                ContextSelection::CompleteSet,
+                signature,
+                nodes.iter().cloned().map(ContextCandidate::ranked),
+                token_budget,
+                now,
+            )
+            .expect("compile complete-set context")
+    }
+
+    fn validate_complete_set(
+        signature: &TaskSignature,
+        compiled: &super::CompiledContext,
+        token_budget: Option<u32>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<(), CompiledContextValidationError> {
+        ContextCompiler::default().validate_compiled_with(
+            ContextSelection::CompleteSet,
+            signature,
+            compiled,
+            &ContextCapsule::from(compiled),
+            token_budget,
+            now,
+        )
+    }
+
+    fn ids(compiled: &super::CompiledContext) -> Vec<&str> {
+        compiled.nodes.iter().map(|node| node.id.as_str()).collect()
+    }
+
+    #[test]
+    fn function_words_are_sorted_unique_and_leave_content_words() {
+        assert!(FUNCTION_WORDS.windows(2).all(|pair| pair[0] < pair[1]));
+        let tokens =
+            ContextSelection::CompleteSet.tokens("What is my meeting preference above the fridge?");
+        let mut tokens = tokens.into_iter().collect::<Vec<_>>();
+        tokens.sort();
+        assert_eq!(tokens, ["above", "fridge", "meeting", "preference"]);
+        assert_eq!(
+            ContextSelection::PositiveOverlap
+                .tokens("What is my meeting preference?")
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn complete_set_includes_paraphrased_memories_when_the_whole_set_fits() {
+        let now = Utc::now();
+        let memories = personal_memories();
+        let everyone = ["m-club", "m-dog", "m-key", "m-meeting", "m-tin"];
+        for (text, relevant) in [
+            // Paraphrases share no content word with the memory that answers them.
+            ("What do I call my pet dog?", &[][..]),
+            (
+                "Where should I go for the reading group get-together?",
+                &[][..],
+            ),
+            ("What is my meeting preference?", &[][..]),
+            // A partial lexical match ranks first; its composition partner follows.
+            ("Where is the backup house key kept?", &["m-key"][..]),
+        ] {
+            let signature = request(text);
+            let compiled = compile_complete_set(&signature, &memories, None, now);
+            let mut expected = relevant.to_vec();
+            expected.extend(everyone.iter().filter(|id| !relevant.contains(id)));
+            assert_eq!(ids(&compiled), expected, "{text}");
+            assert!(compiled.receipt.excluded.is_empty(), "{text}");
+            for entry in &compiled.receipt.included {
+                if relevant.contains(&entry.node_id.as_str()) {
+                    assert_eq!(entry.reason, "task-relevance");
+                    assert!(entry.score > 0.0);
+                } else {
+                    assert_eq!(entry.reason, "complete-set");
+                    assert_eq!(entry.score.to_bits(), 0.0_f32.to_bits());
+                }
+            }
+            validate_complete_set(&signature, &compiled, None, now).expect("valid complete set");
+            // The positive-overlap contract never accepts a complete-set receipt
+            // (its reason, and here also its function-word scores, differ).
+            assert!(
+                ContextCompiler::default()
+                    .validate_compiled(
+                        &signature,
+                        &compiled,
+                        &ContextCapsule::from(&compiled),
+                        None,
+                        now,
+                    )
+                    .is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_words_no_longer_make_unrelated_memories_relevant() {
+        let now = Utc::now();
+        let sister = memory("m-sister", "My sister's name is Ana.");
+        let preference = memory("m-meeting", "I prefer afternoon meetings");
+        let signature = request("What is my meeting preference?");
+        let candidates = [sister.clone(), preference.clone()];
+
+        // The original contract selects the unrelated memory through "is"/"my"
+        // and misses the inflected answer.
+        let legacy = ContextCompiler::default()
+            .compile(
+                &signature,
+                candidates.iter().cloned().map(ContextCandidate::ranked),
+                None,
+                now,
+            )
+            .expect("legacy compile");
+        assert_eq!(ids(&legacy), ["m-sister"]);
+
+        // Over budget, the complete-set contract falls back to positive overlap
+        // without function words, so neither memory is claimed as relevant.
+        let fallback = compile_complete_set(&signature, &candidates, Some(1), now);
+        assert!(fallback.nodes.is_empty());
+        assert_eq!(
+            fallback
+                .receipt
+                .excluded
+                .iter()
+                .map(|entry| (entry.node_id.as_str(), &entry.reason))
+                .collect::<Vec<_>>(),
+            [
+                ("m-sister", &ContextExclusionReason::Irrelevant),
+                ("m-meeting", &ContextExclusionReason::Irrelevant),
+            ]
+        );
+        validate_complete_set(&signature, &fallback, Some(1), now).expect("valid fallback");
+    }
+
+    #[test]
+    fn complete_set_falls_back_to_positive_overlap_when_the_set_exceeds_the_budget() {
+        let now = Utc::now();
+        let memories = personal_memories();
+        let signature = request("Where does the book club meet?");
+        let club_cost = ContextCapsuleItem::from(&memories[0]).token_cost();
+        let compiled = compile_complete_set(&signature, &memories, Some(club_cost), now);
+        assert_eq!(ids(&compiled), ["m-club"]);
+        assert_eq!(compiled.receipt.included[0].reason, "task-relevance");
+        let mut excluded = compiled
+            .receipt
+            .excluded
+            .iter()
+            .map(|entry| (entry.node_id.as_str(), entry.reason.clone()))
+            .collect::<Vec<_>>();
+        excluded.sort_by(|left, right| left.0.cmp(right.0));
+        assert_eq!(
+            excluded,
+            ["m-dog", "m-key", "m-meeting", "m-tin"]
+                .map(|id| (id, ContextExclusionReason::Irrelevant))
+        );
+        validate_complete_set(&signature, &compiled, Some(club_cost), now)
+            .expect("valid ranked fallback");
+
+        // One token more than the complete set still includes everything.
+        let complete_cost = memories
+            .iter()
+            .map(|node| ContextCapsuleItem::from(node).token_cost())
+            .sum::<u32>();
+        let complete = compile_complete_set(&signature, &memories, Some(complete_cost), now);
+        assert_eq!(complete.nodes.len(), memories.len());
+        let over = compile_complete_set(&signature, &memories, Some(complete_cost - 1), now);
+        assert_eq!(ids(&over), ["m-club"]);
+    }
+
+    #[test]
+    fn complete_set_keeps_required_context_first() {
+        let now = Utc::now();
+        let memories = personal_memories();
+        let pinned = memory("a-pinned", "Always answer briefly.");
+        let signature = request("Where is the backup house key kept?");
+        let compiled = ContextCompiler::default()
+            .compile_with(
+                ContextSelection::CompleteSet,
+                &signature,
+                std::iter::once(ContextCandidate::user_pinned(pinned))
+                    .chain(memories.iter().cloned().map(ContextCandidate::ranked)),
+                None,
+                now,
+            )
+            .expect("compile pinned complete set");
+        assert_eq!(
+            ids(&compiled),
+            ["a-pinned", "m-key", "m-club", "m-dog", "m-meeting", "m-tin"]
+        );
+        assert_eq!(compiled.receipt.included[0].reason, "user-pinned");
+        validate_complete_set(&signature, &compiled, None, now).expect("valid pinned set");
+    }
+
+    #[test]
+    fn complete_set_validation_rejects_forged_receipts() {
+        let now = Utc::now();
+        let signature = request("Where is the backup house key kept?");
+        let compiled = compile_complete_set(&signature, &personal_memories(), None, now);
+        validate_complete_set(&signature, &compiled, None, now).expect("valid baseline");
+
+        let mut relabeled = compiled.clone();
+        relabeled.receipt.included[1].reason = "task-relevance".into();
+        assert!(matches!(
+            validate_complete_set(&signature, &relabeled, None, now),
+            Err(CompiledContextValidationError::NonPositiveTaskRelevance { .. })
+        ));
+
+        let mut relevant_as_complete = compiled.clone();
+        relevant_as_complete.receipt.included[0].reason = "complete-set".into();
+        assert!(matches!(
+            validate_complete_set(&signature, &relevant_as_complete, None, now),
+            Err(CompiledContextValidationError::CompleteSetOverlap { .. })
+        ));
+
+        for reason in [
+            ContextExclusionReason::Irrelevant,
+            ContextExclusionReason::TokenBudget,
+        ] {
+            let mut incomplete = compiled.clone();
+            incomplete.receipt.excluded.push(ContextExclusion {
+                node_id: "m-hidden".into(),
+                reason: reason.clone(),
+                detail: None,
+            });
+            assert_eq!(
+                validate_complete_set(&signature, &incomplete, None, now),
+                Err(CompiledContextValidationError::CompleteSetExclusion {
+                    node_id: "m-hidden".into(),
+                    reason,
+                })
+            );
+        }
+        let mut invalid_excluded = compiled.clone();
+        invalid_excluded.receipt.excluded.push(ContextExclusion {
+            node_id: "m-expired".into(),
+            reason: ContextExclusionReason::DisputedOrExpired,
+            detail: None,
+        });
+        validate_complete_set(&signature, &invalid_excluded, None, now)
+            .expect("inactive exclusions do not contradict a complete set");
+
+        let mut reordered = compiled.clone();
+        reordered.nodes.swap(1, 2);
+        reordered.receipt.included.swap(1, 2);
+        assert!(matches!(
+            validate_complete_set(&signature, &reordered, None, now),
+            Err(CompiledContextValidationError::NonCanonicalOrder { .. })
         ));
     }
 }

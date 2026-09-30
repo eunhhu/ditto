@@ -45,8 +45,9 @@ The executable foundation includes:
 - orthogonal effect profiles and fail-closed lease primitives;
 - versioned provider-neutral model IR, a closed OpenAI Responses adapter, and an
   injected-driver read-only artifact continuation loop;
-- explicit CLI/HTTP model runs with current session context, durable retry
-  identity, cancellation, and restart inspection;
+- explicit CLI/HTTP model runs with current session context (the complete
+  memory set when it fits the context budget), durable retry identity,
+  cancellation, and restart inspection;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - model-directed sorting of one explicitly attached file, with separate permission
@@ -133,8 +134,14 @@ before submission. If submission is uncertain, inspect first and reuse the same
 ID only for the identical request. Terminal controls in human fields are escaped,
 including newlines displayed as `\n`, so content cannot impersonate status lines.
 
-Runs default to the `personal` session. Relevant current session memory is
-compiled into context; prior conversation text is not automatically reinserted.
+Runs default to the `personal` session. Current session memory is compiled
+into context: while the whole set fits the context budget (about a dozen short
+memories), the model receives all of it with lexical matches first, so a
+paraphrased question such as "What is my meeting preference?" still reaches
+"I prefer afternoon meetings". Larger sessions fall back to lexical matching and
+can miss paraphrases until semantic retrieval exists. Superseded and
+other-session memories are never sent, and prior conversation text is not
+automatically reinserted.
 The model can answer directly or read an already-rooted, same-scope artifact.
 An explicit attachment also permits one bounded sort:
 
@@ -326,12 +333,13 @@ See the [Task 014 contract](docs/agent/tasks/014-status-baselines.md) and
 
 The Task 015 harness compares zero versus 1,000 unrelated memories by default,
 with five unique queries per profile after exact correction and process restart.
-It checks the actual model-facing capsule for corrected inclusion and stale,
-irrelevant, noise and other-session exclusion, independently of the fixed fixture
-answer. `--history-size` (1–5000) and `--samples` (2–100) bound the work; the
+It checks the actual model-facing capsule against a frozen rule: the complete
+current memory set when it fits the budget, otherwise only the lexical matches,
+always without stale or other-session memories, independently of the fixed
+fixture answer. `--history-size` (1–5000) and `--samples` (2–100) bound the work; the
 canonical gate runs a small smoke. Raw samples, context bytes/nodes, RSS,
 storage/events, call counts and exact source/Cargo artifact hashes are recorded.
-This is one synthetic V1 lexical scenario, not general or live-answer quality,
+This is one synthetic scenario, not general or live-answer quality,
 semantic retrieval, cross-session recall or performance superiority. See the
 [Task 015 contract](docs/agent/tasks/015-quality-history-workloads.md) and
 [evidence](docs/agent/tasks/015-evidence.md). Raw reports stay out of the

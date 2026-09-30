@@ -18,12 +18,14 @@ and checks establish a new fact.
 ## Repository state
 
 - Base: main `58b2b02` (Task 016, PR #21). Work branch
-  `dev/task-016-1-personal-recall` preserves the drafted
-  [Task 017](tasks/017-evaluation-outcomes.md) specification unchanged.
-- On 2026-09-30 a codebase review found that production run context misses
-  paraphrased or inflected questions and admits unrelated memories (details
-  under known gaps). The user prioritized fixing it, trimming process overhead
-  and splitting the turn loop before Task 017's measured runs.
+  `dev/task-016-1-personal-recall` holds, in order: the preserved
+  [Task 017](tasks/017-evaluation-outcomes.md) draft, raw-report and handoff
+  trimming, the behavior-preserving turn-loop split, and Task 016.1.
+- On 2026-09-30 a codebase review found that run context missed paraphrased or
+  inflected questions and admitted unrelated memories, and that replay parsed
+  validator wording. The user prioritized fixing both, trimming process
+  overhead and splitting the turn loop before Task 017's measured runs; Task
+  016.1 addresses the first two.
 - Raw measurement reports are no longer tracked. Tasks 014–016 reports remain
   retrievable with `git show 58b2b02:docs/agent/tasks/<report>.json`; their
   evidence files record the digests. The canary rejects tracked
@@ -44,9 +46,11 @@ and checks establish a new fact.
   bounded high-water snapshot in pages and recovers gaps or lag from storage.
 - **Context.** Explicit memories promote exact same-session user input; a
   correction supersedes one active memory; listing rechecks source text. Runs
-  compile the verified active session/task snapshot with the V1 lexical
-  compiler (default budget 900 estimated tokens, absolute 1,800). There is no
-  transcript injection, cross-session memory or production semantic retrieval.
+  compile the verified active session/task snapshot with the complete-set
+  contract (ADR 0021): the whole current set when it fits the budget (default
+  900 estimated tokens, about twelve short memories), otherwise positive
+  lexical overlap without function words. There is no transcript injection,
+  cross-session memory or production semantic retrieval.
   The separate V2 joint working-set query is lexical in production with an
   injected embedding seam for tests.
 - **Capabilities.** Generated package headers keep full manifests out of
@@ -63,14 +67,17 @@ and checks establish a new fact.
   redacted transport-only key and ephemeral storage. The daemon defaults to a
   disabled provider. The kernel turn loop compiles context, pages
   `artifact.read` (plus `artifact.sort` only for a permitted attachment), runs
-  at most eight model requests, journals versioned transitions (turn payload
-  version 1) before publication and replays without provider or artifact I/O.
-  Answers stay `unverified`; model runs never emit `task.completed`. The loop
+  at most eight model requests, journals versioned transitions before
+  publication and replays without provider or artifact I/O. New turns write
+  payload version 2 with typed `TurnFailureReason`s for validator-derived
+  failures; version-1 turns replay under their original rules and a turn never
+  mixes versions. Answers stay `unverified`; model runs never emit
+  `task.completed`. The loop
   is split into stage functions (context, capability selection, request
   dispatch, stream admission, tool execution, finish); cancellation/deadline
   checkpoint messages are one shared `Checkpoint` table used by runtime and
-  replay. The split changed no behavior: all 485 workspace tests and the five
-  built-CLI scenarios passed on 2026-09-30.
+  replay; the split itself changed no behavior (485 workspace tests and the five
+  built-CLI scenarios passed before Task 016.1).
 - **Local work and schedules.** The closed `/usr/bin/sort` profile (64 KiB /
   4,096 lines, five seconds, cleared environment, private scratch,
   process-group cleanup) has an independent verifier and a sort-specific
@@ -81,30 +88,33 @@ and checks establish a new fact.
   one execution slot; other immediate requests are rejected as busy.
 - **Measurement.** Task 014 recorded an offline RAM/latency/accounting
   baseline; Tasks 015–016 recorded five literal synthetic queries at zero and
-  1,000 unrelated memories. They do not measure paraphrase recall, answer
-  quality, tool-task success, live cost or v0.1 readiness.
+  1,000 unrelated memories; corpus schema 3 (Task 016.1) derives expected
+  capsules from the complete-set rule. None of these measures answer quality,
+  semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 016
+## Latest verified slice: Task 016.1
 
-- Offline harness schema 2 with a frozen seven-seed/five-query corpus, zero and
-  N unrelated memories, exact capsule set/order/metadata/provenance, durable
-  identity reconciliation and atomic report publication.
-- Verified 2026-09-18: 18 quality and 8 baseline Python regressions, the
-  canonical gate (490 Rust tests), cached Rust 1.88 check and the fifty-run
-  default report. Details: [evidence](tasks/016-evidence.md).
+- [Contract and evidence](tasks/016-1-personal-recall.md). A kernel regression
+  copied onto the pre-change tree failed (`left: 0, right: 6`: no memory reached
+  the model for a paraphrased question) and passes now; superseded and
+  other-session memories stay absent. Replay covers version-1 relabeling, mixed
+  and unsupported versions, and forged or missing typed reasons, including all
+  three driver-contract reasons.
+- The canonical gate passed on the final tree on 2026-09-30 (10 min 40 s on a
+  Raspberry Pi 5): canaries, formatting, strict Clippy, 500 Rust tests (495
+  workspace including doctests, five built-CLI scenarios), 8 baseline and 21
+  quality Python tests, and both smoke workloads; the corpus smoke ran the
+  complete-set mode (zero noise) and the lexical fallback (twelve noise).
+  `cargo +1.88.0 check --offline --locked --workspace --all-targets` passed.
+- Previous slice: Task 016 ([evidence](tasks/016-evidence.md)), schema 2.
 
-## Known gaps found by review (2026-09-30)
+## Known gaps
 
-- V1 selection counts only exact token overlap (no stemming or function-word
-  filtering) and every run query also contains the fixed text
-  `local content read`. A probe of the real compiler selected four unrelated
-  memories, but not `I prefer afternoon meetings`, for
-  `What is my meeting preference?`; paraphrases fail the same way. The Task
-  015/016 corpus used literal queries without function words, so it could not
-  detect this.
-- Replay validates validator-derived failure text (context compiler, manifest
-  and driver-contract errors) by string grammar, so upstream wording changes
-  can invalidate recorded turns.
+- Sessions whose current memories exceed the context budget fall back to
+  lexical overlap, so a pure paraphrase can miss. Semantic retrieval (deferred)
+  or a larger budget (a cost decision for the user) would close it.
+- Version-1 turns still replay through the frozen failure-message grammar;
+  only historical traces depend on it.
 - The scheduler sleeps on a monotonic timer and has no resume wake-up, so a
   suspended laptop may delay or miss a start window. Not reproduced.
 

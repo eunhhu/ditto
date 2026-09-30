@@ -337,6 +337,11 @@ impl Drop for ActiveGuard {
     }
 }
 
+/// Run status reads every turn payload version that replay still accepts.
+fn supported_turn_version(version: u16) -> bool {
+    (crate::turn::MIN_TURN_PAYLOAD_VERSION..=crate::turn::TURN_PAYLOAD_VERSION).contains(&version)
+}
+
 pub(crate) fn validate_query(query: &AgentRunQuery) -> Result<String, AgentRunError> {
     SessionId::new(&query.session_id)
         .map_err(|_| AgentRunError::Invalid("session ID is not canonical"))?;
@@ -424,7 +429,7 @@ impl DittoKernel {
                 let terminal: TurnFinishedPayload =
                     serde_json::from_value(last.payload).map_err(|_| AgentRunError::Storage)?;
                 if last.actor != EventActor::System
-                    || terminal.event_version != 1
+                    || !supported_turn_version(terminal.event_version)
                     || terminal.turn_id != response.turn_id
                     || terminal.outcome.turn_id != response.turn_id
                     || terminal.outcome.session_id != response.session_id
@@ -440,7 +445,7 @@ impl DittoKernel {
                 let terminal: TurnFailedPayload =
                     serde_json::from_value(last.payload).map_err(|_| AgentRunError::Storage)?;
                 if last.actor != EventActor::System
-                    || terminal.event_version != 1
+                    || !supported_turn_version(terminal.event_version)
                     || terminal.turn_id != response.turn_id
                     || terminal.failure.turn_id != response.turn_id
                     || terminal.failure.session_id != response.session_id

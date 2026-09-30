@@ -6,11 +6,13 @@ use ditto_artifact_read::{
     ArtifactReadResource, ArtifactReadResult, capability_schema, validate_artifact_read_manifest,
 };
 use ditto_capability::{CapabilityCard, CapabilityDeriver, CapabilityRevision, CapabilitySchema};
-use ditto_context::{CompiledContext, ContextCapsule, ContextCompiler, TaskSignature};
+use ditto_context::{
+    CompiledContext, ContextCapsule, ContextCompiler, ContextSelection, TaskSignature,
+};
 use ditto_model::{
     CancellationId, ContentPart, ConversationItem, ExecutionEpochId, FinishReason,
     GenerationControls, ModelEvent, ModelFeature, ModelRequest, OutputConstraint,
-    ParallelToolCalls, ProviderCallId, ToolCallBuffer, ToolChoice, ToolUsePolicy,
+    ParallelToolCalls, ProviderCallId, ToolCallBuffer, ToolCallError, ToolChoice, ToolUsePolicy,
 };
 use ditto_protocol::{EventActor, EventRecord, event_kind};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -22,6 +24,7 @@ use crate::normalize_input_text;
 mod sort_replay;
 use super::sort::{ReplayedSortCall, SortGrant};
 
+use super::run::turn_signature;
 use super::shared::{
     Checkpoint, ReadyCall, append_assistant_text, bounded_turn_failure_message,
     stable_system_prefix, turn_failure_code_for_model,
@@ -31,10 +34,11 @@ use super::types::{
     CapabilitiesSelectedPayload, CapabilityRequestedPayload, ContextCompiledPayload,
     ExecutionOutputPayload, ExecutionStartedPayload, MAX_ASSISTANT_TEXT_BYTES,
     MAX_MODEL_EVENTS_PER_REQUEST, MAX_MODEL_OUTPUT_BYTES_PER_REQUEST, MAX_MODEL_OUTPUT_EVENT_BYTES,
-    MAX_MODEL_REQUESTS, MAX_TURN_DURATION, MAX_TURN_FAILURE_MESSAGE_BYTES, ModelOutputPayload,
-    ModelRequestedPayload, ReplayError, ReplayedArtifactReadCall, ReplayedReadOnlyTurn,
-    TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFailureEvidence,
-    TurnFinishedPayload, TurnSequenceSpan,
+    MAX_MODEL_REQUESTS, MAX_TURN_DURATION, MAX_TURN_FAILURE_MESSAGE_BYTES,
+    MIN_TURN_PAYLOAD_VERSION, ModelOutputPayload, ModelRequestedPayload, ReplayError,
+    ReplayedArtifactReadCall, ReplayedReadOnlyTurn, TURN_PAYLOAD_VERSION, TurnFailedPayload,
+    TurnFailure, TurnFailureCode, TurnFailureEvidence, TurnFailureReason, TurnFinishedPayload,
+    TurnSequenceSpan,
 };
 
 #[derive(Debug, Deserialize)]
@@ -45,21 +49,29 @@ struct InputPayload {
     agent_run: Option<crate::agent_run::AgentRunMetadata>,
 }
 
+/// Validate recorded context with the selection contract of its turn version:
+/// version 1 used positive overlap and appended `local content read` to the
+/// request; version 2 uses the complete-set contract on the request alone.
 fn validate_compiled_context_payload(
     compiled: &CompiledContext,
     capsule: &ContextCapsule,
     input_text: &str,
     accepted_at: DateTime<Utc>,
+    version: u16,
 ) -> Result<(), ReplayError> {
-    let signature = TaskSignature {
-        request: input_text.to_owned(),
-        active_goal: None,
-        entities: Vec::new(),
-        constraints: Vec::new(),
-        expected_effect: Some("local content read".into()),
+    let (selection, signature) = if version == 1 {
+        (
+            ContextSelection::PositiveOverlap,
+            TaskSignature {
+                expected_effect: Some("local content read".into()),
+                ..turn_signature(input_text)
+            },
+        )
+    } else {
+        (ContextSelection::CompleteSet, turn_signature(input_text))
     };
     ContextCompiler::default()
-        .validate_compiled(&signature, compiled, capsule, None, accepted_at)
+        .validate_compiled_with(selection, &signature, compiled, capsule, None, accepted_at)
         .map_err(|error| replay_invalid(error.to_string()))
 }
 fn validate_execution_result(
@@ -178,6 +190,9 @@ pub fn replay_artifact_read_turn(
 }
 
 struct ReplayProjector<'turn, 'snapshot> {
+    /// Turn payload version, fixed by the first versioned payload; every later
+    /// payload of the turn must carry the same version.
+    version: Option<u16>,
     agent_run: bool,
     sort: Option<SortGrant>,
     sort_claimed: bool,
@@ -300,6 +315,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         let input_text = input.text;
         let conversation = super::sort::initial_conversation(input_text.clone(), sort.as_ref());
         Ok(Self {
+            version: None,
             agent_run,
             sort,
             sort_claimed: false,
@@ -334,7 +350,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             return Ok(ArtifactReadTurnReplay::Failed { failure });
         }
         let context_event = self.take(event_kind::CONTEXT_COMPILED, EventActor::System)?;
-        let context: ContextCompiledPayload = decode_versioned(context_event)?;
+        let context: ContextCompiledPayload = self.decode_versioned(context_event)?;
         self.require_turn_id(&context.turn_id)?;
         if context_event.span_id.is_some() {
             return Err(replay_invalid("context.compiled must not carry a span id"));
@@ -344,6 +360,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             &context.capsule,
             &self.input_text,
             self.input_recorded_at,
+            context.event_version,
         )?;
         self.validate_context_sources(&context, context_event)?;
         self.context = Some(context.capsule.clone());
@@ -353,7 +370,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             return Ok(ArtifactReadTurnReplay::Failed { failure });
         }
         let selected_event = self.take(event_kind::CAPABILITIES_SELECTED, EventActor::System)?;
-        let selected: CapabilitiesSelectedPayload = decode_versioned(selected_event)?;
+        let selected: CapabilitiesSelectedPayload = self.decode_versioned(selected_event)?;
         self.require_turn_id(&selected.turn_id)?;
         if selected_event.span_id.is_some() {
             return Err(replay_invalid(
@@ -439,7 +456,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 return Err(replay_invalid("model request bound was exceeded"));
             }
             let request_event = self.take(event_kind::MODEL_REQUESTED, EventActor::System)?;
-            let persisted: ModelRequestedPayload = decode_versioned(request_event)?;
+            let persisted: ModelRequestedPayload = self.decode_versioned(request_event)?;
             self.require_turn_id(&persisted.turn_id)?;
             if persisted.request_index as usize != request_index {
                 return Err(replay_invalid("model request index is not contiguous"));
@@ -464,10 +481,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     .take_failure()?
                     .ok_or_else(|| replay_invalid("post-request contract failure is missing"))?;
                 let valid = match failure.code {
-                    TurnFailureCode::DriverContract => {
-                        failure.message == bounded_turn_failure_message(&message)
-                            && failure.evidence.is_none()
-                    }
+                    TurnFailureCode::DriverContract => self.valid_reasoned_failure(
+                        &failure,
+                        &[TurnFailureReason::RequestInvalidAtDispatch],
+                        |recorded| recorded == bounded_turn_failure_message(&message),
+                    ),
                     _ => self.valid_checkpoint_failure(
                         &failure,
                         failure_event_time,
@@ -523,7 +541,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     ));
                 }
                 model_output_bytes = model_output_bytes.saturating_add(encoded_output_bytes);
-                let output: ModelOutputPayload = decode_versioned(output_event)?;
+                let output: ModelOutputPayload = self.decode_versioned(output_event)?;
                 self.require_turn_id(&output.turn_id)?;
                 let deadline = self.deadline.expect("first request set the deadline");
                 if output.admitted_at < request_event.recorded_at
@@ -598,12 +616,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         let rebuilt = match rebuilt {
                             Ok(rebuilt) => rebuilt,
                             Err(error) => {
-                                let failure = self.take_exact_failure(
-                                    TurnFailureCode::Protocol,
-                                    error.to_string(),
-                                    Some(request_index as u8),
-                                    Some(error.call_id().clone()),
-                                )?;
+                                let failure = self.take_tool_call_failure(&error, request_index)?;
                                 return Ok(ArtifactReadTurnReplay::Failed { failure });
                             }
                         };
@@ -615,12 +628,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         let rebuilt = match tool_buffer.push_arguments(call_id, delta) {
                             Ok(rebuilt) => rebuilt,
                             Err(error) => {
-                                let failure = self.take_exact_failure(
-                                    TurnFailureCode::Protocol,
-                                    error.to_string(),
-                                    Some(request_index as u8),
-                                    Some(error.call_id().clone()),
-                                )?;
+                                let failure = self.take_tool_call_failure(&error, request_index)?;
                                 return Ok(ArtifactReadTurnReplay::Failed { failure });
                             }
                         };
@@ -656,12 +664,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         let rebuilt = match tool_buffer.finish(call_id) {
                             Ok(rebuilt) => rebuilt,
                             Err(error) => {
-                                let failure = self.take_exact_failure(
-                                    TurnFailureCode::Protocol,
-                                    error.to_string(),
-                                    Some(request_index as u8),
-                                    Some(error.call_id().clone()),
-                                )?;
+                                let failure = self.take_tool_call_failure(&error, request_index)?;
                                 return Ok(ArtifactReadTurnReplay::Failed { failure });
                             }
                         };
@@ -729,6 +732,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     || failure.message != bounded_turn_failure_message(&model_failure.message)
                     || failure.request_index != Some(request_index as u8)
                     || failure.call_id != model_failure.call_id
+                    || failure.reason.is_some()
                     || (failure.code == TurnFailureCode::DeadlineExceeded
                         && !self.valid_deadline_failure(&failure, failure_event_time))
                     || (failure.code != TurnFailureCode::DeadlineExceeded
@@ -822,7 +826,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     let capability_event =
                         self.take(event_kind::CAPABILITY_REQUESTED, EventActor::Model)?;
                     let capability: CapabilityRequestedPayload =
-                        decode_versioned(capability_event)?;
+                        self.decode_versioned(capability_event)?;
                     self.require_turn_id(&capability.turn_id)?;
                     if capability_event.span_id.as_deref() != Some(capability.call_id.as_str()) {
                         return Err(replay_invalid(
@@ -889,7 +893,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
 
                     let started_event =
                         self.take(event_kind::EXECUTION_STARTED, EventActor::Capability)?;
-                    let started: ExecutionStartedPayload = decode_versioned(started_event)?;
+                    let started: ExecutionStartedPayload = self.decode_versioned(started_event)?;
                     self.require_turn_id(&started.turn_id)?;
                     if started_event.span_id.as_deref() != Some(started.call_id.as_str()) {
                         return Err(replay_invalid("execution.started span id is inconsistent"));
@@ -943,7 +947,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     }
                     let output_event =
                         self.take(event_kind::EXECUTION_OUTPUT, EventActor::Capability)?;
-                    let output: ExecutionOutputPayload = decode_versioned(output_event)?;
+                    let output: ExecutionOutputPayload = self.decode_versioned(output_event)?;
                     self.require_turn_id(&output.turn_id)?;
                     if output_event.span_id.as_deref() != Some(output.call_id.as_str()) {
                         return Err(replay_invalid("execution.output span id is inconsistent"));
@@ -1041,7 +1045,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     }
                     let finished_event =
                         self.take(event_kind::TURN_FINISHED, EventActor::System)?;
-                    let finished: TurnFinishedPayload = decode_versioned(finished_event)?;
+                    let finished: TurnFinishedPayload = self.decode_versioned(finished_event)?;
                     self.require_turn_id(&finished.turn_id)?;
                     if finished_event.span_id.is_some() {
                         return Err(replay_invalid("turn.finished must not carry a span id"));
@@ -1297,7 +1301,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             return Err(replay_invalid("turn.failed must not carry a span id"));
         }
         self.index += 1;
-        let payload: TurnFailedPayload = decode_versioned(event)?;
+        let payload: TurnFailedPayload = self.decode_versioned(event)?;
         if payload.turn_id != self.turn_id
             || payload.failure.turn_id != self.turn_id
             || payload.failure.session_id != self.session_id
@@ -1308,6 +1312,15 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             || payload.failure.message.len() > MAX_TURN_FAILURE_MESSAGE_BYTES
         {
             return Err(replay_invalid("turn.failed scope is inconsistent"));
+        }
+        if payload
+            .failure
+            .reason
+            .is_some_and(|reason| self.version == Some(1) || reason.code() != payload.failure.code)
+        {
+            return Err(replay_invalid(
+                "turn.failed reason contradicts its payload version or code",
+            ));
         }
         if self.index != self.events.len() {
             return Err(replay_invalid("events follow turn.failed"));
@@ -1329,10 +1342,21 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             .expect("next event was checked as turn.failed");
         let valid = match failure.code {
             TurnFailureCode::ContextCompilation => {
-                (valid_context_compilation_failure_message(&failure.message)
-                    || (self.agent_run
-                        && failure.message == "verified session context is unavailable"))
-                    && failure.evidence.is_none()
+                let mut allowed = vec![
+                    TurnFailureReason::DuplicateContextCandidate,
+                    TurnFailureReason::EmptyPolicyReason,
+                    TurnFailureReason::InvalidRequiredContext,
+                    TurnFailureReason::RequiredContextOverBudget,
+                    TurnFailureReason::MissingContextProvenance,
+                    TurnFailureReason::UnresolvedContextProvenance,
+                ];
+                if self.agent_run {
+                    allowed.push(TurnFailureReason::SessionContextUnavailable);
+                }
+                self.valid_reasoned_failure(&failure, &allowed, |message| {
+                    valid_context_compilation_failure_message(message)
+                        || (self.agent_run && message == "verified session context is unavailable")
+                })
             }
             _ => self.valid_checkpoint_failure(
                 &failure,
@@ -1355,18 +1379,33 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         let failure = self
             .take_failure()?
             .expect("next event was checked as turn.failed");
-        let valid = (failure.code == TurnFailureCode::CapabilityUnavailable
-            && failure.message == "installed artifact.read capability is unavailable"
-            && failure.evidence.is_none())
-            || (failure.code == TurnFailureCode::CapabilityContract
-                && (valid_capability_contract_failure_message(&failure.message)
-                    || (self.sort.is_some()
-                        && matches!(
-                            failure.message.as_str(),
-                            "sort permission source is unavailable"
-                                | "installed artifact.sort contract is unavailable"
-                        )))
-                && failure.evidence.is_none());
+        let mut allowed = vec![
+            TurnFailureReason::ArtifactReadUnavailable,
+            TurnFailureReason::ArtifactReadPackageUnverified,
+            TurnFailureReason::ArtifactReadManifestMismatch,
+            TurnFailureReason::ArtifactReadSchemaMismatch,
+            TurnFailureReason::ArtifactReadSelectionFailed,
+        ];
+        if self.sort.is_some() {
+            allowed.extend([
+                TurnFailureReason::SortPermissionSourceUnavailable,
+                TurnFailureReason::SortContractUnavailable,
+            ]);
+        }
+        let code = failure.code;
+        let sort = self.sort.is_some();
+        let valid = self.valid_reasoned_failure(&failure, &allowed, |message| {
+            (code == TurnFailureCode::CapabilityUnavailable
+                && message == "installed artifact.read capability is unavailable")
+                || (code == TurnFailureCode::CapabilityContract
+                    && (valid_capability_contract_failure_message(message)
+                        || (sort
+                            && matches!(
+                                message,
+                                "sort permission source is unavailable"
+                                    | "installed artifact.sort contract is unavailable"
+                            ))))
+        });
         if !valid || failure.request_index.is_some() || failure.call_id.is_some() {
             return Err(replay_invalid(
                 "turn.failed is not valid during capability selection",
@@ -1391,13 +1430,17 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             .take_failure()?
             .expect("next event was checked as turn.failed");
         let valid = match failure.code {
-            TurnFailureCode::DriverContract => {
-                valid_driver_contract_failure_message(
-                    &failure.message,
-                    request_index,
-                    self.agent_run,
-                ) && failure.evidence.is_none()
-            }
+            TurnFailureCode::DriverContract => self.valid_reasoned_failure(
+                &failure,
+                &[
+                    TurnFailureReason::DriverFeaturesUnsupported,
+                    TurnFailureReason::DriverToolChoiceUnsupported,
+                    TurnFailureReason::DriverParallelCallsUnsupported,
+                ],
+                |message| {
+                    valid_driver_contract_failure_message(message, request_index, self.agent_run)
+                },
+            ),
             _ => self.valid_checkpoint_failure(
                 &failure,
                 failure_event_time,
@@ -1451,6 +1494,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         "model request output exceeded {MAX_MODEL_OUTPUT_BYTES_PER_REQUEST} encoded bytes"
                     )
                 ) && failure.evidence.is_none()
+                    && failure.reason.is_none()
             }
             _ => self.valid_checkpoint_failure(&failure, failure_event_time, checkpoints),
         };
@@ -1471,6 +1515,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         failure_event_time: DateTime<Utc>,
         checkpoints: &[Checkpoint],
     ) -> bool {
+        if failure.reason.is_some() {
+            return false;
+        }
         match failure.code {
             TurnFailureCode::Cancelled => {
                 failure.evidence.is_none()
@@ -1526,6 +1573,79 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             || failure.request_index != request_index
             || failure.call_id != call_id
             || failure.evidence.is_some()
+            || failure.reason.is_some()
+        {
+            return Err(replay_invalid(
+                "turn.failed contradicts the deterministic runtime failure",
+            ));
+        }
+        Ok(failure)
+    }
+
+    /// Decode a versioned turn payload. The first one fixes the turn's
+    /// version; a turn never mixes payload versions.
+    fn decode_versioned<T: DeserializeOwned + PayloadVersion>(
+        &mut self,
+        event: &EventRecord,
+    ) -> Result<T, ReplayError> {
+        let payload: T = decode_payload(event)?;
+        let version = payload.version();
+        if !(MIN_TURN_PAYLOAD_VERSION..=TURN_PAYLOAD_VERSION).contains(&version) {
+            return Err(replay_invalid(format!(
+                "{} payload version is unsupported",
+                event.kind
+            )));
+        }
+        match self.version {
+            None => self.version = Some(version),
+            Some(turn_version) if turn_version != version => {
+                return Err(replay_invalid(format!(
+                    "{} payload version differs from the turn's version",
+                    event.kind
+                )));
+            }
+            Some(_) => {}
+        }
+        Ok(payload)
+    }
+
+    /// Validate a validator-derived failure. Version 2 checks the typed reason
+    /// against the stage's closed set; version 1 predates typed reasons and
+    /// falls back to its frozen message grammar.
+    fn valid_reasoned_failure(
+        &self,
+        failure: &TurnFailure,
+        allowed: &[TurnFailureReason],
+        legacy_message_valid: impl FnOnce(&str) -> bool,
+    ) -> bool {
+        failure.evidence.is_none()
+            && match (self.version, failure.reason) {
+                (Some(1), None) => legacy_message_valid(&failure.message),
+                (Some(version), Some(reason)) if version >= 2 => {
+                    allowed.contains(&reason) && reason.code() == failure.code
+                }
+                _ => false,
+            }
+    }
+
+    /// A deterministic tool-call lifecycle error must be the adjacent terminal.
+    fn take_tool_call_failure(
+        &mut self,
+        error: &ToolCallError,
+        request_index: usize,
+    ) -> Result<TurnFailure, ReplayError> {
+        let failure = self
+            .take_failure()?
+            .ok_or_else(|| replay_invalid("expected an adjacent turn.failed terminal"))?;
+        let expected_message = error.to_string();
+        if failure.code != TurnFailureCode::Protocol
+            || failure.request_index != Some(request_index as u8)
+            || failure.call_id.as_ref() != Some(error.call_id())
+            || !self.valid_reasoned_failure(
+                &failure,
+                &[TurnFailureReason::ToolCallLifecycle],
+                |message| message == expected_message,
+            )
         {
             return Err(replay_invalid(
                 "turn.failed contradicts the deterministic runtime failure",
@@ -1547,19 +1667,6 @@ fn decode_payload<T: DeserializeOwned>(event: &EventRecord) -> Result<T, ReplayE
     serde_json::from_value(event.payload.clone()).map_err(|error| {
         replay_invalid(format!("{} payload cannot be decoded: {error}", event.kind))
     })
-}
-
-fn decode_versioned<T: DeserializeOwned + PayloadVersion>(
-    event: &EventRecord,
-) -> Result<T, ReplayError> {
-    let payload: T = decode_payload(event)?;
-    if payload.version() != TURN_PAYLOAD_VERSION {
-        return Err(replay_invalid(format!(
-            "{} payload version is unsupported",
-            event.kind
-        )));
-    }
-    Ok(payload)
 }
 
 trait PayloadVersion {

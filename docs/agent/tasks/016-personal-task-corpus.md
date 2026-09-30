@@ -1,5 +1,9 @@
 # Task 016: Offline personal-task context corpus
 
+> Historical contract (schema 2, positive-overlap selection).
+> [Task 016.1](016-1-personal-recall.md) moved runs to complete-set
+> selection and the harness to schema 3; the seeds and queries are unchanged.
+
 ## Contract and frozen oracle
 
 Extend Task 015's standard-library harness, schema **2**, workload

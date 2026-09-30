@@ -16,7 +16,7 @@ use ditto_context::{
     ContextScope, EpistemicStatus,
 };
 use ditto_event_store::EventStore;
-use ditto_kernel::turn::TurnFailureEvidence;
+use ditto_kernel::turn::{TURN_PAYLOAD_VERSION, TurnFailureEvidence, TurnFailureReason};
 use ditto_kernel::{
     ArtifactReadTurnReplay, ArtifactReadTurnStatus, ArtifactWriteContext, DittoKernel,
     ExecutionOutputPayload, KernelConfig, KernelError, ModelOutputPayload, ReadOnlyTurnControl,
@@ -662,6 +662,10 @@ async fn changed_selected_package_fails_before_model_and_replays_without_package
     };
     assert_eq!(failure.code, TurnFailureCode::CapabilityContract);
     assert_eq!(
+        failure.reason,
+        Some(TurnFailureReason::ArtifactReadPackageUnverified)
+    );
+    assert_eq!(
         failure.message,
         "installed artifact.read package could not be verified"
     );
@@ -680,9 +684,41 @@ async fn changed_selected_package_fails_before_model_and_replays_without_package
             failure: (*failure).clone()
         }
     );
-    let mut forged = snapshot;
-    forged.last_mut().unwrap().payload["failure"]["message"] = json!("some other package failure");
-    assert!(replay_artifact_read_turn(&forged, &failure.turn_id).is_err());
+    // Version 2 treats validator text as diagnostic: the typed reason, not the
+    // wording, is replayed, so validator messages can change safely.
+    let mut reworded = snapshot.clone();
+    reworded.last_mut().unwrap().payload["failure"]["message"] =
+        json!("some other package failure");
+    let ArtifactReadTurnReplay::Failed { failure: replayed } =
+        replay_artifact_read_turn(&reworded, &failure.turn_id)
+            .unwrap()
+            .terminal
+    else {
+        panic!("reworded failure must still replay as a failure")
+    };
+    assert_eq!(replayed.message, "some other package failure");
+    for forged_reason in [
+        json!(null),
+        json!("tool_call_lifecycle"),
+        json!("artifact_read_unavailable"),
+        json!("sort_contract_unavailable"),
+        json!("request_invalid_at_dispatch"),
+        json!("unknown_reason"),
+    ] {
+        let mut forged = snapshot.clone();
+        forged.last_mut().unwrap().payload["failure"]["reason"] = forged_reason.clone();
+        assert!(
+            replay_artifact_read_turn(&forged, &failure.turn_id).is_err(),
+            "{forged_reason}"
+        );
+    }
+    let mut legacy_with_reason = snapshot;
+    for event in &mut legacy_with_reason {
+        if event.payload.get("event_version").is_some() {
+            event.payload["event_version"] = json!(1);
+        }
+    }
+    assert!(replay_artifact_read_turn(&legacy_with_reason, &failure.turn_id).is_err());
 }
 
 #[tokio::test]
@@ -2701,7 +2737,7 @@ async fn compiled_context_requires_resolved_same_scope_provenance() {
     terminal.span_id = None;
     terminal.recorded_at = failure_time;
     terminal.payload = json!({
-        "event_version": 1,
+        "event_version": TURN_PAYLOAD_VERSION,
         "turn_id": outcome.turn_id.clone(),
         "failure": {
             "turn_id": outcome.turn_id.clone(),
@@ -2709,7 +2745,8 @@ async fn compiled_context_requires_resolved_same_scope_provenance() {
             "task_id": "task-1",
             "code": "driver_contract",
             "message": "model context capsule is invalid: context capsule item context-1 is disputed or not valid at the requested time",
-            "request_index": 0
+            "request_index": 0,
+            "reason": "request_invalid_at_dispatch"
         },
         "status": "unverified",
         "request_count": 1,
@@ -3274,4 +3311,90 @@ fn warning_fixture_remains_a_valid_nonterminal_event() {
     }
     .validate()
     .expect("valid warning");
+}
+
+#[tokio::test]
+async fn driver_contract_failures_carry_typed_reasons_and_replay() {
+    let without_required_choice = {
+        let mut driver = ScriptedDriver::new(vec![]);
+        driver
+            .descriptor
+            .request_capabilities
+            .tool_choices
+            .remove(&ToolChoiceKind::Required);
+        driver
+    };
+    let without_forbidden_parallel = {
+        let mut driver = ScriptedDriver::new(vec![]);
+        driver.descriptor.request_capabilities.parallel_tool_calls = BTreeSet::new();
+        driver
+    };
+    let without_tool_calls = {
+        let mut driver = ScriptedDriver::new(vec![]);
+        driver
+            .descriptor
+            .emitted_features
+            .remove(&ModelFeature::ToolCalls);
+        driver
+    };
+    for (driver, reason) in [
+        (
+            without_required_choice,
+            TurnFailureReason::DriverToolChoiceUnsupported,
+        ),
+        (
+            without_forbidden_parallel,
+            TurnFailureReason::DriverParallelCallsUnsupported,
+        ),
+        (
+            without_tool_calls,
+            TurnFailureReason::DriverFeaturesUnsupported,
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let error = fixture
+            .kernel
+            .run_artifact_read_turn(
+                command("session-1", "task-1"),
+                Vec::new(),
+                &driver,
+                CancellationToken::new(),
+                ReadOnlyTurnControl::default(),
+            )
+            .await
+            .unwrap_err();
+        let TurnRunError::Failed(failure) = error else {
+            panic!("expected a durable driver-contract failure")
+        };
+        assert_eq!(failure.code, TurnFailureCode::DriverContract);
+        assert_eq!(failure.reason, Some(reason));
+        assert_eq!(failure.request_index, Some(0));
+        assert!(driver.requests().is_empty());
+        let snapshot = fixture.events_for_session("session-1");
+        assert!(
+            !snapshot
+                .iter()
+                .any(|event| event.kind == event_kind::MODEL_REQUESTED)
+        );
+        let replayed = replay_artifact_read_turn(&snapshot, &failure.turn_id).unwrap();
+        assert_eq!(
+            replayed.terminal,
+            ArtifactReadTurnReplay::Failed {
+                failure: (*failure).clone()
+            }
+        );
+        // Reasons from another stage, or none at all, never replay here.
+        for forged in [
+            json!("request_invalid_at_dispatch"),
+            json!("tool_call_lifecycle"),
+            json!(null),
+        ] {
+            let mut changed = snapshot.clone();
+            changed.last_mut().unwrap().payload["failure"]["reason"] = forged.clone();
+            assert!(
+                replay_artifact_read_turn(&changed, &failure.turn_id).is_err(),
+                "{forged}"
+            );
+        }
+    }
 }

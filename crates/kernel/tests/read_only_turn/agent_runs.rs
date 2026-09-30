@@ -134,9 +134,21 @@ async fn direct_answer_uses_corrected_scoped_memory_and_survives_restart() {
     let requests = driver.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].generation.tool_use.choice, ToolChoice::Auto);
+    // The whole current session set fits the budget, so it is sent complete:
+    // the lexical match ranks first. Superseded and other-session memories
+    // never enter the model context.
     let context = serde_json::to_string(&requests[0].turn.context).unwrap();
-    assert!(context.contains(&corrected));
-    for excluded in [&old, &irrelevant, "private", "is UTC"] {
+    assert_eq!(
+        requests[0]
+            .turn
+            .context
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>(),
+        [corrected.as_str(), irrelevant.as_str()]
+    );
+    for excluded in [&old, "private", "is UTC"] {
         assert!(!context.contains(excluded));
     }
     let events = fixture.events_for_session("personal");
@@ -550,4 +562,200 @@ async fn invalid_context_source_fails_before_model_io_and_is_replayable() {
     assert!(driver.requests().is_empty());
     fixture.kernel.shutdown_agent_runs().await.unwrap();
     replay_artifact_read_turn(&fixture.events_for_session("personal"), &accepted.turn_id).unwrap();
+}
+
+/// Start a run once the previous run's task has released the single slot. A
+/// terminal status is durable slightly before the finished task drops its guard.
+async fn start_when_idle(
+    kernel: &DittoKernel,
+    command: &StartAgentRunCommand,
+    driver: Arc<dyn ModelDriver>,
+) {
+    for _ in 0..10_000 {
+        match kernel.start_agent_run(command.clone(), driver.clone()) {
+            Err(AgentRunError::Busy) => tokio::task::yield_now().await,
+            result => {
+                result.unwrap();
+                return;
+            }
+        }
+    }
+    panic!("the previous run never released the execution slot");
+}
+
+fn context_ids(request: &ModelRequest) -> Vec<String> {
+    request
+        .turn
+        .context
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn paraphrased_personal_questions_receive_the_complete_current_memory_set() {
+    // Task 017 P1-P4 and the README example: none of these questions shares a
+    // content word with the memory that answers it, which the original
+    // positive-overlap selection could never include.
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let dog = save_memory(kernel, "personal", "The canine's name is Miso.", None);
+    let old_club = save_memory(
+        kernel,
+        "personal",
+        "The reading group meets at Alder Hall.",
+        None,
+    );
+    let club = save_memory(
+        kernel,
+        "personal",
+        "Our book club now gathers in Birch Room.",
+        Some(old_club.clone()),
+    );
+    let key = save_memory(
+        kernel,
+        "personal",
+        "The spare key is inside the saffron tin.",
+        None,
+    );
+    let tin = save_memory(
+        kernel,
+        "personal",
+        "The saffron tin sits above the fridge.",
+        None,
+    );
+    let meeting = save_memory(kernel, "personal", "I prefer afternoon meetings", None);
+    let contact = save_memory(kernel, "personal", "The household contact is Iona.", None);
+    let other_contact = save_memory(kernel, "elsewhere", "The household contact is Mara.", None);
+    let current =
+        std::collections::BTreeSet::from([dog, club, key.clone(), tin, meeting, contact.clone()]);
+
+    for (question, lexical_first) in [
+        ("What do I call my pet dog?", None),
+        (
+            "Where should I go for the reading group get-together?",
+            None,
+        ),
+        ("Where is the backup house key kept?", Some(&key)),
+        ("What is my meeting preference?", None),
+        ("Who is my household contact?", Some(&contact)),
+    ] {
+        let driver = ScriptedDriver::new(vec![final_script(&["answer"])]);
+        let command = start_command(question);
+        start_when_idle(kernel, &command, Arc::new(driver.clone())).await;
+        let status = terminal(kernel, &command).await;
+        assert_eq!(status.status, AgentRunStatus::Unverified, "{question}");
+        let requests = driver.requests();
+        let ids = context_ids(&requests[0]);
+        assert_eq!(ids.len(), current.len(), "{question}");
+        assert_eq!(
+            ids.iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            current,
+            "{question}"
+        );
+        if let Some(first) = lexical_first {
+            assert_eq!(&ids[0], first, "{question}");
+        }
+        let serialized = serde_json::to_string(&requests[0].turn.context).unwrap();
+        for absent in [
+            old_club.as_str(),
+            other_contact.as_str(),
+            "Alder Hall",
+            "Mara",
+        ] {
+            assert!(!serialized.contains(absent), "{question}: {absent}");
+        }
+        let replay =
+            replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id)
+                .unwrap();
+        assert!(matches!(
+            replay.terminal,
+            ArtifactReadTurnReplay::Finished { .. }
+        ));
+    }
+    kernel.shutdown_agent_runs().await.unwrap();
+}
+
+#[tokio::test]
+async fn over_budget_sessions_keep_only_lexically_relevant_memory() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let cedar = save_memory(kernel, "personal", "cedar timezone is KST", None);
+    for index in 0..16 {
+        save_memory(
+            kernel,
+            "personal",
+            &format!("synthetic unrelated pebble {index:06}"),
+            None,
+        );
+    }
+
+    let driver = ScriptedDriver::new(vec![final_script(&["KST"])]);
+    let command = start_command("What is the cedar timezone?");
+    start_when_idle(kernel, &command, Arc::new(driver.clone())).await;
+    assert_eq!(
+        terminal(kernel, &command).await.status,
+        AgentRunStatus::Unverified
+    );
+    // Seventeen memories exceed the default budget, so selection falls back to
+    // positive overlap without function words: noise matching only "is" is out.
+    assert_eq!(context_ids(&driver.requests()[0]), [cedar.clone()]);
+
+    // Documented boundary: at this size a pure paraphrase shares no content
+    // word and receives no memory until semantic retrieval exists.
+    let driver = ScriptedDriver::new(vec![final_script(&["unknown"])]);
+    let command = start_command("Which clock offset applies to the lumber office?");
+    start_when_idle(kernel, &command, Arc::new(driver.clone())).await;
+    let status = terminal(kernel, &command).await;
+    assert_eq!(status.status, AgentRunStatus::Unverified);
+    assert!(context_ids(&driver.requests()[0]).is_empty());
+    kernel.shutdown_agent_runs().await.unwrap();
+    replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
+}
+
+#[tokio::test]
+async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
+    let fixture = Fixture::new();
+    let driver = ScriptedDriver::new(vec![final_script(&["hello"])]);
+    let command = start_command("hello");
+    fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(status.status, AgentRunStatus::Unverified);
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+    let events = fixture.events_for_session("personal");
+    let versioned = |event: &EventRecord| {
+        event.correlation_id.as_deref() == Some(status.turn_id.as_str())
+            && event.payload.get("event_version").is_some()
+    };
+    assert!(
+        events
+            .iter()
+            .filter(|event| versioned(event))
+            .all(|event| event.payload["event_version"]
+                == json!(ditto_kernel::turn::TURN_PAYLOAD_VERSION))
+    );
+    replay_artifact_read_turn(&events, &status.turn_id).unwrap();
+
+    // An empty capsule means the same under both selection contracts, so the
+    // same transcript relabeled as version 1 replays through the legacy rules.
+    let relabel = |version: u16, only_first: bool| {
+        let mut relabeled = events.clone();
+        for event in relabeled.iter_mut().filter(|event| versioned(event)) {
+            event.payload["event_version"] = json!(version);
+            if only_first {
+                break;
+            }
+        }
+        relabeled
+    };
+    replay_artifact_read_turn(&relabel(1, false), &status.turn_id).unwrap();
+    assert!(replay_artifact_read_turn(&relabel(1, true), &status.turn_id).is_err());
+    assert!(replay_artifact_read_turn(&relabel(3, false), &status.turn_id).is_err());
+    assert!(replay_artifact_read_turn(&relabel(0, false), &status.turn_id).is_err());
 }
