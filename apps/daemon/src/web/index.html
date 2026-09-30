@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Ditto</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◐</span>
+      <span>Ditto</span>
+      <span class="session" id="session-name"></span>
+    </div>
+    <button class="primary wide" id="new-thread" data-i18n="newThread">New conversation</button>
+    <nav class="tabs" role="tablist">
+      <button role="tab" class="tab active" data-panel="memories" data-i18n="memories">Memories</button>
+      <button role="tab" class="tab" data-panel="schedules" data-i18n="schedules">Schedules</button>
+    </nav>
+    <section class="panel" id="panel-memories">
+      <form id="memory-form" class="stack">
+        <textarea id="memory-text" rows="2" maxlength="4096" data-i18n-placeholder="memoryPlaceholder" placeholder="Something to remember…"></textarea>
+        <input type="hidden" id="memory-replaces">
+        <div class="row">
+          <button type="submit" class="primary" id="memory-save" data-i18n="save">Save</button>
+          <button type="button" class="ghost hidden" id="memory-cancel" data-i18n="cancel">Cancel</button>
+        </div>
+      </form>
+      <ul class="list" id="memory-list"></ul>
+      <button class="ghost wide hidden" id="memory-more" data-i18n="loadMore">Load more</button>
+    </section>
+    <section class="panel hidden" id="panel-schedules">
+      <form id="schedule-form" class="stack">
+        <textarea id="schedule-text" rows="2" maxlength="16384" data-i18n-placeholder="schedulePlaceholder" placeholder="What should Ditto do later?"></textarea>
+        <label class="field"><span data-i18n="startAt">Start at</span>
+          <input type="datetime-local" id="schedule-at" required></label>
+        <label class="field"><span data-i18n="window">Window</span>
+          <select id="schedule-window">
+            <option value="900">15 min</option>
+            <option value="3600" selected>1 h</option>
+            <option value="21600">6 h</option>
+          </select></label>
+        <label class="field"><span data-i18n="repeat">Repeat</span>
+          <select id="schedule-repeat">
+            <option value="0" data-i18n="once">Once</option>
+            <option value="86400" data-i18n="daily">Daily</option>
+            <option value="604800" data-i18n="weekly">Weekly</option>
+          </select></label>
+        <label class="field hidden" id="schedule-count-field"><span data-i18n="times">Times</span>
+          <input type="number" id="schedule-count" min="2" max="1000" value="7"></label>
+        <button type="submit" class="primary" data-i18n="scheduleIt">Schedule</button>
+      </form>
+      <ul class="list" id="schedule-list"></ul>
+    </section>
+    <footer class="status" id="status"></footer>
+  </aside>
+  <main class="chat">
+    <header class="chat-header">
+      <button class="icon ghost" id="toggle-sidebar" aria-label="Menu">☰</button>
+      <span id="thread-title" data-i18n="conversation">Conversation</span>
+      <span class="grow"></span>
+      <span class="badge" id="connection" data-state="offline"></span>
+    </header>
+    <div class="banner hidden" id="banner"></div>
+    <div class="messages" id="messages" aria-live="polite">
+      <div class="empty" id="empty">
+        <div class="empty-logo" aria-hidden="true">◐</div>
+        <p data-i18n="emptyTitle">Ask anything. Ditto remembers what you tell it.</p>
+        <p class="muted" data-i18n="emptyHint">Save memories on the left, or type /remember followed by a fact.</p>
+      </div>
+    </div>
+    <form class="composer" id="composer">
+      <textarea id="input" rows="1" maxlength="16384" autocomplete="off" data-i18n-placeholder="inputPlaceholder" placeholder="Message Ditto…"></textarea>
+      <button type="submit" class="primary send" id="send" aria-label="Send">↑</button>
+      <button type="button" class="ghost send hidden" id="stop" aria-label="Stop">■</button>
+    </form>
+  </main>
+  <aside class="inspector hidden" id="inspector" aria-label="Answer inspector">
+    <header class="inspector-header">
+      <strong data-i18n="whyTitle">Why this answer</strong>
+      <span class="grow"></span>
+      <button class="icon ghost" id="inspector-close" aria-label="Close">✕</button>
+    </header>
+    <div id="inspector-body"></div>
+  </aside>
+</div>
+</body>
+</html>

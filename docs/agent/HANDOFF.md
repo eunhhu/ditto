@@ -21,8 +21,8 @@ and checks establish a new fact.
   `dev/task-016-1-personal-recall` holds the preserved
   [Task 017](tasks/017-evaluation-outcomes.md) draft, raw-report and handoff
   trimming, the turn-loop split and Task 016.1; `dev/task-018-conversation-threads`
-  stacks Task 018 on it and `dev/task-019-openai-compatible` stacks Task 019 on
-  that. Nothing is pushed.
+  stacks Task 018 on it, `dev/task-019-openai-compatible` stacks Task 019 and
+  `dev/task-020-web-app` stacks Task 020. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made.
@@ -45,8 +45,12 @@ and checks establish a new fact.
   projection (`context-projection.db`, schema 4) is a rebuildable,
   digest-verified cache replayed once at open, then delta-verified.
 - **Ingress.** Typed commands only: record-only input, memory save/list/correct,
-  run/status/cancel, conversation reset, and loopback-only sort, schedule and
-  repeat. The daemon and the offline fixture server share one route table. Clients never
+  run/status/cancel, conversation reset and view, and loopback-only sort,
+  schedule and repeat. The daemon also serves the embedded web app (ADR 0024)
+  under a same-origin-only content security policy. While bound to loopback,
+  every route refuses requests addressed to a non-loopback host name, which
+  blocks DNS rebinding. The daemon and the offline fixture server share one
+  route table. Clients never
   choose actors, kinds or internal metadata; the kernel derives all authority,
   including an attached file's sort permission. SSE subscribes first, replays a
   bounded high-water snapshot in pages and recovers gaps or lag from storage.
@@ -104,31 +108,34 @@ and checks establish a new fact.
   capsules from the complete-set rule. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 019
+## Latest verified slice: Task 020
 
-- [Contract and evidence](tasks/019-openai-compatible-provider.md). A mock
-  `/v1/chat/completions` server drove a streamed `artifact_read` call and its
-  continuation through the kernel turn loop, with replay. Adapter tests cover
-  Ollama-style streams (whole calls, `stop` with calls, missing IDs or indexes,
-  object arguments) and fail-closed error, malformed and unfinished streams.
-  The built daemon, configured by flags and then by `DITTO_*` variables, served
-  `ditto run` and `ditto chat` through an Ollama-shaped mock: bearer key on
-  every request, memory in the system message, thread history growing and
-  resetting on `/new`, and no key in the daemon log or data directory.
-- The canonical gate passed on the final tree (3 min 48 s with warm caches,
-  pinned Rust 1.88.0): 517 Rust tests (512 workspace including doctests, five
-  built-CLI scenarios), 8 baseline and 21 quality Python tests and both
-  smokes; the staged tree hash was identical before and after.
-- Not run: a live hosted provider or a real local model (none installed, no
-  charges approved).
+- [Contract and evidence](tasks/020-local-web-app.md). The web app streams
+  chat, restores the thread after reload, shows CLI and scheduled runs live,
+  stops runs, saves and corrects memories, manages schedules and explains each
+  answer from its recorded context receipt. A browser run against the real
+  daemon with a mock model passed 26 of 26 checks, including injection,
+  layout, dark, phone and Korean views. The host guard test failed with the
+  guard disabled and passes with it; the layout check failed on the earlier
+  stylesheet.
+- The canonical gate passed on the final tree (4 min 44 s, pinned Rust
+  1.88.0): 521 Rust tests (516 workspace including doctests, five built-CLI
+  scenarios), 8 baseline and 21 quality Python tests, 12 web renderer cases
+  and both smokes; the staged tree hash was identical before and after.
 
-## Previous slice: Task 018
+## Previous slice: Task 019
 
-- [Contract and evidence](tasks/018-conversation-threads.md): conversation
-  threads, `ditto chat` and `ditto new`, turn payload version 3. Its gate
-  passed on its final tree (8 min 34 s, 505 Rust tests).
+- [Contract and evidence](tasks/019-openai-compatible-provider.md):
+  OpenAI-compatible chat provider for local and hosted models (ADR 0023). Its
+  gate passed on its final tree (517 Rust tests). No live provider or real
+  local model was run.
 
 ## Known gaps
+
+- After a reload the web app restores only finished exchanges of the current
+  thread: failed or cancelled turns are not restored, and a run still in
+  flight at load appears when it finishes. Phone access still needs an
+  authenticated gateway.
 
 - Answer quality and tool-use reliability with local or hosted
   OpenAI-compatible models are unmeasured; tools need a model with function
@@ -153,7 +160,7 @@ and checks establish a new fact.
 - Device registry, general process profiles, SSH transport and secrets.
 - A production embedding worker/provider and persisted embedding cache.
 - Additional completion verifiers and the improvement compiler.
-- Authenticated remote gateway and web inspector.
+- Authenticated remote gateway (phone or remote access to the web app).
 
 ## Known engineering debt
 

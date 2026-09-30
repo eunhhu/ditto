@@ -14,9 +14,11 @@ a small offline baseline scenario (two repeated requests per server), plus
 context-assessment/process regressions and a five-case offline corpus smoke
 (zero versus twelve unrelated memories, two repetitions per query: ten runs per
 profile, twenty total). The two profiles exercise complete-set inclusion and
-the lexical fallback respectively.
-Python 3 uses only its standard library; the measurement scripts build with
-cached dependencies via `--offline --locked`.
+the lexical fallback respectively. It then checks the embedded web app's
+script syntax and its renderer for untrusted model text, including injection
+cases.
+Python 3 and Node use only their standard libraries; the measurement scripts
+build with cached dependencies via `--offline --locked`.
 Loopback binding and the existing `/usr/bin/sort` profile must be available.
 CI additionally verifies the declared MSRV.
 
@@ -32,6 +34,7 @@ CI additionally verifies the declared MSRV.
 | Artifact store | deduplication, size limit, tamper detection, symlink/no-follow behavior, range read |
 | Model driver | every emitted event variant, malformed stream, usage, tool calls, continuation, provider cancellation |
 | Completion | verifier-specific positive and negative evidence; stream closure is insufficient |
+| Web app | renderer injection cases in the gate; host-guard and asset-policy tests; `node scripts/web-e2e.js` browser run against the real daemon with a mock model, including reload, live CLI runs, cancellation, memory correction, dark, phone and Korean views |
 | Human task views | default JSON compatibility, independent model/sort/parent/child outcomes, unverified answers, requested/terminal cancellation, exhausted/missed repeats, recoverable identity and terminal-control escaping |
 | Personal-agent baseline | separate production-disabled and injected-fixture results; raw samples/settings/source identity; idle/repeated RSS and latency; model/tool accounting; known versus unavailable cost; exact retry and restart evidence |
 | Personal-task context corpus | actual CLI saves/correction/restart/list/five-query rounds; frozen expectations independent of observations; exact nodes/order/metadata/provenance; durable input/query/task/turn/event/call/observation reconciliation; raw metrics with null empty denominators; leak adversaries and signal/failure cleanup; source/artifact/corpus hashes; no fixture-answer quality inference |

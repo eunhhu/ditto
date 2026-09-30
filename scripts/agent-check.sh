@@ -29,6 +29,7 @@ cargo test --locked -p ditto-daemon schedules::tests::built_cli_schedule_restart
 cargo test --locked -p ditto-daemon schedules::tests::repeats::built_cli_repeat_restart_dispatch_inspect_retry_and_cancel -- --exact --ignored
 python3 scripts/test-personal-baseline.py
 python3 scripts/test-personal-quality.py
+node scripts/test-web.js
 baseline_report=$(mktemp "${TMPDIR:-/tmp}/ditto-baseline-gate.XXXXXX")
 quality_report=""
 trap 'rm -f "$baseline_report" "$quality_report"' EXIT

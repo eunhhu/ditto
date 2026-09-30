@@ -51,6 +51,9 @@ The executable foundation includes:
   cancellation, and restart inspection;
 - conversation threads: runs replay the session's recent exchanges until a new
   thread is started, plus an interactive `ditto chat`;
+- a local web app served by the daemon: streamed chat, thread history,
+  memories, schedules and a per-answer view of which memories were sent and
+  why, behind a strict content security policy and a loopback host guard;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - model-directed sorting of one explicitly attached file, with separate permission
@@ -126,6 +129,15 @@ DITTO_MODEL_API_KEY=... cargo run -p ditto-daemon -- --provider openai-compatibl
 
 `--provider openai` with `OPENAI_API_KEY` in the daemon environment selects the
 closed `gpt-5.6` Responses adapter and may incur provider charges.
+
+Open `http://127.0.0.1:8787/` for the web app. It chats in the `personal`
+session (`?session=NAME` picks another), streams answers, keeps the thread
+across reloads, and shows runs started from the CLI or schedules as they
+happen. **Why?** under an answer lists the memories sent to the model and why,
+memories left out, earlier exchanges included and tools used. The page uses
+the same HTTP API as the CLI. While bound to loopback, the daemon answers only
+requests addressed to `localhost` or a loopback IP, which stops DNS-rebinding
+pages.
 
 ```bash
 cargo run -p ditto-cli -- run "What is my meeting preference?"
@@ -273,6 +285,8 @@ intervals, without named-time-zone or daylight-saving calendar adjustments. See
 | `GET` | `/health` | Liveness, durable count, and latest sequence |
 | `POST` | `/v1/commands/input` | Submit user input; kernel assigns event authority |
 | `POST` | `/v1/commands/conversation/reset` | Start a new conversation thread in a session (memories are kept) |
+| `GET` | `/v1/conversation` | The current thread's newest finished exchanges, oldest first |
+| `GET` | `/` | Embedded web app (`/app.js`, `/app.css`, `/favicon.svg`) |
 | `POST` | `/v1/commands/memory` | Save an existing same-session user input, optionally replacing an active memory |
 | `GET` | `/v1/memories` | Inspect current session memories with an ID cursor |
 | `POST` | `/v1/commands/run` | Admit one model run, optionally permitting one attached-file sort |
@@ -342,6 +356,9 @@ python3 scripts/smoke-local-sort.py
 # Actual CLI + daemon router + deterministic model fixture, without API calls:
 cargo test -p ditto-daemon built_cli_run_wait_retry_status_and_cancel -- --ignored
 cargo test -p ditto-daemon built_cli_model_sort_permission_retry_and_disabled_status -- --ignored
+# Web app in headless Chromium against the real daemon and a mock model
+# (needs puppeteer-core on NODE_PATH; CHROME_PATH defaults to /usr/bin/chromium):
+node scripts/web-e2e.js
 
 # Offline personal-agent baseline (cached dependencies/toolchain required):
 python3 scripts/personal-baseline.py --output /tmp/ditto-baseline.json

@@ -27,6 +27,12 @@ The kernel converts this to `actor=user`, `kind=input.received`. Model,
 capability, policy, scheduler, and system events are issued only by their trusted
 runtime components. The default daemon exposes no arbitrary event-append route.
 
+While bound to loopback, the daemon serves only requests addressed to
+`localhost` or a loopback IP literal, judged by the request-target authority or
+`Host`. Any other name receives 403 before routing, so a page whose DNS name
+rebinds to 127.0.0.1 cannot use the API
+([ADR 0024](../adr/0024-local-web-app.md)).
+
 ## Envelope
 
 ```json
@@ -441,6 +447,13 @@ selected prior turn IDs in `context.compiled` as `history_turn_ids`.
 correlation) starts a new thread: later agent runs replay only finished
 agent-run turns recorded after the latest reset. It deletes nothing and does
 not affect memories.
+
+`GET /v1/conversation?session_id=personal` (optional `limit`, default and
+maximum 50) returns `session_id`, `exchanges` and `through_seq`. Exchanges are
+the thread's newest finished agent-run exchanges, oldest first and unabridged,
+each with `task_id`, `turn_id`, `user`, `assistant` and `finished_seq`. Every
+event through `through_seq` was considered, so a follower streams after it.
+Unknown fields and non-canonical sessions return 400. The view writes nothing.
 Model request/output events use the request ID as their span; capability and
 execution events use the call ID. Every transition is durably appended before it
 is published or returned. Each `model.output` also records the
@@ -459,6 +472,13 @@ Version-1 agent-run input metadata enables Auto tool choice from request zero
 and a direct final answer with zero tool calls. Legacy inputs retain Required
 first-tool semantics. Replay validates metadata and the matching generation
 controls; no capability authority, effect, or completion rule changes.
+
+## Local web app
+
+`GET /` serves the embedded web app, with `/app.js`, `/app.css` and
+`/favicon.svg`. Responses carry a same-origin-only content security policy,
+`nosniff`, `DENY` framing and `no-referrer`. The page uses only the public
+routes above and the stream and gains no other authority.
 
 ## Streaming
 

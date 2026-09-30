@@ -142,10 +142,18 @@ pub(super) const MAX_HISTORY_BYTES: usize = 24 * 1_024;
 
 /// One finished agent-run exchange of the current conversation thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct HistoryExchange {
-    pub(super) turn_id: String,
-    pub(super) user: String,
-    pub(super) assistant: String,
+pub(crate) struct HistoryExchange {
+    pub(crate) turn_id: String,
+    pub(crate) user: String,
+    pub(crate) assistant: String,
+}
+
+/// A stored exchange with the task and `turn.finished` sequence it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ThreadExchange {
+    pub(crate) task_id: String,
+    pub(crate) finished_seq: i64,
+    pub(crate) exchange: HistoryExchange,
 }
 
 /// The single history rule shared by runtime and replay: take exchanges newest
