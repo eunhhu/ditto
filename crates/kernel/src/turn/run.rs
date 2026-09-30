@@ -35,8 +35,8 @@ mod sort_tool;
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
-    ReadyCall, append_assistant_text, bounded_turn_failure_message, stable_system_prefix,
-    turn_failure_code_for_model,
+    Checkpoint, ReadyCall, append_assistant_text, bounded_turn_failure_message,
+    stable_system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnStatus, CapabilitiesSelectedPayload,
@@ -75,6 +75,41 @@ impl AdmittedReadOnlyTurn {
 enum ContextProvenanceError {
     Kernel(KernelError),
     Invalid(String),
+}
+
+/// One admitted turn after its absolute deadline is fixed. `cause` is the
+/// latest durable turn event and the causation of the next one.
+struct TurnRun<'d> {
+    scope: TurnScope,
+    cause: String,
+    accepted_at: DateTime<Utc>,
+    deadline: DateTime<Utc>,
+    cancellation: CancellationToken,
+    driver: &'d dyn ModelDriver,
+}
+
+/// The sealed execution epoch and the authority derived from it.
+struct TurnTools {
+    live_epoch: LiveExecutionEpoch,
+    authorizer: InvocationAuthorizer,
+    execution_epoch_id: ExecutionEpochId,
+    schemas: Vec<CapabilitySchema>,
+    authority: ArtifactReadAuthority,
+}
+
+/// Turn-wide bounds that span model requests.
+#[derive(Default)]
+struct TurnTotals {
+    call_ids: BTreeSet<ProviderCallId>,
+    text_bytes: usize,
+    tool_calls: u8,
+}
+
+/// The validated terminal state of one model request.
+struct ModelResponse {
+    finish_reason: FinishReason,
+    ready_call: Option<ReadyCall>,
+    text: String,
 }
 
 impl DittoKernel {
@@ -141,6 +176,8 @@ impl DittoKernel {
         })
     }
 
+    /// Drive an admitted turn: compile context, select capabilities, then run
+    /// the bounded model/tool loop. Every failure is journaled before return.
     pub(crate) async fn continue_read_only_turn(
         &self,
         admitted: AdmittedReadOnlyTurn,
@@ -150,7 +187,7 @@ impl DittoKernel {
         control: ReadOnlyTurnControl,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
         let AdmittedReadOnlyTurn {
-            mut scope,
+            scope,
             text,
             input: input_event,
         } = admitted;
@@ -169,112 +206,113 @@ impl DittoKernel {
                 .map_or(hard_deadline, |requested| requested.min(hard_deadline)),
         );
         scope.effective_deadline.set(Some(deadline));
-        let mut cause = input_event.event_id.clone();
+        let mut run = TurnRun {
+            scope,
+            cause: input_event.event_id.clone(),
+            accepted_at,
+            deadline,
+            cancellation,
+            driver,
+        };
 
-        if cancellation.is_cancelled() {
-            return Err(self.persist_turn_failure(
-                &scope,
-                &cause,
-                TurnFailureCode::Cancelled,
-                "turn was cancelled before context compilation",
-                None,
-                None,
-            ));
-        }
-        if deadline_expired(deadline) {
-            return Err(self.persist_turn_failure(
-                &scope,
-                &cause,
-                TurnFailureCode::DeadlineExceeded,
-                "turn deadline elapsed before context compilation",
-                None,
-                None,
-            ));
-        }
+        self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
+        let capsule = self.compile_turn_context(&mut run, &text, context_candidates)?;
+        let tools = self.select_turn_tools(&mut run, &input_event)?;
+        self.run_model_requests(&mut run, text, capsule, tools)
+            .await
+    }
 
+    /// Compile and journal the turn's source-verified context capsule.
+    fn compile_turn_context(
+        &self,
+        run: &mut TurnRun<'_>,
+        text: &str,
+        context_candidates: Option<impl IntoIterator<Item = ContextCandidate>>,
+    ) -> Result<ContextCapsule, TurnRunError> {
         let context_candidates = match context_candidates {
             Some(candidates) => candidates.into_iter().collect(),
-            None => {
-                match self.agent_context_candidates(&scope.session_id, &scope.task_id, accepted_at)
-                {
-                    Ok(candidates) => candidates,
-                    Err(_) => {
-                        return Err(self.persist_turn_failure(
-                            &scope,
-                            &cause,
-                            TurnFailureCode::ContextCompilation,
-                            "verified session context is unavailable",
-                            None,
-                            None,
-                        ));
-                    }
+            None => match self.agent_context_candidates(
+                &run.scope.session_id,
+                &run.scope.task_id,
+                run.accepted_at,
+            ) {
+                Ok(candidates) => candidates,
+                Err(_) => {
+                    return Err(self.fail(
+                        run,
+                        TurnFailureCode::ContextCompilation,
+                        "verified session context is unavailable",
+                        None,
+                        None,
+                    ));
                 }
-            }
+            },
         };
         let signature = TaskSignature {
-            request: text.clone(),
+            request: text.to_owned(),
             active_goal: None,
             entities: Vec::new(),
             constraints: Vec::new(),
             expected_effect: Some("local content read".into()),
         };
-        let compiled = match ContextCompiler::default().compile(
-            &signature,
-            context_candidates,
-            None,
-            accepted_at,
-        ) {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
+        let compiled = ContextCompiler::default()
+            .compile(&signature, context_candidates, None, run.accepted_at)
+            .map_err(|error| {
+                self.fail(
+                    run,
                     TurnFailureCode::ContextCompilation,
                     error.to_string(),
                     None,
                     None,
-                ));
-            }
-        };
+                )
+            })?;
         let capsule = ContextCapsule::from(&compiled);
         let provenance_through_seq = self.latest_event_seq()?;
-        if let Err(error) =
-            self.validate_compiled_context_provenance(&scope, &compiled, provenance_through_seq)
-        {
-            return match error {
-                ContextProvenanceError::Kernel(error) => Err(TurnRunError::Kernel(error)),
-                ContextProvenanceError::Invalid(message) => Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
+        match self.validate_compiled_context_provenance(
+            &run.scope,
+            &compiled,
+            provenance_through_seq,
+        ) {
+            Ok(()) => {}
+            Err(ContextProvenanceError::Kernel(error)) => return Err(TurnRunError::Kernel(error)),
+            Err(ContextProvenanceError::Invalid(message)) => {
+                return Err(self.fail(
+                    run,
                     TurnFailureCode::ContextCompilation,
                     message,
                     None,
                     None,
-                )),
-            };
+                ));
+            }
         }
-        let context_event = self.append_turn_payload(
-            &scope,
+        self.append_turn_event(
+            run,
             EventActor::System,
             event_kind::CONTEXT_COMPILED,
             &ContextCompiledPayload {
                 event_version: TURN_PAYLOAD_VERSION,
-                turn_id: scope.turn_id.clone(),
+                turn_id: run.scope.turn_id.clone(),
                 provenance_through_seq,
-                compiled: compiled.clone(),
+                compiled,
                 capsule: capsule.clone(),
             },
-            Some(cause),
             None,
         )?;
-        cause = context_event.event_id;
+        Ok(capsule)
+    }
 
+    /// Page the permitted capabilities into one sealed execution epoch,
+    /// journal the selection, and derive its authorization ledger.
+    fn select_turn_tools(
+        &self,
+        run: &mut TurnRun<'_>,
+        input_event: &EventRecord,
+    ) -> Result<TurnTools, TurnRunError> {
         let manifest = match self.inner.capabilities.page_manifest(ARTIFACT_READ_ID) {
             Ok(Some(manifest)) => manifest,
             Ok(None) => {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
+                return Err(self.fail(
+                    run,
                     TurnFailureCode::CapabilityUnavailable,
                     "installed artifact.read capability is unavailable",
                     None,
@@ -282,9 +320,8 @@ impl DittoKernel {
                 ));
             }
             Err(_) => {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
+                return Err(self.fail(
+                    run,
                     TurnFailureCode::CapabilityContract,
                     "installed artifact.read package could not be verified",
                     None,
@@ -293,9 +330,8 @@ impl DittoKernel {
             }
         };
         if let Err(error) = validate_artifact_read_manifest(&manifest) {
-            return Err(self.persist_turn_failure(
-                &scope,
-                &cause,
+            return Err(self.fail(
+                run,
                 TurnFailureCode::CapabilityContract,
                 error.to_string(),
                 None,
@@ -305,9 +341,8 @@ impl DittoKernel {
 
         let schema = capability_schema();
         if schema.id != manifest.id || schema.version != manifest.version {
-            return Err(self.persist_turn_failure(
-                &scope,
-                &cause,
+            return Err(self.fail(
+                run,
                 TurnFailureCode::CapabilityContract,
                 "artifact.read level-2 schema does not match the installed manifest",
                 None,
@@ -315,9 +350,8 @@ impl DittoKernel {
             ));
         }
         if let Err(error) = schema.validate() {
-            return Err(self.persist_turn_failure(
-                &scope,
-                &cause,
+            return Err(self.fail(
+                run,
                 TurnFailureCode::CapabilityContract,
                 error.to_string(),
                 None,
@@ -326,33 +360,31 @@ impl DittoKernel {
         }
 
         let deriver = ArtifactReadDeriver::default();
-        let mut live_epoch = LiveExecutionEpoch::new(if scope.sort.is_some() { 2 } else { 1 });
-        if live_epoch
+        let mut live_epoch = LiveExecutionEpoch::new(if run.scope.sort.is_some() { 2 } else { 1 });
+        let paged = live_epoch
             .page_in_invocable(&manifest, &schema, deriver.revision().clone())
             .map_err(|error| {
-                self.persist_turn_failure(
-                    &scope,
-                    &cause,
+                self.fail(
+                    run,
                     TurnFailureCode::CapabilityContract,
                     error.to_string(),
                     None,
                     None,
                 )
-            })?
-            != 1
+            })?;
+        if paged != 1
             || live_epoch.evidence().capabilities().len() != 1
             || live_epoch.evidence().capabilities()[0].id != ARTIFACT_READ_ID
         {
-            return Err(self.persist_turn_failure(
-                &scope,
-                &cause,
+            return Err(self.fail(
+                run,
                 TurnFailureCode::CapabilityContract,
                 "artifact.read could not be selected as the sole execution capability",
                 None,
                 None,
             ));
         }
-        let sort_manifest = if let Some(grant) = &scope.sort {
+        let sort_manifest = if let Some(grant) = &run.scope.sort {
             let root = self
                 .inner
                 .events
@@ -360,11 +392,10 @@ impl DittoKernel {
                 .map_err(KernelError::from)?;
             if !root
                 .as_ref()
-                .is_some_and(|root| grant.matches_root(root, &input_event))
+                .is_some_and(|root| grant.matches_root(root, input_event))
             {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
+                return Err(self.fail(
+                    run,
                     TurnFailureCode::CapabilityContract,
                     "sort permission source is unavailable",
                     None,
@@ -380,9 +411,8 @@ impl DittoKernel {
             let Some(selected) = selected
                 .filter(|manifest| ditto_artifact_sort::validate_manifest(manifest).is_ok())
             else {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
+                return Err(self.fail(
+                    run,
                     TurnFailureCode::CapabilityContract,
                     "installed artifact.sort contract is unavailable",
                     None,
@@ -404,9 +434,8 @@ impl DittoKernel {
             None
         };
         let authorization_ticket = live_epoch.seal_for_authorization().map_err(|error| {
-            self.persist_turn_failure(
-                &scope,
-                &cause,
+            self.fail(
+                run,
                 TurnFailureCode::CapabilityContract,
                 error.to_string(),
                 None,
@@ -419,50 +448,43 @@ impl DittoKernel {
                 .ok_or(TurnRunError::Internal(
                     "artifact.read live epoch issued no invocation binding",
                 ))?;
-        let execution_epoch_id = match ExecutionEpochId::new(live_epoch.id()) {
-            Ok(id) => id,
-            Err(error) => {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::CapabilityContract,
-                    error.to_string(),
-                    None,
-                    None,
-                ));
-            }
-        };
+        let execution_epoch_id = ExecutionEpochId::new(live_epoch.id()).map_err(|error| {
+            self.fail(
+                run,
+                TurnFailureCode::CapabilityContract,
+                error.to_string(),
+                None,
+                None,
+            )
+        })?;
         let manifest = binding.manifest().clone();
         let mut schemas = vec![binding.schema().clone()];
-        if scope.sort.is_some() {
+        if run.scope.sort.is_some() {
             schemas.push(ditto_artifact_sort::schema());
         }
-        let selected_event = self.append_turn_payload(
-            &scope,
+        self.append_turn_event(
+            run,
             EventActor::System,
             event_kind::CAPABILITIES_SELECTED,
             &CapabilitiesSelectedPayload {
                 event_version: TURN_PAYLOAD_VERSION,
-                turn_id: scope.turn_id.clone(),
-                manifest: manifest.clone(),
+                turn_id: run.scope.turn_id.clone(),
+                manifest,
                 sort_manifest,
                 epoch: live_epoch.evidence().clone(),
                 schemas: schemas.clone(),
             },
-            Some(cause),
             None,
         )?;
-        cause = selected_event.event_id;
 
-        let invocation_authorizer =
-            InvocationAuthorizer::from_ticket(authorization_ticket, deadline)
-                .map_err(|_| TurnRunError::Internal("live epoch authorization setup failed"))?;
-        if let Some(grant) = &scope.sort {
-            invocation_authorizer
+        let authorizer = InvocationAuthorizer::from_ticket(authorization_ticket, run.deadline)
+            .map_err(|_| TurnRunError::Internal("live epoch authorization setup failed"))?;
+        if let Some(grant) = &run.scope.sort {
+            authorizer
                 .register_lease(
                     ditto_policy::CapabilityLease::new(
                         "agent-sort",
-                        deadline,
+                        run.deadline,
                         ditto_artifact_sort::effect(),
                         1,
                         BTreeSet::from([ditto_artifact_sort::ID.into()]),
@@ -477,921 +499,861 @@ impl DittoKernel {
                 .map_err(|_| TurnRunError::Internal("sort lease registration failed"))?;
         }
 
-        let authority = ArtifactReadAuthority::new(self.inner.artifacts.clone());
-        let mut conversation = super::sort::initial_conversation(text, scope.sort.as_ref());
-        let mut all_call_ids = BTreeSet::new();
-        let mut total_text_bytes = 0_usize;
-        let mut tool_call_count = 0_u8;
+        Ok(TurnTools {
+            live_epoch,
+            authorizer,
+            execution_epoch_id,
+            schemas,
+            authority: ArtifactReadAuthority::new(self.inner.artifacts.clone()),
+        })
+    }
+
+    /// The bounded request loop: each model request either ends the turn with
+    /// an unverified answer or yields exactly one tool call to execute.
+    async fn run_model_requests(
+        &self,
+        run: &mut TurnRun<'_>,
+        text: String,
+        capsule: ContextCapsule,
+        tools: TurnTools,
+    ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
+        let mut conversation = super::sort::initial_conversation(text, run.scope.sort.as_ref());
+        let mut totals = TurnTotals::default();
 
         for request_index in 0..MAX_MODEL_REQUESTS {
-            if cancellation.is_cancelled() {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::Cancelled,
-                    "turn was cancelled before a model request",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-            if deadline_expired(deadline) {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::DeadlineExceeded,
-                    "turn deadline elapsed before a model request",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-
-            let request = match build_model_request(
-                &scope,
-                request_index,
-                execution_epoch_id.clone(),
-                capsule.clone(),
-                schemas.clone(),
-                conversation.clone(),
-                deadline,
-            ) {
-                Ok(request) => request,
-                Err(error) => {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::DriverContract,
-                        error,
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-            };
-            if let Err(error) = request.validate_at(accepted_at) {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::DriverContract,
-                    error.to_string(),
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-            if let Err(error) = request.validate_against(driver.descriptor()) {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::DriverContract,
-                    error.to_string(),
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-            if deadline_expired(deadline) {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::DeadlineExceeded,
-                    "turn deadline elapsed before a model request",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-
-            let requested_event = self.append_turn_payload(
-                &scope,
-                EventActor::System,
-                event_kind::MODEL_REQUESTED,
-                &ModelRequestedPayload {
-                    event_version: TURN_PAYLOAD_VERSION,
-                    turn_id: scope.turn_id.clone(),
-                    request_index: request_index as u8,
-                    request: request.clone(),
-                },
-                Some(cause),
-                Some(request.request_id.to_string()),
-            )?;
-            cause = requested_event.event_id;
-            scope.request_count.set((request_index + 1) as u8);
+            let index = Some(request_index as u8);
+            self.ensure_live(run, Checkpoint::BeforeModelRequest, index, None)?;
+            let (request, requested_at) =
+                self.dispatch_model_request(run, request_index, &tools, &capsule, &conversation)?;
             tokio::task::yield_now().await;
-            if cancellation.is_cancelled() {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::Cancelled,
-                    "turn was cancelled after persisting a model request and before driver invocation",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-            if deadline_expired(deadline) {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::DeadlineExceeded,
-                    "turn deadline elapsed after persisting a model request and before driver invocation",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-            if let Err(error) = request.validate_at(requested_event.recorded_at) {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
+            self.ensure_live(run, Checkpoint::AfterModelRequestPersisted, index, None)?;
+            if let Err(error) = request.validate_at(requested_at) {
+                return Err(self.fail(
+                    run,
                     TurnFailureCode::DriverContract,
                     error.to_string(),
-                    Some(request_index as u8),
+                    index,
                     None,
                 ));
             }
 
-            // The complete request is durable before the driver receives it.
-            let mut stream = driver.stream(request.clone(), cancellation.clone());
-            let mut event_count = 0_usize;
-            let mut model_output_bytes = 0_usize;
-            let mut tool_buffer = ToolCallBuffer::default();
-            let mut ready_call: Option<ReadyCall> = None;
-            let mut request_text = String::new();
-            let terminal;
-
-            loop {
-                if event_count == MAX_MODEL_EVENTS_PER_REQUEST {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::BoundExceeded,
-                        format!(
-                            "model request exceeded {MAX_MODEL_EVENTS_PER_REQUEST} events without a terminal"
-                        ),
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                let deadline_wait = tokio::time::sleep(duration_until(deadline));
-                tokio::pin!(deadline_wait);
-                let next = tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        return Err(self.persist_turn_failure(
-                            &scope,
-                            &cause,
-                            TurnFailureCode::Cancelled,
-                            "turn was cancelled while awaiting model output",
-                            Some(request_index as u8),
-                            None,
-                        ));
-                    }
-                    _ = &mut deadline_wait => {
-                        return Err(self.persist_turn_failure(
-                            &scope,
-                            &cause,
-                            TurnFailureCode::DeadlineExceeded,
-                            "turn deadline elapsed while awaiting model output",
-                            Some(request_index as u8),
-                            None,
-                        ));
-                    }
-                    next = stream.next() => next,
-                };
-                let Some(stream_event) = next else {
-                    return Err(TurnRunError::Internal(
-                        "validated model stream ended without an admitted terminal",
-                    ));
-                };
-                if cancellation.is_cancelled() {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::Cancelled,
-                        "turn was cancelled while awaiting model output",
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                if deadline_expired(deadline) {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::DeadlineExceeded,
-                        "turn deadline elapsed while awaiting model output",
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                if let ModelEvent::TextDelta { text } = &stream_event.event
-                    && total_text_bytes.saturating_add(text.len()) > MAX_ASSISTANT_TEXT_BYTES
-                {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::BoundExceeded,
-                        format!("assistant text exceeded {MAX_ASSISTANT_TEXT_BYTES} bytes"),
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-
-                let mut output_payload = ModelOutputPayload {
-                    event_version: TURN_PAYLOAD_VERSION,
-                    turn_id: scope.turn_id.clone(),
-                    request_index: request_index as u8,
-                    request_id: request.request_id.clone(),
-                    admitted_at: ceil_to_millis(Utc::now()),
-                    stream_event: stream_event.clone(),
-                };
-                let mut encoded_output_bytes = serde_json::to_vec(&output_payload)?.len();
-                if encoded_output_bytes > MAX_MODEL_OUTPUT_EVENT_BYTES {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::BoundExceeded,
-                        format!(
-                            "model output exceeded {MAX_MODEL_OUTPUT_EVENT_BYTES} encoded bytes"
-                        ),
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                if model_output_bytes.saturating_add(encoded_output_bytes)
-                    > MAX_MODEL_OUTPUT_BYTES_PER_REQUEST
-                {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::BoundExceeded,
-                        format!(
-                            "model request output exceeded {MAX_MODEL_OUTPUT_BYTES_PER_REQUEST} encoded bytes"
-                        ),
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                if cancellation.is_cancelled() {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::Cancelled,
-                        "turn was cancelled while awaiting model output",
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                let admitted_at = ceil_to_millis(Utc::now());
-                if admitted_at >= deadline {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::DeadlineExceeded,
-                        "turn deadline elapsed while awaiting model output",
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                output_payload.admitted_at = admitted_at;
-                encoded_output_bytes = serde_json::to_vec(&output_payload)?.len();
-                if encoded_output_bytes > MAX_MODEL_OUTPUT_EVENT_BYTES {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::BoundExceeded,
-                        format!(
-                            "model output exceeded {MAX_MODEL_OUTPUT_EVENT_BYTES} encoded bytes"
-                        ),
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                if model_output_bytes.saturating_add(encoded_output_bytes)
-                    > MAX_MODEL_OUTPUT_BYTES_PER_REQUEST
-                {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::BoundExceeded,
-                        format!(
-                            "model request output exceeded {MAX_MODEL_OUTPUT_BYTES_PER_REQUEST} encoded bytes"
-                        ),
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                if cancellation.is_cancelled() {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::Cancelled,
-                        "turn was cancelled while awaiting model output",
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                if deadline_expired(deadline) {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::DeadlineExceeded,
-                        "turn deadline elapsed while awaiting model output",
-                        Some(request_index as u8),
-                        None,
-                    ));
-                }
-                event_count += 1;
-
-                let output_event = self.append_turn_payload(
-                    &scope,
-                    EventActor::Model,
-                    event_kind::MODEL_OUTPUT,
-                    &output_payload,
-                    Some(cause),
-                    Some(request.request_id.to_string()),
-                )?;
-                cause = output_event.event_id;
-                model_output_bytes = model_output_bytes.saturating_add(encoded_output_bytes);
-
-                match &stream_event.event {
-                    ModelEvent::TextDelta { text } => {
-                        total_text_bytes += text.len();
-                        request_text.push_str(text);
-                        append_assistant_text(&mut conversation, text);
-                    }
-                    ModelEvent::ToolCallStarted {
-                        call_id,
-                        capability_id,
-                    } => {
-                        if capability_id != ARTIFACT_READ_ID
-                            && !(scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
-                        {
-                            return Err(self.persist_turn_failure(
-                                &scope,
-                                &cause,
-                                TurnFailureCode::Protocol,
-                                format!("unknown capability {capability_id}"),
-                                Some(request_index as u8),
-                                Some(call_id.clone()),
-                            ));
-                        }
-                        if !all_call_ids.insert(call_id.clone()) {
-                            return Err(self.persist_turn_failure(
-                                &scope,
-                                &cause,
-                                TurnFailureCode::Protocol,
-                                format!("duplicate epoch-wide tool call id {call_id}"),
-                                Some(request_index as u8),
-                                Some(call_id.clone()),
-                            ));
-                        }
-                        if let Err(error) =
-                            tool_buffer.start(call_id.clone(), capability_id.clone())
-                        {
-                            return Err(self.persist_turn_failure(
-                                &scope,
-                                &cause,
-                                TurnFailureCode::Protocol,
-                                error.to_string(),
-                                Some(request_index as u8),
-                                Some(error.call_id().clone()),
-                            ));
-                        }
-                    }
-                    ModelEvent::ToolCallArgumentDelta { call_id, delta } => {
-                        if let Err(error) = tool_buffer.push_arguments(call_id, delta) {
-                            return Err(self.persist_turn_failure(
-                                &scope,
-                                &cause,
-                                TurnFailureCode::Protocol,
-                                error.to_string(),
-                                Some(request_index as u8),
-                                Some(error.call_id().clone()),
-                            ));
-                        }
-                    }
-                    ModelEvent::ToolCallReady {
-                        call_id,
-                        capability_id,
-                        arguments,
-                    } => {
-                        if capability_id != ARTIFACT_READ_ID
-                            && !(scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
-                        {
-                            return Err(self.persist_turn_failure(
-                                &scope,
-                                &cause,
-                                TurnFailureCode::Protocol,
-                                format!("unknown capability {capability_id}"),
-                                Some(request_index as u8),
-                                Some(call_id.clone()),
-                            ));
-                        }
-                        if ready_call.is_some() {
-                            return Err(self.persist_turn_failure(
-                                &scope,
-                                &cause,
-                                TurnFailureCode::Protocol,
-                                "a model request produced more than one ready tool call",
-                                Some(request_index as u8),
-                                Some(call_id.clone()),
-                            ));
-                        }
-                        let rebuilt = match tool_buffer.finish(call_id) {
-                            Ok(rebuilt) => rebuilt,
-                            Err(error) => {
-                                return Err(self.persist_turn_failure(
-                                    &scope,
-                                    &cause,
-                                    TurnFailureCode::Protocol,
-                                    error.to_string(),
-                                    Some(request_index as u8),
-                                    Some(error.call_id().clone()),
-                                ));
-                            }
-                        };
-                        if rebuilt != stream_event.event {
-                            return Err(self.persist_turn_failure(
-                                &scope,
-                                &cause,
-                                TurnFailureCode::Protocol,
-                                "ready tool call does not match accumulated arguments",
-                                Some(request_index as u8),
-                                Some(call_id.clone()),
-                            ));
-                        }
-                        ready_call = Some(ReadyCall {
-                            call_id: call_id.clone(),
-                            capability_id: capability_id.clone(),
-                            arguments: arguments.clone(),
-                        });
-                        conversation.push(ConversationItem::ToolCall {
-                            call_id: call_id.clone(),
-                            capability_id: capability_id.clone(),
-                            arguments: arguments.clone(),
-                        });
-                    }
-                    ModelEvent::ReasoningItemStarted { .. }
-                    | ModelEvent::ReasoningDelta { .. }
-                    | ModelEvent::ReasoningItemReady { .. } => {
-                        return Err(self.persist_turn_failure(
-                            &scope,
-                            &cause,
-                            TurnFailureCode::Protocol,
-                            "reasoning events are not permitted in this turn loop",
-                            Some(request_index as u8),
-                            None,
-                        ));
-                    }
-                    ModelEvent::StructuredOutput { .. } => {
-                        return Err(self.persist_turn_failure(
-                            &scope,
-                            &cause,
-                            TurnFailureCode::Protocol,
-                            "text-constrained turn received structured output",
-                            Some(request_index as u8),
-                            None,
-                        ));
-                    }
-                    ModelEvent::Failed { failure } => {
-                        let code = turn_failure_code_for_model(failure.kind);
-                        return Err(self.persist_turn_failure(
-                            &scope,
-                            &cause,
-                            code,
-                            bounded_turn_failure_message(&failure.message),
-                            Some(request_index as u8),
-                            failure.call_id.clone(),
-                        ));
-                    }
-                    ModelEvent::Completed { .. } => {
-                        terminal = stream_event.event.clone();
-                        break;
-                    }
-                    ModelEvent::UsageUpdate { .. } | ModelEvent::ProviderWarning { .. } => {}
-                }
-            }
-
-            let ModelEvent::Completed {
-                finish_reason,
-                continuation,
-            } = terminal
-            else {
-                unreachable!("the stream loop exits only for completed model events")
-            };
-            if tool_buffer.has_active_calls() {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::Protocol,
-                    "model terminal has an unfinished tool call",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-            if continuation.is_some() {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::Protocol,
-                    "provider-managed continuation is not permitted in this turn loop",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-
-            if finish_reason == FinishReason::ToolCalls {
-                let Some(call) = ready_call else {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::Protocol,
-                        "tool-call terminal contained no ready tool call",
-                        Some(request_index as u8),
-                        None,
-                    ));
-                };
-                if request_index + 1 >= MAX_MODEL_REQUESTS {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::BoundExceeded,
-                        format!("turn exhausted the {MAX_MODEL_REQUESTS}-request limit"),
-                        Some(request_index as u8),
-                        Some(call.call_id),
-                    ));
-                }
-
-                // Give cancellation a deterministic checkpoint after the
-                // provider terminal and before any capability request is
-                // journaled.
-                tokio::task::yield_now().await;
-                if cancellation.is_cancelled() {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::Cancelled,
-                        "turn was cancelled before capability request",
-                        Some(request_index as u8),
-                        Some(call.call_id.clone()),
-                    ));
-                }
-                if deadline_expired(deadline) {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::DeadlineExceeded,
-                        "turn deadline elapsed before capability execution",
-                        Some(request_index as u8),
-                        Some(call.call_id),
-                    ));
-                }
-                if call.capability_id == ditto_artifact_sort::ID {
-                    let result = self
-                        .run_sort_tool(
-                            &mut scope,
-                            &mut cause,
-                            request_index as u8,
-                            &call,
-                            live_epoch
-                                .invocable_binding(ditto_artifact_sort::ID)
-                                .ok_or(TurnRunError::Internal("missing sort binding"))?,
-                            &invocation_authorizer,
-                            cancellation.clone(),
-                            deadline,
-                        )
-                        .await?;
-                    conversation.push(ConversationItem::ToolResult {
-                        call_id: call.call_id,
-                        content: vec![ContentPart::Structured {
-                            value: result.model_value(),
-                        }],
-                        is_error: result.is_error(),
-                    });
-                    tool_call_count = tool_call_count.saturating_add(1);
-                    scope.tool_call_count.set(tool_call_count);
-                    continue;
-                }
-                let untrusted_call = match UntrustedToolCall::new(
-                    call.call_id.to_string(),
-                    call.capability_id.clone(),
-                    call.arguments.clone(),
-                ) {
-                    Ok(call) => Some(call),
-                    Err(
-                        UntrustedToolCallError::ArgumentsTooLarge { .. }
-                        | UntrustedToolCallError::ArgumentsTooDeep { .. }
-                        | UntrustedToolCallError::ArgumentsTooComplex { .. },
-                    ) => None,
-                    Err(error) => {
-                        return Err(self.persist_turn_failure(
-                            &scope,
-                            &cause,
-                            TurnFailureCode::CapabilityContract,
-                            error.to_string(),
-                            Some(request_index as u8),
-                            Some(call.call_id),
-                        ));
-                    }
-                };
-                let canonical = match untrusted_call {
-                    Some(untrusted_call) => {
-                        match InvocationCompiler::compile(binding, untrusted_call, &deriver) {
-                            Ok(invocation) => Some(invocation),
-                            Err(InvocationError::ArgumentsSchema {
-                                stage: ditto_capability::ArgumentStage::Raw,
-                                ..
-                            }) => None,
-                            Err(error) => {
-                                return Err(self.persist_turn_failure(
-                                    &scope,
-                                    &cause,
-                                    TurnFailureCode::CapabilityContract,
-                                    error.to_string(),
-                                    Some(request_index as u8),
-                                    Some(call.call_id),
-                                ));
-                            }
-                        }
-                    }
-                    None => None,
-                };
-                let normalized: Result<ArtifactReadResource, ArtifactReadError> =
-                    match canonical.as_ref() {
-                        Some(invocation) => Ok(serde_json::from_value(
-                            invocation.normalized_arguments().clone(),
-                        )
-                        .map_err(|_| {
-                            TurnRunError::Internal(
-                                "canonical artifact.read arguments are not a typed resource",
-                            )
-                        })?),
-                        None => Err(artifact_read_argument_error(&call.arguments)),
-                    };
-                let capability_event = self.append_turn_payload(
-                    &scope,
-                    EventActor::Model,
-                    event_kind::CAPABILITY_REQUESTED,
-                    &CapabilityRequestedPayload {
-                        event_version: TURN_PAYLOAD_VERSION,
-                        turn_id: scope.turn_id.clone(),
-                        request_index: request_index as u8,
-                        execution_epoch_id: execution_epoch_id.clone(),
-                        call_id: call.call_id.clone(),
-                        capability_id: call.capability_id.clone(),
-                        capability_version: ARTIFACT_READ_VERSION.into(),
-                        arguments: call.arguments.clone(),
-                        normalized: normalized.as_ref().ok().cloned(),
-                    },
-                    Some(cause),
-                    Some(call.call_id.to_string()),
-                )?;
-                cause = capability_event.event_id;
-
-                let authorization_through_seq = self.latest_event_seq()?;
-                let authorized = match &normalized {
-                    Ok(resource) => {
-                        self.artifact_is_authorized(&scope, resource, authorization_through_seq)?
-                    }
-                    Err(_) => false,
-                };
-                let permit = if let Some(invocation) = canonical.as_ref() {
-                    let policy_resource = authorized
-                        .then(|| invocation.resources().iter().next().cloned())
-                        .flatten();
-                    let policy =
-                        StaticPolicy::artifact_read_scope(policy_resource).map_err(|_| {
-                            TurnRunError::Internal(
-                                "artifact.read static policy construction failed",
-                            )
-                        })?;
-                    match invocation_authorizer.authorize_static(invocation, &policy, Utc::now()) {
-                        Ok(AuthorizationOutcome::Permitted(permit)) if authorized => Some(permit),
-                        Err(PolicyError::MissingResourceScope) if !authorized => None,
-                        Ok(AuthorizationOutcome::ApprovalRequired(_))
-                        | Ok(AuthorizationOutcome::Permitted(_))
-                        | Err(_) => {
-                            return Err(TurnRunError::Internal(
-                                "artifact.read static policy authorization contradicted scope",
-                            ));
-                        }
-                    }
-                } else {
-                    None
-                };
-                // Authorization is bounded by the captured high-water. Yield
-                // once more so cancellation/deadline can stop the turn before
-                // an execution.started claim is made.
-                tokio::task::yield_now().await;
-                if cancellation.is_cancelled() {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::Cancelled,
-                        "turn was cancelled after capability request and before execution started",
-                        Some(request_index as u8),
-                        Some(call.call_id.clone()),
-                    ));
-                }
-                if deadline_expired(deadline) {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::DeadlineExceeded,
-                        "turn deadline elapsed after capability request and before execution started",
-                        Some(request_index as u8),
-                        Some(call.call_id.clone()),
-                    ));
-                }
-                let started_event = self.append_turn_payload(
-                    &scope,
-                    EventActor::Capability,
-                    event_kind::EXECUTION_STARTED,
-                    &ExecutionStartedPayload {
-                        event_version: TURN_PAYLOAD_VERSION,
-                        turn_id: scope.turn_id.clone(),
-                        request_index: request_index as u8,
-                        call_id: call.call_id.clone(),
-                        capability_id: ARTIFACT_READ_ID.into(),
-                        capability_version: ARTIFACT_READ_VERSION.into(),
-                        authorization_through_seq,
-                        resource: normalized.as_ref().ok().cloned(),
-                    },
-                    Some(cause),
-                    Some(call.call_id.to_string()),
-                )?;
-                cause = started_event.event_id;
-
-                // This yield is an intentional, deterministic cancellation
-                // checkpoint after the durable start and before any store read
-                // or durable result.
-                tokio::task::yield_now().await;
-                if cancellation.is_cancelled() {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::Cancelled,
-                        "turn was cancelled after execution started and before its result",
-                        Some(request_index as u8),
-                        Some(call.call_id),
-                    ));
-                }
-                if deadline_expired(deadline) {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::DeadlineExceeded,
-                        "turn deadline elapsed after execution started and before its result",
-                        Some(request_index as u8),
-                        Some(call.call_id),
-                    ));
-                }
-
-                let result = match normalized {
-                    Err(error) => ArtifactReadResult::error(error),
-                    Ok(resource) if !authorized => ArtifactReadResult::error(
-                        ditto_artifact_read::ArtifactReadError::not_authorized(
-                            resource.reference().clone(),
-                        ),
-                    ),
-                    Ok(resource) => {
-                        let invocation = canonical.as_ref().ok_or(TurnRunError::Internal(
-                            "authorized artifact.read has no canonical invocation",
-                        ))?;
-                        let permit = permit.as_ref().ok_or(TurnRunError::Internal(
-                            "authorized artifact.read has no invocation permit",
-                        ))?;
-                        permit.validate(invocation, Utc::now()).map_err(|_| {
-                            TurnRunError::Internal(
-                                "artifact.read invocation permit is invalid at execution",
-                            )
-                        })?;
-                        authority.execute(&resource)
-                    }
-                };
-                if cancellation.is_cancelled() {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::Cancelled,
-                        "turn was cancelled after the artifact read and before its result",
-                        Some(request_index as u8),
-                        Some(call.call_id),
-                    ));
-                }
-                if deadline_expired(deadline) {
-                    return Err(self.persist_turn_failure(
-                        &scope,
-                        &cause,
-                        TurnFailureCode::DeadlineExceeded,
-                        "turn deadline elapsed after the artifact read and before its result",
-                        Some(request_index as u8),
-                        Some(call.call_id),
-                    ));
-                }
-                let output_event = self.append_turn_payload(
-                    &scope,
-                    EventActor::Capability,
-                    event_kind::EXECUTION_OUTPUT,
-                    &ExecutionOutputPayload {
-                        event_version: TURN_PAYLOAD_VERSION,
-                        turn_id: scope.turn_id.clone(),
-                        request_index: request_index as u8,
-                        call_id: call.call_id.clone(),
-                        capability_id: ARTIFACT_READ_ID.into(),
-                        capability_version: ARTIFACT_READ_VERSION.into(),
-                        result: result.clone(),
-                    },
-                    Some(cause),
-                    Some(call.call_id.to_string()),
-                )?;
-                cause = output_event.event_id;
-                let result_value = serde_json::to_value(&result)?;
-                conversation.push(ConversationItem::ToolResult {
-                    call_id: call.call_id,
-                    content: vec![ContentPart::Structured {
-                        value: result_value,
-                    }],
-                    is_error: result.is_error(),
-                });
-                tool_call_count = tool_call_count.saturating_add(1);
-                scope.tool_call_count.set(tool_call_count);
+            let response = self
+                .stream_model_response(run, request_index, &request, &mut conversation, &mut totals)
+                .await?;
+            if response.finish_reason == FinishReason::ToolCalls {
+                self.execute_tool_call(
+                    run,
+                    request_index,
+                    response.ready_call,
+                    &tools,
+                    &mut conversation,
+                    &mut totals,
+                )
+                .await?;
                 continue;
             }
-
-            if ready_call.is_some() {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::Protocol,
-                    "non-tool terminal followed a ready tool call",
-                    Some(request_index as u8),
-                    ready_call.map(|call| call.call_id),
-                ));
-            }
-            if tool_call_count == 0 && !scope.agent_run {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::Protocol,
-                    "turn ended before executing artifact.read",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-            if request_text.is_empty() {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::Protocol,
-                    "final model request produced no assistant text",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-
-            tokio::task::yield_now().await;
-            if cancellation.is_cancelled() {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::Cancelled,
-                    "turn was cancelled after final model output and before turn completion",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-            if deadline_expired(deadline) {
-                return Err(self.persist_turn_failure(
-                    &scope,
-                    &cause,
-                    TurnFailureCode::DeadlineExceeded,
-                    "turn deadline elapsed after final model output and before turn completion",
-                    Some(request_index as u8),
-                    None,
-                ));
-            }
-
-            let outcome = ArtifactReadTurnOutcome {
-                turn_id: scope.turn_id.clone(),
-                session_id: scope.session_id.clone(),
-                task_id: scope.task_id.clone(),
-                execution_epoch_id: execution_epoch_id.clone(),
-                response: request_text,
-                status: ArtifactReadTurnStatus::Unverified,
-                request_count: (request_index + 1) as u8,
-                tool_call_count,
-            };
-            self.append_turn_payload(
-                &scope,
-                EventActor::System,
-                event_kind::TURN_FINISHED,
-                &TurnFinishedPayload {
-                    event_version: TURN_PAYLOAD_VERSION,
-                    turn_id: scope.turn_id.clone(),
-                    outcome: outcome.clone(),
-                },
-                Some(cause),
-                None,
-            )?;
-            return Ok(outcome);
+            return self
+                .finish_turn(run, request_index, response, &tools, &totals)
+                .await;
         }
 
         unreachable!("the bounded request loop returns from every terminal path")
+    }
+
+    /// Build, validate, and journal one model request before driver I/O.
+    /// Returns the request and its durable `model.requested` timestamp.
+    fn dispatch_model_request(
+        &self,
+        run: &mut TurnRun<'_>,
+        request_index: usize,
+        tools: &TurnTools,
+        capsule: &ContextCapsule,
+        conversation: &[ConversationItem],
+    ) -> Result<(ModelRequest, DateTime<Utc>), TurnRunError> {
+        let index = Some(request_index as u8);
+        let request = build_model_request(
+            &run.scope,
+            request_index,
+            tools.execution_epoch_id.clone(),
+            capsule.clone(),
+            tools.schemas.clone(),
+            conversation.to_vec(),
+            run.deadline,
+        )
+        .map_err(|error| self.fail(run, TurnFailureCode::DriverContract, error, index, None))?;
+        if let Err(error) = request.validate_at(run.accepted_at) {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::DriverContract,
+                error.to_string(),
+                index,
+                None,
+            ));
+        }
+        if let Err(error) = request.validate_against(run.driver.descriptor()) {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::DriverContract,
+                error.to_string(),
+                index,
+                None,
+            ));
+        }
+        self.ensure_before_deadline(run, Checkpoint::BeforeModelRequest, index, None)?;
+
+        let requested = self.append_turn_event(
+            run,
+            EventActor::System,
+            event_kind::MODEL_REQUESTED,
+            &ModelRequestedPayload {
+                event_version: TURN_PAYLOAD_VERSION,
+                turn_id: run.scope.turn_id.clone(),
+                request_index: request_index as u8,
+                request: request.clone(),
+            },
+            Some(request.request_id.to_string()),
+        )?;
+        run.scope.request_count.set((request_index + 1) as u8);
+        Ok((request, requested.recorded_at))
+    }
+
+    /// Admit and journal the driver's validated stream for one request.
+    async fn stream_model_response(
+        &self,
+        run: &mut TurnRun<'_>,
+        request_index: usize,
+        request: &ModelRequest,
+        conversation: &mut Vec<ConversationItem>,
+        totals: &mut TurnTotals,
+    ) -> Result<ModelResponse, TurnRunError> {
+        let index = Some(request_index as u8);
+        // The complete request is durable before the driver receives it.
+        let driver = run.driver;
+        let mut stream = driver.stream(request.clone(), run.cancellation.clone());
+        let mut event_count = 0_usize;
+        let mut model_output_bytes = 0_usize;
+        let mut tool_buffer = ToolCallBuffer::default();
+        let mut ready_call: Option<ReadyCall> = None;
+        let mut request_text = String::new();
+
+        loop {
+            if event_count == MAX_MODEL_EVENTS_PER_REQUEST {
+                return Err(self.fail(
+                    run,
+                    TurnFailureCode::BoundExceeded,
+                    format!(
+                        "model request exceeded {MAX_MODEL_EVENTS_PER_REQUEST} events without a terminal"
+                    ),
+                    index,
+                    None,
+                ));
+            }
+            let deadline_wait = tokio::time::sleep(duration_until(run.deadline));
+            tokio::pin!(deadline_wait);
+            let next = tokio::select! {
+                biased;
+                _ = run.cancellation.cancelled() => {
+                    return Err(self.fail(
+                        run,
+                        TurnFailureCode::Cancelled,
+                        Checkpoint::AwaitingModelOutput.cancelled_message(),
+                        index,
+                        None,
+                    ));
+                }
+                _ = &mut deadline_wait => {
+                    return Err(self.fail(
+                        run,
+                        TurnFailureCode::DeadlineExceeded,
+                        Checkpoint::AwaitingModelOutput.deadline_message(),
+                        index,
+                        None,
+                    ));
+                }
+                next = stream.next() => next,
+            };
+            let Some(stream_event) = next else {
+                return Err(TurnRunError::Internal(
+                    "validated model stream ended without an admitted terminal",
+                ));
+            };
+            self.ensure_live(run, Checkpoint::AwaitingModelOutput, index, None)?;
+            if let ModelEvent::TextDelta { text } = &stream_event.event
+                && totals.text_bytes.saturating_add(text.len()) > MAX_ASSISTANT_TEXT_BYTES
+            {
+                return Err(self.fail(
+                    run,
+                    TurnFailureCode::BoundExceeded,
+                    format!("assistant text exceeded {MAX_ASSISTANT_TEXT_BYTES} bytes"),
+                    index,
+                    None,
+                ));
+            }
+
+            let mut output_payload = ModelOutputPayload {
+                event_version: TURN_PAYLOAD_VERSION,
+                turn_id: run.scope.turn_id.clone(),
+                request_index: request_index as u8,
+                request_id: request.request_id.clone(),
+                admitted_at: ceil_to_millis(Utc::now()),
+                stream_event: stream_event.clone(),
+            };
+            let encoded_output_bytes = serde_json::to_vec(&output_payload)?.len();
+            self.ensure_output_bounds(run, index, model_output_bytes, encoded_output_bytes)?;
+            self.ensure_not_cancelled(run, Checkpoint::AwaitingModelOutput, index, None)?;
+            let admitted_at = ceil_to_millis(Utc::now());
+            if admitted_at >= run.deadline {
+                return Err(self.fail(
+                    run,
+                    TurnFailureCode::DeadlineExceeded,
+                    Checkpoint::AwaitingModelOutput.deadline_message(),
+                    index,
+                    None,
+                ));
+            }
+            output_payload.admitted_at = admitted_at;
+            let encoded_output_bytes = serde_json::to_vec(&output_payload)?.len();
+            self.ensure_output_bounds(run, index, model_output_bytes, encoded_output_bytes)?;
+            self.ensure_live(run, Checkpoint::AwaitingModelOutput, index, None)?;
+            event_count += 1;
+
+            self.append_turn_event(
+                run,
+                EventActor::Model,
+                event_kind::MODEL_OUTPUT,
+                &output_payload,
+                Some(request.request_id.to_string()),
+            )?;
+            model_output_bytes = model_output_bytes.saturating_add(encoded_output_bytes);
+
+            match &stream_event.event {
+                ModelEvent::TextDelta { text } => {
+                    totals.text_bytes += text.len();
+                    request_text.push_str(text);
+                    append_assistant_text(conversation, text);
+                }
+                ModelEvent::ToolCallStarted {
+                    call_id,
+                    capability_id,
+                } => {
+                    self.ensure_known_capability(run, index, call_id, capability_id)?;
+                    if !totals.call_ids.insert(call_id.clone()) {
+                        return Err(self.fail(
+                            run,
+                            TurnFailureCode::Protocol,
+                            format!("duplicate epoch-wide tool call id {call_id}"),
+                            index,
+                            Some(call_id.clone()),
+                        ));
+                    }
+                    if let Err(error) = tool_buffer.start(call_id.clone(), capability_id.clone()) {
+                        return Err(self.fail(
+                            run,
+                            TurnFailureCode::Protocol,
+                            error.to_string(),
+                            index,
+                            Some(error.call_id().clone()),
+                        ));
+                    }
+                }
+                ModelEvent::ToolCallArgumentDelta { call_id, delta } => {
+                    if let Err(error) = tool_buffer.push_arguments(call_id, delta) {
+                        return Err(self.fail(
+                            run,
+                            TurnFailureCode::Protocol,
+                            error.to_string(),
+                            index,
+                            Some(error.call_id().clone()),
+                        ));
+                    }
+                }
+                ModelEvent::ToolCallReady {
+                    call_id,
+                    capability_id,
+                    arguments,
+                } => {
+                    self.ensure_known_capability(run, index, call_id, capability_id)?;
+                    if ready_call.is_some() {
+                        return Err(self.fail(
+                            run,
+                            TurnFailureCode::Protocol,
+                            "a model request produced more than one ready tool call",
+                            index,
+                            Some(call_id.clone()),
+                        ));
+                    }
+                    let rebuilt = tool_buffer.finish(call_id).map_err(|error| {
+                        self.fail(
+                            run,
+                            TurnFailureCode::Protocol,
+                            error.to_string(),
+                            index,
+                            Some(error.call_id().clone()),
+                        )
+                    })?;
+                    if rebuilt != stream_event.event {
+                        return Err(self.fail(
+                            run,
+                            TurnFailureCode::Protocol,
+                            "ready tool call does not match accumulated arguments",
+                            index,
+                            Some(call_id.clone()),
+                        ));
+                    }
+                    ready_call = Some(ReadyCall {
+                        call_id: call_id.clone(),
+                        capability_id: capability_id.clone(),
+                        arguments: arguments.clone(),
+                    });
+                    conversation.push(ConversationItem::ToolCall {
+                        call_id: call_id.clone(),
+                        capability_id: capability_id.clone(),
+                        arguments: arguments.clone(),
+                    });
+                }
+                ModelEvent::ReasoningItemStarted { .. }
+                | ModelEvent::ReasoningDelta { .. }
+                | ModelEvent::ReasoningItemReady { .. } => {
+                    return Err(self.fail(
+                        run,
+                        TurnFailureCode::Protocol,
+                        "reasoning events are not permitted in this turn loop",
+                        index,
+                        None,
+                    ));
+                }
+                ModelEvent::StructuredOutput { .. } => {
+                    return Err(self.fail(
+                        run,
+                        TurnFailureCode::Protocol,
+                        "text-constrained turn received structured output",
+                        index,
+                        None,
+                    ));
+                }
+                ModelEvent::Failed { failure } => {
+                    return Err(self.fail(
+                        run,
+                        turn_failure_code_for_model(failure.kind),
+                        bounded_turn_failure_message(&failure.message),
+                        index,
+                        failure.call_id.clone(),
+                    ));
+                }
+                ModelEvent::Completed {
+                    finish_reason,
+                    continuation,
+                } => {
+                    if tool_buffer.has_active_calls() {
+                        return Err(self.fail(
+                            run,
+                            TurnFailureCode::Protocol,
+                            "model terminal has an unfinished tool call",
+                            index,
+                            None,
+                        ));
+                    }
+                    if continuation.is_some() {
+                        return Err(self.fail(
+                            run,
+                            TurnFailureCode::Protocol,
+                            "provider-managed continuation is not permitted in this turn loop",
+                            index,
+                            None,
+                        ));
+                    }
+                    return Ok(ModelResponse {
+                        finish_reason: finish_reason.clone(),
+                        ready_call,
+                        text: request_text,
+                    });
+                }
+                ModelEvent::UsageUpdate { .. } | ModelEvent::ProviderWarning { .. } => {}
+            }
+        }
+    }
+
+    /// Execute the one ready call of a `ToolCalls` terminal and append its
+    /// structured result to the conversation.
+    async fn execute_tool_call(
+        &self,
+        run: &mut TurnRun<'_>,
+        request_index: usize,
+        ready_call: Option<ReadyCall>,
+        tools: &TurnTools,
+        conversation: &mut Vec<ConversationItem>,
+        totals: &mut TurnTotals,
+    ) -> Result<(), TurnRunError> {
+        let index = Some(request_index as u8);
+        let Some(call) = ready_call else {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::Protocol,
+                "tool-call terminal contained no ready tool call",
+                index,
+                None,
+            ));
+        };
+        if request_index + 1 >= MAX_MODEL_REQUESTS {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::BoundExceeded,
+                format!("turn exhausted the {MAX_MODEL_REQUESTS}-request limit"),
+                index,
+                Some(call.call_id),
+            ));
+        }
+
+        // Give cancellation a deterministic checkpoint after the provider
+        // terminal and before any capability request is journaled.
+        tokio::task::yield_now().await;
+        self.ensure_live(
+            run,
+            Checkpoint::BeforeCapabilityRequest,
+            index,
+            Some(call.call_id.clone()),
+        )?;
+        let (value, is_error) = if call.capability_id == ditto_artifact_sort::ID {
+            let binding = tools
+                .live_epoch
+                .invocable_binding(ditto_artifact_sort::ID)
+                .ok_or(TurnRunError::Internal("missing sort binding"))?;
+            let result = self
+                .run_sort_tool(
+                    &mut run.scope,
+                    &mut run.cause,
+                    request_index as u8,
+                    &call,
+                    binding,
+                    &tools.authorizer,
+                    run.cancellation.clone(),
+                    run.deadline,
+                )
+                .await?;
+            (result.model_value(), result.is_error())
+        } else {
+            let result = self
+                .execute_artifact_read(run, request_index, &call, tools)
+                .await?;
+            (serde_json::to_value(&result)?, result.is_error())
+        };
+        conversation.push(ConversationItem::ToolResult {
+            call_id: call.call_id,
+            content: vec![ContentPart::Structured { value }],
+            is_error,
+        });
+        totals.tool_calls = totals.tool_calls.saturating_add(1);
+        run.scope.tool_call_count.set(totals.tool_calls);
+        Ok(())
+    }
+
+    /// Normalize, authorize, and execute one `artifact.read` call, journaling
+    /// the request, start, and deterministic result.
+    async fn execute_artifact_read(
+        &self,
+        run: &mut TurnRun<'_>,
+        request_index: usize,
+        call: &ReadyCall,
+        tools: &TurnTools,
+    ) -> Result<ArtifactReadResult, TurnRunError> {
+        let index = Some(request_index as u8);
+        let binding =
+            tools
+                .live_epoch
+                .invocable_binding(ARTIFACT_READ_ID)
+                .ok_or(TurnRunError::Internal(
+                    "artifact.read live epoch issued no invocation binding",
+                ))?;
+        let untrusted_call = match UntrustedToolCall::new(
+            call.call_id.to_string(),
+            call.capability_id.clone(),
+            call.arguments.clone(),
+        ) {
+            Ok(call) => Some(call),
+            Err(
+                UntrustedToolCallError::ArgumentsTooLarge { .. }
+                | UntrustedToolCallError::ArgumentsTooDeep { .. }
+                | UntrustedToolCallError::ArgumentsTooComplex { .. },
+            ) => None,
+            Err(error) => {
+                return Err(self.fail(
+                    run,
+                    TurnFailureCode::CapabilityContract,
+                    error.to_string(),
+                    index,
+                    Some(call.call_id.clone()),
+                ));
+            }
+        };
+        let canonical = match untrusted_call {
+            Some(untrusted_call) => {
+                match InvocationCompiler::compile(
+                    binding,
+                    untrusted_call,
+                    &ArtifactReadDeriver::default(),
+                ) {
+                    Ok(invocation) => Some(invocation),
+                    Err(InvocationError::ArgumentsSchema {
+                        stage: ditto_capability::ArgumentStage::Raw,
+                        ..
+                    }) => None,
+                    Err(error) => {
+                        return Err(self.fail(
+                            run,
+                            TurnFailureCode::CapabilityContract,
+                            error.to_string(),
+                            index,
+                            Some(call.call_id.clone()),
+                        ));
+                    }
+                }
+            }
+            None => None,
+        };
+        let normalized: Result<ArtifactReadResource, ArtifactReadError> = match canonical.as_ref() {
+            Some(invocation) => Ok(serde_json::from_value(
+                invocation.normalized_arguments().clone(),
+            )
+            .map_err(|_| {
+                TurnRunError::Internal("canonical artifact.read arguments are not a typed resource")
+            })?),
+            None => Err(artifact_read_argument_error(&call.arguments)),
+        };
+        self.append_turn_event(
+            run,
+            EventActor::Model,
+            event_kind::CAPABILITY_REQUESTED,
+            &CapabilityRequestedPayload {
+                event_version: TURN_PAYLOAD_VERSION,
+                turn_id: run.scope.turn_id.clone(),
+                request_index: request_index as u8,
+                execution_epoch_id: tools.execution_epoch_id.clone(),
+                call_id: call.call_id.clone(),
+                capability_id: call.capability_id.clone(),
+                capability_version: ARTIFACT_READ_VERSION.into(),
+                arguments: call.arguments.clone(),
+                normalized: normalized.as_ref().ok().cloned(),
+            },
+            Some(call.call_id.to_string()),
+        )?;
+
+        let authorization_through_seq = self.latest_event_seq()?;
+        let authorized = match &normalized {
+            Ok(resource) => {
+                self.artifact_is_authorized(&run.scope, resource, authorization_through_seq)?
+            }
+            Err(_) => false,
+        };
+        let permit = if let Some(invocation) = canonical.as_ref() {
+            let policy_resource = authorized
+                .then(|| invocation.resources().iter().next().cloned())
+                .flatten();
+            let policy = StaticPolicy::artifact_read_scope(policy_resource).map_err(|_| {
+                TurnRunError::Internal("artifact.read static policy construction failed")
+            })?;
+            match tools
+                .authorizer
+                .authorize_static(invocation, &policy, Utc::now())
+            {
+                Ok(AuthorizationOutcome::Permitted(permit)) if authorized => Some(permit),
+                Err(PolicyError::MissingResourceScope) if !authorized => None,
+                Ok(AuthorizationOutcome::ApprovalRequired(_))
+                | Ok(AuthorizationOutcome::Permitted(_))
+                | Err(_) => {
+                    return Err(TurnRunError::Internal(
+                        "artifact.read static policy authorization contradicted scope",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        // Authorization is bounded by the captured high-water. Yield once
+        // more so cancellation/deadline can stop the turn before an
+        // execution.started claim is made.
+        tokio::task::yield_now().await;
+        self.ensure_live(
+            run,
+            Checkpoint::AfterCapabilityRequest,
+            index,
+            Some(call.call_id.clone()),
+        )?;
+        self.append_turn_event(
+            run,
+            EventActor::Capability,
+            event_kind::EXECUTION_STARTED,
+            &ExecutionStartedPayload {
+                event_version: TURN_PAYLOAD_VERSION,
+                turn_id: run.scope.turn_id.clone(),
+                request_index: request_index as u8,
+                call_id: call.call_id.clone(),
+                capability_id: ARTIFACT_READ_ID.into(),
+                capability_version: ARTIFACT_READ_VERSION.into(),
+                authorization_through_seq,
+                resource: normalized.as_ref().ok().cloned(),
+            },
+            Some(call.call_id.to_string()),
+        )?;
+
+        // This yield is an intentional, deterministic cancellation checkpoint
+        // after the durable start and before any store read or durable result.
+        tokio::task::yield_now().await;
+        self.ensure_live(
+            run,
+            Checkpoint::AfterExecutionStarted,
+            index,
+            Some(call.call_id.clone()),
+        )?;
+
+        let result = match normalized {
+            Err(error) => ArtifactReadResult::error(error),
+            Ok(resource) if !authorized => {
+                ArtifactReadResult::error(ditto_artifact_read::ArtifactReadError::not_authorized(
+                    resource.reference().clone(),
+                ))
+            }
+            Ok(resource) => {
+                let invocation = canonical.as_ref().ok_or(TurnRunError::Internal(
+                    "authorized artifact.read has no canonical invocation",
+                ))?;
+                let permit = permit.as_ref().ok_or(TurnRunError::Internal(
+                    "authorized artifact.read has no invocation permit",
+                ))?;
+                permit.validate(invocation, Utc::now()).map_err(|_| {
+                    TurnRunError::Internal(
+                        "artifact.read invocation permit is invalid at execution",
+                    )
+                })?;
+                tools.authority.execute(&resource)
+            }
+        };
+        self.ensure_live(
+            run,
+            Checkpoint::AfterArtifactRead,
+            index,
+            Some(call.call_id.clone()),
+        )?;
+        self.append_turn_event(
+            run,
+            EventActor::Capability,
+            event_kind::EXECUTION_OUTPUT,
+            &ExecutionOutputPayload {
+                event_version: TURN_PAYLOAD_VERSION,
+                turn_id: run.scope.turn_id.clone(),
+                request_index: request_index as u8,
+                call_id: call.call_id.clone(),
+                capability_id: ARTIFACT_READ_ID.into(),
+                capability_version: ARTIFACT_READ_VERSION.into(),
+                result: result.clone(),
+            },
+            Some(call.call_id.to_string()),
+        )?;
+        Ok(result)
+    }
+
+    /// Journal the unverified final answer of a non-tool model terminal.
+    async fn finish_turn(
+        &self,
+        run: &mut TurnRun<'_>,
+        request_index: usize,
+        response: ModelResponse,
+        tools: &TurnTools,
+        totals: &TurnTotals,
+    ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
+        let index = Some(request_index as u8);
+        if let Some(call) = response.ready_call {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::Protocol,
+                "non-tool terminal followed a ready tool call",
+                index,
+                Some(call.call_id),
+            ));
+        }
+        if totals.tool_calls == 0 && !run.scope.agent_run {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::Protocol,
+                "turn ended before executing artifact.read",
+                index,
+                None,
+            ));
+        }
+        if response.text.is_empty() {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::Protocol,
+                "final model request produced no assistant text",
+                index,
+                None,
+            ));
+        }
+
+        tokio::task::yield_now().await;
+        self.ensure_live(run, Checkpoint::AfterFinalOutput, index, None)?;
+
+        let outcome = ArtifactReadTurnOutcome {
+            turn_id: run.scope.turn_id.clone(),
+            session_id: run.scope.session_id.clone(),
+            task_id: run.scope.task_id.clone(),
+            execution_epoch_id: tools.execution_epoch_id.clone(),
+            response: response.text,
+            status: ArtifactReadTurnStatus::Unverified,
+            request_count: (request_index + 1) as u8,
+            tool_call_count: totals.tool_calls,
+        };
+        self.append_turn_event(
+            run,
+            EventActor::System,
+            event_kind::TURN_FINISHED,
+            &TurnFinishedPayload {
+                event_version: TURN_PAYLOAD_VERSION,
+                turn_id: run.scope.turn_id.clone(),
+                outcome: outcome.clone(),
+            },
+            None,
+        )?;
+        Ok(outcome)
+    }
+
+    fn ensure_known_capability(
+        &self,
+        run: &TurnRun<'_>,
+        index: Option<u8>,
+        call_id: &ProviderCallId,
+        capability_id: &str,
+    ) -> Result<(), TurnRunError> {
+        if capability_id == ARTIFACT_READ_ID
+            || (run.scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+        {
+            return Ok(());
+        }
+        Err(self.fail(
+            run,
+            TurnFailureCode::Protocol,
+            format!("unknown capability {capability_id}"),
+            index,
+            Some(call_id.clone()),
+        ))
+    }
+
+    fn ensure_output_bounds(
+        &self,
+        run: &TurnRun<'_>,
+        index: Option<u8>,
+        request_bytes: usize,
+        event_bytes: usize,
+    ) -> Result<(), TurnRunError> {
+        if event_bytes > MAX_MODEL_OUTPUT_EVENT_BYTES {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::BoundExceeded,
+                format!("model output exceeded {MAX_MODEL_OUTPUT_EVENT_BYTES} encoded bytes"),
+                index,
+                None,
+            ));
+        }
+        if request_bytes.saturating_add(event_bytes) > MAX_MODEL_OUTPUT_BYTES_PER_REQUEST {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::BoundExceeded,
+                format!(
+                    "model request output exceeded {MAX_MODEL_OUTPUT_BYTES_PER_REQUEST} encoded bytes"
+                ),
+                index,
+                None,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stop at a checkpoint when cancelled, then when the deadline elapsed.
+    fn ensure_live(
+        &self,
+        run: &TurnRun<'_>,
+        checkpoint: Checkpoint,
+        request_index: Option<u8>,
+        call_id: Option<ProviderCallId>,
+    ) -> Result<(), TurnRunError> {
+        self.ensure_not_cancelled(run, checkpoint, request_index, call_id.clone())?;
+        self.ensure_before_deadline(run, checkpoint, request_index, call_id)
+    }
+
+    fn ensure_not_cancelled(
+        &self,
+        run: &TurnRun<'_>,
+        checkpoint: Checkpoint,
+        request_index: Option<u8>,
+        call_id: Option<ProviderCallId>,
+    ) -> Result<(), TurnRunError> {
+        if run.cancellation.is_cancelled() {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::Cancelled,
+                checkpoint.cancelled_message(),
+                request_index,
+                call_id,
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_before_deadline(
+        &self,
+        run: &TurnRun<'_>,
+        checkpoint: Checkpoint,
+        request_index: Option<u8>,
+        call_id: Option<ProviderCallId>,
+    ) -> Result<(), TurnRunError> {
+        if deadline_expired(run.deadline) {
+            return Err(self.fail(
+                run,
+                TurnFailureCode::DeadlineExceeded,
+                checkpoint.deadline_message(),
+                request_index,
+                call_id,
+            ));
+        }
+        Ok(())
+    }
+
+    fn fail(
+        &self,
+        run: &TurnRun<'_>,
+        code: TurnFailureCode,
+        message: impl Into<String>,
+        request_index: Option<u8>,
+        call_id: Option<ProviderCallId>,
+    ) -> TurnRunError {
+        self.persist_turn_failure(
+            &run.scope,
+            &run.cause,
+            code,
+            message,
+            request_index,
+            call_id,
+        )
+    }
+
+    /// Append one turn transition caused by the previous one.
+    fn append_turn_event<T: Serialize>(
+        &self,
+        run: &mut TurnRun<'_>,
+        actor: EventActor,
+        kind: &str,
+        payload: &T,
+        span_id: Option<String>,
+    ) -> Result<EventRecord, TurnRunError> {
+        let event = self.append_turn_payload(
+            &run.scope,
+            actor,
+            kind,
+            payload,
+            Some(run.cause.clone()),
+            span_id,
+        )?;
+        run.cause = event.event_id.clone();
+        Ok(event)
     }
 
     fn append_turn_payload<T: Serialize>(

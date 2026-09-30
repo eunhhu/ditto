@@ -23,8 +23,8 @@ mod sort_replay;
 use super::sort::{ReplayedSortCall, SortGrant};
 
 use super::shared::{
-    ReadyCall, append_assistant_text, bounded_turn_failure_message, stable_system_prefix,
-    turn_failure_code_for_model,
+    Checkpoint, ReadyCall, append_assistant_text, bounded_turn_failure_message,
+    stable_system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
@@ -464,21 +464,15 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     .take_failure()?
                     .ok_or_else(|| replay_invalid("post-request contract failure is missing"))?;
                 let valid = match failure.code {
-                    TurnFailureCode::Cancelled => {
-                        failure.message
-                            == "turn was cancelled after persisting a model request and before driver invocation"
-                            && failure.evidence.is_none()
-                    }
-                    TurnFailureCode::DeadlineExceeded => {
-                        failure.message
-                            == "turn deadline elapsed after persisting a model request and before driver invocation"
-                            && self.valid_deadline_failure(&failure, failure_event_time)
-                    }
                     TurnFailureCode::DriverContract => {
                         failure.message == bounded_turn_failure_message(&message)
                             && failure.evidence.is_none()
                     }
-                    _ => false,
+                    _ => self.valid_checkpoint_failure(
+                        &failure,
+                        failure_event_time,
+                        &[Checkpoint::AfterModelRequestPersisted],
+                    ),
                 };
                 if !valid
                     || failure.request_index != Some(request_index as u8)
@@ -801,18 +795,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         let failure = self
                             .take_failure()?
                             .expect("next event was checked as turn.failed");
-                        let valid = match failure.code {
-                            TurnFailureCode::Cancelled => {
-                                failure.message == "turn was cancelled before capability request"
-                                    && failure.evidence.is_none()
-                            }
-                            TurnFailureCode::DeadlineExceeded => {
-                                failure.message
-                                    == "turn deadline elapsed before capability execution"
-                                    && self.valid_deadline_failure(&failure, failure_event_time)
-                            }
-                            _ => false,
-                        };
+                        let valid = self.valid_checkpoint_failure(
+                            &failure,
+                            failure_event_time,
+                            &[Checkpoint::BeforeCapabilityRequest],
+                        );
                         if !valid
                             || failure.request_index != Some(request_index as u8)
                             || failure.call_id.as_ref() != Some(&call.call_id)
@@ -884,19 +871,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         let failure = self
                             .take_failure()?
                             .expect("next event was checked as turn.failed");
-                        let valid = match failure.code {
-                            TurnFailureCode::Cancelled => {
-                                failure.message
-                                    == "turn was cancelled after capability request and before execution started"
-                                    && failure.evidence.is_none()
-                            }
-                            TurnFailureCode::DeadlineExceeded => {
-                                failure.message
-                                    == "turn deadline elapsed after capability request and before execution started"
-                                    && self.valid_deadline_failure(&failure, failure_event_time)
-                            }
-                            _ => false,
-                        };
+                        let valid = self.valid_checkpoint_failure(
+                            &failure,
+                            failure_event_time,
+                            &[Checkpoint::AfterCapabilityRequest],
+                        );
                         if !valid
                             || failure.request_index != Some(request_index as u8)
                             || failure.call_id.as_ref() != Some(&call.call_id)
@@ -944,23 +923,14 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         let failure = self
                             .take_failure()?
                             .expect("next event was checked as turn.failed");
-                        let valid_checkpoint_failure = match failure.code {
-                            TurnFailureCode::Cancelled => {
-                                matches!(
-                                    failure.message.as_str(),
-                                    "turn was cancelled after execution started and before its result"
-                                        | "turn was cancelled after the artifact read and before its result"
-                                ) && failure.evidence.is_none()
-                            }
-                            TurnFailureCode::DeadlineExceeded => {
-                                matches!(
-                                    failure.message.as_str(),
-                                    "turn deadline elapsed after execution started and before its result"
-                                        | "turn deadline elapsed after the artifact read and before its result"
-                                ) && self.valid_deadline_failure(&failure, failure_event_time)
-                            }
-                            _ => false,
-                        };
+                        let valid_checkpoint_failure = self.valid_checkpoint_failure(
+                            &failure,
+                            failure_event_time,
+                            &[
+                                Checkpoint::AfterExecutionStarted,
+                                Checkpoint::AfterArtifactRead,
+                            ],
+                        );
                         if !valid_checkpoint_failure
                             || failure.request_index != Some(request_index as u8)
                             || failure.call_id.as_ref() != Some(&call.call_id)
@@ -1054,19 +1024,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         let failure = self
                             .take_failure()?
                             .expect("next event was checked as turn.failed");
-                        let valid = match failure.code {
-                            TurnFailureCode::Cancelled => {
-                                failure.message
-                                    == "turn was cancelled after final model output and before turn completion"
-                                    && failure.evidence.is_none()
-                            }
-                            TurnFailureCode::DeadlineExceeded => {
-                                failure.message
-                                    == "turn deadline elapsed after final model output and before turn completion"
-                                    && self.valid_deadline_failure(&failure, failure_event_time)
-                            }
-                            _ => false,
-                        };
+                        let valid = self.valid_checkpoint_failure(
+                            &failure,
+                            failure_event_time,
+                            &[Checkpoint::AfterFinalOutput],
+                        );
                         if !valid
                             || failure.request_index != Some(request_index as u8)
                             || failure.call_id.is_some()
@@ -1366,21 +1328,17 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             .take_failure()?
             .expect("next event was checked as turn.failed");
         let valid = match failure.code {
-            TurnFailureCode::Cancelled => {
-                failure.message == "turn was cancelled before context compilation"
-                    && failure.evidence.is_none()
-            }
-            TurnFailureCode::DeadlineExceeded => {
-                failure.message == "turn deadline elapsed before context compilation"
-                    && self.valid_deadline_failure(&failure, failure_event_time)
-            }
             TurnFailureCode::ContextCompilation => {
                 (valid_context_compilation_failure_message(&failure.message)
                     || (self.agent_run
                         && failure.message == "verified session context is unavailable"))
                     && failure.evidence.is_none()
             }
-            _ => false,
+            _ => self.valid_checkpoint_failure(
+                &failure,
+                failure_event_time,
+                &[Checkpoint::BeforeContextCompilation],
+            ),
         };
         if !valid || failure.request_index.is_some() || failure.call_id.is_some() {
             return Err(replay_invalid(
@@ -1433,14 +1391,6 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             .take_failure()?
             .expect("next event was checked as turn.failed");
         let valid = match failure.code {
-            TurnFailureCode::Cancelled => {
-                failure.message == "turn was cancelled before a model request"
-                    && failure.evidence.is_none()
-            }
-            TurnFailureCode::DeadlineExceeded => {
-                failure.message == "turn deadline elapsed before a model request"
-                    && self.valid_deadline_failure(&failure, failure_event_time)
-            }
             TurnFailureCode::DriverContract => {
                 valid_driver_contract_failure_message(
                     &failure.message,
@@ -1448,7 +1398,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     self.agent_run,
                 ) && failure.evidence.is_none()
             }
-            _ => false,
+            _ => self.valid_checkpoint_failure(
+                &failure,
+                failure_event_time,
+                &[Checkpoint::BeforeModelRequest],
+            ),
         };
         if !valid || failure.request_index != Some(request_index as u8) || failure.call_id.is_some()
         {
@@ -1475,21 +1429,17 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         let failure = self
             .take_failure()?
             .expect("next event was checked as turn.failed");
+        // Before the first output, cancellation can also win the checkpoint
+        // between the durable request and driver invocation.
+        let checkpoints: &[Checkpoint] = if event_count == 0 {
+            &[
+                Checkpoint::AwaitingModelOutput,
+                Checkpoint::AfterModelRequestPersisted,
+            ]
+        } else {
+            &[Checkpoint::AwaitingModelOutput]
+        };
         let valid = match failure.code {
-            TurnFailureCode::Cancelled => {
-                failure.evidence.is_none()
-                    && (failure.message == "turn was cancelled while awaiting model output"
-                        || (event_count == 0
-                            && failure.message
-                                == "turn was cancelled after persisting a model request and before driver invocation"))
-            }
-            TurnFailureCode::DeadlineExceeded => {
-                (failure.message == "turn deadline elapsed while awaiting model output"
-                    || (event_count == 0
-                        && failure.message
-                            == "turn deadline elapsed after persisting a model request and before driver invocation"))
-                    && self.valid_deadline_failure(&failure, failure_event_time)
-            }
             TurnFailureCode::BoundExceeded => {
                 matches!(
                     failure.message.as_str(),
@@ -1502,7 +1452,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     )
                 ) && failure.evidence.is_none()
             }
-            _ => false,
+            _ => self.valid_checkpoint_failure(&failure, failure_event_time, checkpoints),
         };
         if !valid || failure.request_index != Some(request_index as u8) || failure.call_id.is_some()
         {
@@ -1511,6 +1461,31 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             ));
         }
         Ok(Some(failure))
+    }
+
+    /// Whether `failure` is the exact cancellation or deadline terminal of one
+    /// of `checkpoints`.
+    fn valid_checkpoint_failure(
+        &self,
+        failure: &TurnFailure,
+        failure_event_time: DateTime<Utc>,
+        checkpoints: &[Checkpoint],
+    ) -> bool {
+        match failure.code {
+            TurnFailureCode::Cancelled => {
+                failure.evidence.is_none()
+                    && checkpoints
+                        .iter()
+                        .any(|checkpoint| failure.message == checkpoint.cancelled_message())
+            }
+            TurnFailureCode::DeadlineExceeded => {
+                checkpoints
+                    .iter()
+                    .any(|checkpoint| failure.message == checkpoint.deadline_message())
+                    && self.valid_deadline_failure(failure, failure_event_time)
+            }
+            _ => false,
+        }
     }
 
     fn valid_deadline_failure(
