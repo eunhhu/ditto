@@ -21,10 +21,16 @@ ADR when a contract changes, and evidence:
    local time (turn payload version 4) - complete.
 6. [023](tasks/023-web-fetch.md) `web.fetch` for links the user sent -
    complete.
-7. 024 Model-callable memory tools: search beyond the context budget, and
-   saving the user's own words when asked (model output is never recorded as
-   a user assertion). Web search waits for approval fulfillment, because a
-   model-chosen query is an outbound channel.
+7. 024 Model-callable memory tools, **awaiting a user decision**. ADR 0015
+   limits memory promotion to task-free input through trusted user ingress
+   and explicitly excludes model tool invocation. The proposal amends it: a
+   leased `memory.remember` tool (one call per turn, no arguments) saves the
+   user's current message verbatim, with provenance to that input, when the
+   user asks to be remembered. The context projection already accepts a
+   session memory sourced from the run's task-scoped input; only the kernel's
+   task-free rule blocks it. `memory.search` would follow, offered only when
+   the memory set exceeds the context budget. Web search waits for approval
+   fulfillment, because a model-chosen query is an outbound channel.
 
 The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
 the measurement gate before any claim of parity with other assistants.
