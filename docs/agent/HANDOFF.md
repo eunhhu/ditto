@@ -21,8 +21,9 @@ and checks establish a new fact.
   `dev/task-016-1-personal-recall` holds the preserved
   [Task 017](tasks/017-evaluation-outcomes.md) draft, raw-report and handoff
   trimming, the turn-loop split and Task 016.1; `dev/task-018-conversation-threads`
-  stacks Task 018 on it, `dev/task-019-openai-compatible` stacks Task 019 and
-  `dev/task-020-web-app` stacks Task 020. Nothing is pushed.
+  stacks Task 018 on it, and `dev/task-019-openai-compatible`,
+  `dev/task-020-web-app` and `dev/task-021-telegram` stack Tasks 019–021.
+  Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made.
@@ -49,8 +50,10 @@ and checks establish a new fact.
   schedule and repeat. The daemon also serves the embedded web app (ADR 0024)
   under a same-origin-only content security policy. While bound to loopback,
   every route refuses requests addressed to a non-loopback host name, which
-  blocks DNS rebinding. The daemon and the offline fixture server share one
-  route table. Clients never
+  blocks DNS rebinding. `ditto telegram` (ADR 0025) is a CLI client that
+  relays allowed private Telegram chats and delivers scheduled results; run
+  status names the schedule that started a run. The daemon and the offline
+  fixture server share one route table. Clients never
   choose actors, kinds or internal metadata; the kernel derives all authority,
   including an attached file's sort permission. SSE subscribes first, replays a
   bounded high-water snapshot in pages and recovers gaps or lag from storage.
@@ -108,34 +111,42 @@ and checks establish a new fact.
   capsules from the complete-set rule. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 020
+## Latest verified slice: Task 021
 
-- [Contract and evidence](tasks/020-local-web-app.md). The web app streams
-  chat, restores the thread after reload, shows CLI and scheduled runs live,
-  stops runs, saves and corrects memories, manages schedules and explains each
-  answer from its recorded context receipt. A browser run against the real
-  daemon with a mock model passed 26 of 26 checks, including injection,
-  layout, dark, phone and Korean views. The host guard test failed with the
-  guard disabled and passes with it; the layout check failed on the earlier
-  stylesheet.
-- The canonical gate passed on the final tree (4 min 44 s, pinned Rust
-  1.88.0): 521 Rust tests (516 workspace including doctests, five built-CLI
-  scenarios), 8 baseline and 21 quality Python tests, 12 web renderer cases
-  and both smokes; the staged tree hash was identical before and after.
+- [Contract and evidence](tasks/021-telegram-gateway.md). The built gateway,
+  run against a mock Bot API and the real daemon router and scheduler, did
+  the following:
+  - answered an allowed chat through a stop-button draft and ignored a
+    stranger and a group chat;
+  - handled `/new` (in Korean) and `/remember`, and cancelled from the stop
+    button;
+  - delivered a scheduled result but not another client's run;
+  - after a restart, neither called the model for a redelivered message nor
+    re-sent the scheduled result;
+  - never exposed the token.
+  Disabling the allowlist or the scheduled-only condition made it fail.
+- The canonical gate passed on the final tree (3 min 58 s, pinned Rust
+  1.88.0): 530 Rust tests (524 workspace including doctests, six built-CLI
+  scenarios including the Telegram gateway), 8 baseline and 21 quality Python
+  tests, 12 web renderer cases and both smokes; the staged tree hash was
+  identical before and after.
+- Not run: a real Telegram bot (needs the user's token).
 
-## Previous slice: Task 019
+## Previous slice: Task 020
 
-- [Contract and evidence](tasks/019-openai-compatible-provider.md):
-  OpenAI-compatible chat provider for local and hosted models (ADR 0023). Its
-  gate passed on its final tree (517 Rust tests). No live provider or real
-  local model was run.
+- [Contract and evidence](tasks/020-local-web-app.md): local web app,
+  conversation view and loopback host guard (ADR 0024). Its gate passed on its
+  final tree (521 Rust tests), and a browser run passed 26 of 26 checks.
 
 ## Known gaps
 
 - After a reload the web app restores only finished exchanges of the current
   thread: failed or cancelled turns are not restored, and a run still in
-  flight at load appears when it finishes. Phone access still needs an
-  authenticated gateway.
+  flight at load appears when it finishes. Phone access to the web app still
+  needs an authenticated gateway; Telegram is the phone path for now.
+- The Telegram gateway keeps pending replies in memory: a gateway restart
+  during an answer loses that reply unless Telegram redelivers the update.
+  Only text messages are handled.
 
 - Answer quality and tool-use reliability with local or hosted
   OpenAI-compatible models are unmeasured; tools need a model with function
@@ -151,8 +162,8 @@ and checks establish a new fact.
 
 ## Intentionally deferred
 
-- Calendar recurrence, notification delivery, scheduled effect grants and
-  additional effectful tool profiles.
+- Calendar recurrence, scheduled effect grants and additional effectful tool
+  profiles.
 - Native non-OpenAI wire formats, reasoning replay, remote cancel and explicit
   prompt-cache breakpoints.
 - Additional capability derivers, durable/cross-process authorization, approval

@@ -9,6 +9,7 @@ mod repeats;
 mod runs;
 mod schedules;
 mod sorts;
+mod telegram;
 
 #[derive(Debug, Parser)]
 #[command(name = "ditto", version, about = "Operate the local Ditto daemon")]
@@ -59,6 +60,9 @@ enum Command {
     SortCancel(runs::RunIdentity),
     /// Talk interactively; the session's current thread is remembered.
     Chat(chat::ChatArgs),
+    /// Relay allowed Telegram private chats and scheduled results
+    /// (bot token from DITTO_TELEGRAM_BOT_TOKEN).
+    Telegram(telegram::TelegramArgs),
     /// Start a new conversation thread (memories are kept).
     New {
         #[arg(long, default_value = "personal")]
@@ -151,6 +155,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::SortStatus(identity) => sorts::inspect(&client, view, identity).await?,
         Command::SortCancel(identity) => sorts::cancel(&client, view, identity).await?,
         Command::Chat(args) => chat::chat(&client, api, args).await?,
+        Command::Telegram(args) => telegram::run(&client, api, args).await?,
         Command::New { session } => {
             let reset = chat::reset(&client, api, &session).await?;
             if view.human {

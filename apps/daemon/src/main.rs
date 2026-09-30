@@ -33,6 +33,8 @@ mod memory;
 mod runs;
 mod schedules;
 mod sorts;
+#[cfg(test)]
+mod telegram_tests;
 mod web;
 
 #[derive(Debug, Parser)]

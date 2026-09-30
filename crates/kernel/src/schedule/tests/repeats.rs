@@ -152,6 +152,11 @@ async fn anchored_occurrences_have_distinct_runs_and_recover_original_evidence()
     );
     for result in &results {
         assert_eq!(result.status, ScheduleStatus::Unverified);
+        // Each occurrence run names its own occurrence schedule.
+        assert_eq!(
+            result.run.as_ref().unwrap().schedule_request_id.as_deref(),
+            Some(result.request_id.as_str())
+        );
         let events = kernel
             .list_events(&ditto_protocol::EventQuery {
                 session_id: Some(command.session_id.clone()),

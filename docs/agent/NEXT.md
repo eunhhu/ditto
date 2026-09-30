@@ -15,7 +15,8 @@ ADR when a contract changes, and evidence:
    provider - complete.
 3. [020](tasks/020-local-web-app.md) Local web app: chat, memories, schedules
    and a per-answer inspector - complete.
-4. 021 Telegram gateway and delivery of scheduled results.
+4. [021](tasks/021-telegram-gateway.md) Telegram gateway and delivery of
+   scheduled results - complete.
 5. 022 Builtin tool interface with model-callable memory tools.
 6. 023 Web fetch and search tools behind network leases.
 
@@ -27,6 +28,8 @@ General approval fulfillment remains deferred.
 
 One line per slice; each task file and its evidence hold the details.
 
+- [021](tasks/021-telegram-gateway.md) Telegram gateway with streamed drafts,
+  stop and scheduled result delivery (ADR 0025).
 - [020](tasks/020-local-web-app.md) Local web app, conversation view and
   loopback host guard (ADR 0024).
 - [019](tasks/019-openai-compatible-provider.md) OpenAI-compatible chat

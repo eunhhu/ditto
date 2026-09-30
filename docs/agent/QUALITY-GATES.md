@@ -9,7 +9,8 @@ Run the canonical gate from the repository root:
 The script checks tracked-artifact, raw-report, tracked-file-size (1 MiB),
 developer-path, and credential-shaped canaries before formatting, strict
 Clippy, workspace tests, and required agent control files. It also runs the
-five existing actual-CLI fixture scenarios, baseline accounting regressions and
+six actual-CLI fixture scenarios (including the Telegram gateway against a mock
+Bot API), baseline accounting regressions and
 a small offline baseline scenario (two repeated requests per server), plus
 context-assessment/process regressions and a five-case offline corpus smoke
 (zero versus twelve unrelated memories, two repetitions per query: ten runs per
@@ -35,6 +36,7 @@ CI additionally verifies the declared MSRV.
 | Model driver | every emitted event variant, malformed stream, usage, tool calls, continuation, provider cancellation |
 | Completion | verifier-specific positive and negative evidence; stream closure is insufficient |
 | Web app | renderer injection cases in the gate; host-guard and asset-policy tests; `node scripts/web-e2e.js` browser run against the real daemon with a mock model, including reload, live CLI runs, cancellation, memory correction, dark, phone and Korean views |
+| Messaging gateway | allowlist and chat-type rejection before any daemon call, token absent from output and events, stop, redelivered updates without a second model call, scheduled-only delivery that survives a restart |
 | Human task views | default JSON compatibility, independent model/sort/parent/child outcomes, unverified answers, requested/terminal cancellation, exhausted/missed repeats, recoverable identity and terminal-control escaping |
 | Personal-agent baseline | separate production-disabled and injected-fixture results; raw samples/settings/source identity; idle/repeated RSS and latency; model/tool accounting; known versus unavailable cost; exact retry and restart evidence |
 | Personal-task context corpus | actual CLI saves/correction/restart/list/five-query rounds; frozen expectations independent of observations; exact nodes/order/metadata/provenance; durable input/query/task/turn/event/call/observation reconciliation; raw metrics with null empty denominators; leak adversaries and signal/failure cleanup; source/artifact/corpus hashes; no fixture-answer quality inference |

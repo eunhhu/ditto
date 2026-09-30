@@ -964,6 +964,7 @@ async fn conversation_view_lists_the_current_thread_unabridged_oldest_first() {
     assert!(view("personal", None).exchanges.is_empty());
 
     let (first, _) = ask(kernel, "personal", "first", final_script(&["one"])).await;
+    assert!(first.schedule_request_id.is_none());
     let failing = vec![ModelEvent::Failed {
         failure: ditto_model::ModelFailure::new(FailureKind::Provider, "fixture outage"),
     }];

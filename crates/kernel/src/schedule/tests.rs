@@ -121,6 +121,27 @@ async fn restart_before_dispatch_uses_current_context_once_and_replays_after_ter
         .unwrap();
     let result = terminal(&kernel, &command).await;
     assert_eq!(result.status, ScheduleStatus::Unverified);
+    // The run names the schedule that started it, also when inspected directly.
+    let run = result.run.as_ref().unwrap();
+    assert_eq!(
+        run.schedule_request_id.as_deref(),
+        Some(command.request_id.as_str())
+    );
+    let direct = kernel
+        .inspect_agent_run(AgentRunQuery {
+            request_id: run.request_id.clone(),
+            session_id: "personal".into(),
+        })
+        .unwrap();
+    assert_eq!(direct.schedule_request_id, run.schedule_request_id);
+    assert!(
+        kernel
+            .inspect_agent_run(AgentRunQuery {
+                request_id: run.request_id.clone(),
+                session_id: "elsewhere".into(),
+            })
+            .is_err()
+    );
     assert!(
         serde_json::to_string(&driver.requests.lock().unwrap()[0])
             .unwrap()

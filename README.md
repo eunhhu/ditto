@@ -54,6 +54,9 @@ The executable foundation includes:
 - a local web app served by the daemon: streamed chat, thread history,
   memories, schedules and a per-answer view of which memories were sent and
   why, behind a strict content security policy and a loopback host guard;
+- a Telegram gateway (`ditto telegram`) for allowed private chats: streamed
+  answers with a stop button, memory commands, and delivery of scheduled
+  results, with the bot token kept out of the daemon;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - model-directed sorting of one explicitly attached file, with separate permission
@@ -138,6 +141,22 @@ memories left out, earlier exchanges included and tools used. The page uses
 the same HTTP API as the CLI. While bound to loopback, the daemon answers only
 requests addressed to `localhost` or a loopback IP, which stops DNS-rebinding
 pages.
+
+To use Ditto from Telegram, create a bot with @BotFather and find your
+numeric user ID (for example with @userinfobot). Then run the gateway next to
+the daemon:
+
+```bash
+DITTO_TELEGRAM_BOT_TOKEN=... cargo run -p ditto-cli -- telegram --allow-user 123456789
+```
+
+It long-polls Telegram, so no port or webhook is exposed. Only private chats
+from allowed users are answered; others are ignored. Answers stream into a
+draft with a stop button. `/new`, `/remember <fact>`, `/memories` and `/stop`
+work as in the CLI, and chats share the `personal` session with the CLI and
+web app. Results of scheduled requests are sent to the allowed users, also
+after a gateway restart (`--state-file`, default `.ditto-telegram.json`). The
+token stays in the gateway process.
 
 ```bash
 cargo run -p ditto-cli -- run "What is my meeting preference?"
@@ -356,6 +375,8 @@ python3 scripts/smoke-local-sort.py
 # Actual CLI + daemon router + deterministic model fixture, without API calls:
 cargo test -p ditto-daemon built_cli_run_wait_retry_status_and_cancel -- --ignored
 cargo test -p ditto-daemon built_cli_model_sort_permission_retry_and_disabled_status -- --ignored
+# Telegram gateway against a mock Bot API and the daemon router:
+cargo test -p ditto-daemon built_cli_telegram_gateway -- --ignored
 # Web app in headless Chromium against the real daemon and a mock model
 # (needs puppeteer-core on NODE_PATH; CHROME_PATH defaults to /usr/bin/chromium):
 node scripts/web-e2e.js
