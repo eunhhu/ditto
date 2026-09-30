@@ -407,8 +407,9 @@ reject version-2 metadata. See [ADR 0018](../adr/0018-user-scoped-model-sort.md)
 
 ## Kernel artifact-read turns
 
-The kernel owns version 1 of the durable read-only turn state machine. Clients
-cannot select its actors, kinds, correlations, or spans. The fixed mapping is:
+The kernel owns the durable read-only turn state machine; new turns are written
+as version 2 and version-1 turns remain readable. Clients cannot select its
+actors, kinds, correlations, or spans. The fixed mapping is:
 
 ```text
 input.received          user
@@ -423,7 +424,15 @@ turn.finished           system
 turn.failed             system
 ```
 
-All versioned payloads carry `event_version = 1` and a kernel-assigned `turn_id`.
+All versioned payloads carry `event_version` and a kernel-assigned `turn_id`;
+every payload of one turn has the same version. Version 2
+([ADR 0021](../adr/0021-complete-personal-context-and-typed-turn-failures.md))
+compiles context with the complete-set contract and adds an optional
+`failure.reason` to `turn.failed`: a closed snake_case value such as
+`artifact_read_package_unverified` or `tool_call_lifecycle` that is required for
+validator-derived failures and absent otherwise. Replay validates that reason,
+not the failure message wording. Version-1 turns carry no reason and keep the
+positive-overlap context rule.
 Model request/output events use the request ID as their span; capability and
 execution events use the call ID. Every transition is durably appended before it
 is published or returned. Each `model.output` also records the

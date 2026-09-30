@@ -14,14 +14,16 @@ semantic retrieval, tool-task success and v0.1 readiness are not verified.
 General approval fulfillment remains deferred.
 
 On 2026-09-30 the user prioritized a prerequisite before Task 017's measured
-runs: production run context misses paraphrased questions and admits unrelated
-memories (see the handoff's known gaps). That fix is Task 016.1; its contract
-lands with its implementation.
+runs; [Task 016.1](tasks/016-1-personal-recall.md) now sends the complete
+current memory set when it fits the budget and records typed turn failures.
+Task 017 remains the next task.
 
 ## Completed
 
 One line per slice; each task file and its evidence hold the details.
 
+- [016.1](tasks/016-1-personal-recall.md) Personal-scale recall (complete-set
+  context) and typed turn failures, turn payload version 2 (ADR 0021).
 - [016](tasks/016-personal-task-corpus.md) Offline personal-task context corpus:
   five literal synthetic queries after restart ([evidence](tasks/016-evidence.md)).
 - [015](tasks/015-quality-history-workloads.md) Offline context-quality and

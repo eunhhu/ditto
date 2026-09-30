@@ -70,7 +70,10 @@ context node and capability.
 Tasks 006–008 additionally provide bounded source-index verification, selected-
 only full capability loading, and explicit session memory save/list/correction.
 Automatic memory extraction, cross-session personal scope, and long-use semantic
-recall are not established by those slices.
+recall are not established by those slices. Task 016.1 sends the complete
+current session memory when it fits the context budget, so paraphrased
+questions work in small sessions; larger sessions still fall back to lexical
+overlap.
 
 ## C. Provider-neutral model IR — completed
 

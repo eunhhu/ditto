@@ -12,13 +12,14 @@ use ditto_capability::{
     UntrustedToolCall, UntrustedToolCallError,
 };
 use ditto_context::{
-    CompiledContext, ContextCandidate, ContextCapsule, ContextCompiler, TaskSignature,
+    CompiledContext, ContextCandidate, ContextCapsule, ContextCompileError, ContextCompiler,
+    ContextSelection, TaskSignature,
 };
 use ditto_model::{
     CancellationId, CancellationToken, ContentPart, ConversationItem, ExecutionEpochId,
-    FeatureRequest, FinishReason, GenerationControls, ModelDriver, ModelEvent, ModelFeature,
-    ModelRequest, ModelRequestId, ModelTurn, OutputConstraint, ParallelToolCalls, ProviderCallId,
-    RequestControl, ToolCallBuffer, ToolChoice, ToolUsePolicy,
+    FeatureRequest, FinishReason, GenerationControls, ModelContractError, ModelDriver, ModelEvent,
+    ModelFeature, ModelRequest, ModelRequestId, ModelTurn, OutputConstraint, ParallelToolCalls,
+    ProviderCallId, RequestControl, ToolCallBuffer, ToolChoice, ToolUsePolicy,
 };
 use ditto_policy::{AuthorizationOutcome, InvocationAuthorizer, PolicyError, StaticPolicy};
 use ditto_protocol::{
@@ -45,7 +46,7 @@ use super::types::{
     MAX_MODEL_OUTPUT_BYTES_PER_REQUEST, MAX_MODEL_OUTPUT_EVENT_BYTES, MAX_MODEL_REQUESTS,
     MAX_TURN_DURATION, ModelOutputPayload, ModelRequestedPayload, ReadOnlyTurnControl,
     TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFailureEvidence,
-    TurnFinishedPayload, TurnRunError,
+    TurnFailureReason, TurnFinishedPayload, TurnRunError,
 };
 
 #[derive(Clone)]
@@ -74,7 +75,7 @@ impl AdmittedReadOnlyTurn {
 
 enum ContextProvenanceError {
     Kernel(KernelError),
-    Invalid(String),
+    Invalid(TurnFailureReason, String),
 }
 
 /// One admitted turn after its absolute deadline is fixed. `cause` is the
@@ -238,9 +239,9 @@ impl DittoKernel {
             ) {
                 Ok(candidates) => candidates,
                 Err(_) => {
-                    return Err(self.fail(
+                    return Err(self.fail_with(
                         run,
-                        TurnFailureCode::ContextCompilation,
+                        TurnFailureReason::SessionContextUnavailable,
                         "verified session context is unavailable",
                         None,
                         None,
@@ -248,23 +249,23 @@ impl DittoKernel {
                 }
             },
         };
-        let signature = TaskSignature {
-            request: text.to_owned(),
-            active_goal: None,
-            entities: Vec::new(),
-            constraints: Vec::new(),
-            expected_effect: Some("local content read".into()),
-        };
         let compiled = ContextCompiler::default()
-            .compile(&signature, context_candidates, None, run.accepted_at)
-            .map_err(|error| {
-                self.fail(
+            .compile_with(
+                ContextSelection::CompleteSet,
+                &turn_signature(text),
+                context_candidates,
+                None,
+                run.accepted_at,
+            )
+            .map_err(|error| match context_compile_reason(&error) {
+                Some(reason) => self.fail_with(run, reason, error.to_string(), None, None),
+                None => self.fail(
                     run,
                     TurnFailureCode::ContextCompilation,
                     error.to_string(),
                     None,
                     None,
-                )
+                ),
             })?;
         let capsule = ContextCapsule::from(&compiled);
         let provenance_through_seq = self.latest_event_seq()?;
@@ -275,14 +276,8 @@ impl DittoKernel {
         ) {
             Ok(()) => {}
             Err(ContextProvenanceError::Kernel(error)) => return Err(TurnRunError::Kernel(error)),
-            Err(ContextProvenanceError::Invalid(message)) => {
-                return Err(self.fail(
-                    run,
-                    TurnFailureCode::ContextCompilation,
-                    message,
-                    None,
-                    None,
-                ));
+            Err(ContextProvenanceError::Invalid(reason, message)) => {
+                return Err(self.fail_with(run, reason, message, None, None));
             }
         }
         self.append_turn_event(
@@ -311,18 +306,18 @@ impl DittoKernel {
         let manifest = match self.inner.capabilities.page_manifest(ARTIFACT_READ_ID) {
             Ok(Some(manifest)) => manifest,
             Ok(None) => {
-                return Err(self.fail(
+                return Err(self.fail_with(
                     run,
-                    TurnFailureCode::CapabilityUnavailable,
+                    TurnFailureReason::ArtifactReadUnavailable,
                     "installed artifact.read capability is unavailable",
                     None,
                     None,
                 ));
             }
             Err(_) => {
-                return Err(self.fail(
+                return Err(self.fail_with(
                     run,
-                    TurnFailureCode::CapabilityContract,
+                    TurnFailureReason::ArtifactReadPackageUnverified,
                     "installed artifact.read package could not be verified",
                     None,
                     None,
@@ -330,9 +325,9 @@ impl DittoKernel {
             }
         };
         if let Err(error) = validate_artifact_read_manifest(&manifest) {
-            return Err(self.fail(
+            return Err(self.fail_with(
                 run,
-                TurnFailureCode::CapabilityContract,
+                TurnFailureReason::ArtifactReadManifestMismatch,
                 error.to_string(),
                 None,
                 None,
@@ -341,18 +336,18 @@ impl DittoKernel {
 
         let schema = capability_schema();
         if schema.id != manifest.id || schema.version != manifest.version {
-            return Err(self.fail(
+            return Err(self.fail_with(
                 run,
-                TurnFailureCode::CapabilityContract,
+                TurnFailureReason::ArtifactReadSchemaMismatch,
                 "artifact.read level-2 schema does not match the installed manifest",
                 None,
                 None,
             ));
         }
         if let Err(error) = schema.validate() {
-            return Err(self.fail(
+            return Err(self.fail_with(
                 run,
-                TurnFailureCode::CapabilityContract,
+                TurnFailureReason::ArtifactReadSchemaMismatch,
                 error.to_string(),
                 None,
                 None,
@@ -364,9 +359,9 @@ impl DittoKernel {
         let paged = live_epoch
             .page_in_invocable(&manifest, &schema, deriver.revision().clone())
             .map_err(|error| {
-                self.fail(
+                self.fail_with(
                     run,
-                    TurnFailureCode::CapabilityContract,
+                    TurnFailureReason::ArtifactReadSelectionFailed,
                     error.to_string(),
                     None,
                     None,
@@ -376,9 +371,9 @@ impl DittoKernel {
             || live_epoch.evidence().capabilities().len() != 1
             || live_epoch.evidence().capabilities()[0].id != ARTIFACT_READ_ID
         {
-            return Err(self.fail(
+            return Err(self.fail_with(
                 run,
-                TurnFailureCode::CapabilityContract,
+                TurnFailureReason::ArtifactReadSelectionFailed,
                 "artifact.read could not be selected as the sole execution capability",
                 None,
                 None,
@@ -394,9 +389,9 @@ impl DittoKernel {
                 .as_ref()
                 .is_some_and(|root| grant.matches_root(root, input_event))
             {
-                return Err(self.fail(
+                return Err(self.fail_with(
                     run,
-                    TurnFailureCode::CapabilityContract,
+                    TurnFailureReason::SortPermissionSourceUnavailable,
                     "sort permission source is unavailable",
                     None,
                     None,
@@ -411,9 +406,9 @@ impl DittoKernel {
             let Some(selected) = selected
                 .filter(|manifest| ditto_artifact_sort::validate_manifest(manifest).is_ok())
             else {
-                return Err(self.fail(
+                return Err(self.fail_with(
                     run,
-                    TurnFailureCode::CapabilityContract,
+                    TurnFailureReason::SortContractUnavailable,
                     "installed artifact.sort contract is unavailable",
                     None,
                     None,
@@ -434,9 +429,9 @@ impl DittoKernel {
             None
         };
         let authorization_ticket = live_epoch.seal_for_authorization().map_err(|error| {
-            self.fail(
+            self.fail_with(
                 run,
-                TurnFailureCode::CapabilityContract,
+                TurnFailureReason::ArtifactReadSelectionFailed,
                 error.to_string(),
                 None,
                 None,
@@ -449,9 +444,9 @@ impl DittoKernel {
                     "artifact.read live epoch issued no invocation binding",
                 ))?;
         let execution_epoch_id = ExecutionEpochId::new(live_epoch.id()).map_err(|error| {
-            self.fail(
+            self.fail_with(
                 run,
-                TurnFailureCode::CapabilityContract,
+                TurnFailureReason::ArtifactReadSelectionFailed,
                 error.to_string(),
                 None,
                 None,
@@ -528,9 +523,9 @@ impl DittoKernel {
             tokio::task::yield_now().await;
             self.ensure_live(run, Checkpoint::AfterModelRequestPersisted, index, None)?;
             if let Err(error) = request.validate_at(requested_at) {
-                return Err(self.fail(
+                return Err(self.fail_with(
                     run,
-                    TurnFailureCode::DriverContract,
+                    TurnFailureReason::RequestInvalidAtDispatch,
                     error.to_string(),
                     index,
                     None,
@@ -591,13 +586,16 @@ impl DittoKernel {
             ));
         }
         if let Err(error) = request.validate_against(run.driver.descriptor()) {
-            return Err(self.fail(
-                run,
-                TurnFailureCode::DriverContract,
-                error.to_string(),
-                index,
-                None,
-            ));
+            return Err(match driver_contract_reason(&error) {
+                Some(reason) => self.fail_with(run, reason, error.to_string(), index, None),
+                None => self.fail(
+                    run,
+                    TurnFailureCode::DriverContract,
+                    error.to_string(),
+                    index,
+                    None,
+                ),
+            });
         }
         self.ensure_before_deadline(run, Checkpoint::BeforeModelRequest, index, None)?;
 
@@ -747,9 +745,9 @@ impl DittoKernel {
                         ));
                     }
                     if let Err(error) = tool_buffer.start(call_id.clone(), capability_id.clone()) {
-                        return Err(self.fail(
+                        return Err(self.fail_with(
                             run,
-                            TurnFailureCode::Protocol,
+                            TurnFailureReason::ToolCallLifecycle,
                             error.to_string(),
                             index,
                             Some(error.call_id().clone()),
@@ -758,9 +756,9 @@ impl DittoKernel {
                 }
                 ModelEvent::ToolCallArgumentDelta { call_id, delta } => {
                     if let Err(error) = tool_buffer.push_arguments(call_id, delta) {
-                        return Err(self.fail(
+                        return Err(self.fail_with(
                             run,
-                            TurnFailureCode::Protocol,
+                            TurnFailureReason::ToolCallLifecycle,
                             error.to_string(),
                             index,
                             Some(error.call_id().clone()),
@@ -783,9 +781,9 @@ impl DittoKernel {
                         ));
                     }
                     let rebuilt = tool_buffer.finish(call_id).map_err(|error| {
-                        self.fail(
+                        self.fail_with(
                             run,
-                            TurnFailureCode::Protocol,
+                            TurnFailureReason::ToolCallLifecycle,
                             error.to_string(),
                             index,
                             Some(error.call_id().clone()),
@@ -1335,6 +1333,26 @@ impl DittoKernel {
         )
     }
 
+    /// Journal a validator-derived failure with its typed reason.
+    fn fail_with(
+        &self,
+        run: &TurnRun<'_>,
+        reason: TurnFailureReason,
+        message: impl Into<String>,
+        request_index: Option<u8>,
+        call_id: Option<ProviderCallId>,
+    ) -> TurnRunError {
+        self.persist_failure(
+            &run.scope,
+            &run.cause,
+            reason.code(),
+            Some(reason),
+            message.into(),
+            request_index,
+            call_id,
+        )
+    }
+
     /// Append one turn transition caused by the previous one.
     fn append_turn_event<T: Serialize>(
         &self,
@@ -1386,6 +1404,28 @@ impl DittoKernel {
         request_index: Option<u8>,
         call_id: Option<ProviderCallId>,
     ) -> TurnRunError {
+        self.persist_failure(
+            scope,
+            cause,
+            code,
+            None,
+            message.into(),
+            request_index,
+            call_id,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_failure(
+        &self,
+        scope: &TurnScope,
+        cause: &str,
+        code: TurnFailureCode,
+        reason: Option<TurnFailureReason>,
+        message: String,
+        request_index: Option<u8>,
+        call_id: Option<ProviderCallId>,
+    ) -> TurnRunError {
         let evidence =
             (code == TurnFailureCode::DeadlineExceeded).then(|| TurnFailureEvidence::Deadline {
                 deadline: scope
@@ -1393,29 +1433,6 @@ impl DittoKernel {
                     .get()
                     .expect("deadline is fixed before any durable turn failure"),
             });
-        self.persist_turn_failure_with_evidence(
-            scope,
-            cause,
-            code,
-            message,
-            request_index,
-            call_id,
-            evidence,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn persist_turn_failure_with_evidence(
-        &self,
-        scope: &TurnScope,
-        cause: &str,
-        code: TurnFailureCode,
-        message: impl Into<String>,
-        request_index: Option<u8>,
-        call_id: Option<ProviderCallId>,
-        evidence: Option<TurnFailureEvidence>,
-    ) -> TurnRunError {
-        let message = message.into();
         let failure = TurnFailure {
             turn_id: scope.turn_id.clone(),
             session_id: scope.session_id.clone(),
@@ -1425,6 +1442,7 @@ impl DittoKernel {
             request_index,
             call_id,
             evidence,
+            reason,
         };
         match self.append_turn_payload(
             scope,
@@ -1501,10 +1519,13 @@ impl DittoKernel {
         let mut required = BTreeSet::new();
         for node in &compiled.nodes {
             if node.source_event_ids.is_empty() {
-                return Err(ContextProvenanceError::Invalid(format!(
-                    "included context node {} has no source event provenance",
-                    node.id
-                )));
+                return Err(ContextProvenanceError::Invalid(
+                    TurnFailureReason::MissingContextProvenance,
+                    format!(
+                        "included context node {} has no source event provenance",
+                        node.id
+                    ),
+                ));
             }
             required.extend(node.source_event_ids.iter().cloned());
         }
@@ -1535,10 +1556,63 @@ impl DittoKernel {
             return Ok(());
         }
         let missing = required.difference(&found).cloned().collect::<Vec<_>>();
-        Err(ContextProvenanceError::Invalid(format!(
-            "included context provenance does not resolve in the current scope: {}",
-            missing.join(", ")
-        )))
+        Err(ContextProvenanceError::Invalid(
+            TurnFailureReason::UnresolvedContextProvenance,
+            format!(
+                "included context provenance does not resolve in the current scope: {}",
+                missing.join(", ")
+            ),
+        ))
+    }
+}
+
+/// The version-2 retrieval signature of a turn: the request alone. Version 1
+/// also appended the fixed text `local content read`, which matched unrelated
+/// memories; replay rebuilds that legacy form for version-1 turns.
+pub(super) fn turn_signature(text: &str) -> TaskSignature {
+    TaskSignature {
+        request: text.to_owned(),
+        ..TaskSignature::default()
+    }
+}
+
+fn context_compile_reason(error: &ContextCompileError) -> Option<TurnFailureReason> {
+    match error {
+        ContextCompileError::DuplicateCandidate { .. } => {
+            Some(TurnFailureReason::DuplicateContextCandidate)
+        }
+        ContextCompileError::InvalidPolicyReason { .. } => {
+            Some(TurnFailureReason::EmptyPolicyReason)
+        }
+        ContextCompileError::InvalidRequiredContext { .. } => {
+            Some(TurnFailureReason::InvalidRequiredContext)
+        }
+        ContextCompileError::RequiredContextBudgetExceeded { .. } => {
+            Some(TurnFailureReason::RequiredContextOverBudget)
+        }
+        // The five-field compiler builds no shared retrieval query.
+        ContextCompileError::Retrieval(_) => None,
+    }
+}
+
+/// Map the driver-contract errors a turn request can meet. Any other variant
+/// stays untyped and therefore unreplayable, exactly as in version 1.
+fn driver_contract_reason(error: &ModelContractError) -> Option<TurnFailureReason> {
+    match error {
+        ModelContractError::UnsupportedRequiredFeatures { .. } => {
+            Some(TurnFailureReason::DriverFeaturesUnsupported)
+        }
+        ModelContractError::UnsupportedGenerationControl { control, .. }
+            if *control == "tool_use.choice" =>
+        {
+            Some(TurnFailureReason::DriverToolChoiceUnsupported)
+        }
+        ModelContractError::UnsupportedGenerationControl { control, .. }
+            if *control == "tool_use.parallel_calls" =>
+        {
+            Some(TurnFailureReason::DriverParallelCallsUnsupported)
+        }
+        _ => None,
     }
 }
 

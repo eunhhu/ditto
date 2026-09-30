@@ -80,8 +80,11 @@ results test the model's choice and the kernel's actual effect boundary.
 The case set deliberately covers an everyday memory question, correction,
 composition, scoped privacy, honest uncertainty, a real local tool, permission
 denial, and scheduled work. It does not imply notification delivery, calendar
-cron, cross-session recall or general process execution. The production V1
-compiler is lexical; passing Task 016 cannot be substituted for P1–P3 or X1.
+cron, cross-session recall or general process execution. Since
+[Task 016.1](016-1-personal-recall.md), runs send the complete current memory
+set when it fits the context budget and fall back to lexical overlap otherwise;
+neither is semantic retrieval, and the `long_use` profile exceeds the budget.
+Passing Task 016 or 016.1 cannot be substituted for P1–P3 or X1.
 
 ## Scoring and adjudication
 

@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted for Task 009.
+Accepted for Task 009. Context selection amended by
+[ADR 0021](0021-complete-personal-context-and-typed-turn-failures.md): runs now
+use the complete-set contract instead of V1 positive overlap.
 
 ## Context
 

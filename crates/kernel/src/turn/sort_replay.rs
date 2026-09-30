@@ -30,6 +30,7 @@ impl ReplayProjector<'_, '_> {
             let time = self.events[self.index].recorded_at;
             let failure = self.take_failure()?.expect("checked failure");
             if failure.message != "sort stopped before authorization"
+                || failure.reason.is_some()
                 || failure.request_index != Some(request_index)
                 || failure.call_id.as_ref() != Some(&call.call_id)
                 || !match failure.code {

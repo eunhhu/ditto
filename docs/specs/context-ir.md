@@ -115,6 +115,26 @@ satisfies both soft and absolute budgets. Candidate selection itself remains a
 trusted live compiler operation; replay does not claim to reconstruct candidates
 that were never persisted.
 
+## Selection contracts
+
+The five-field compiler has two versioned selection contracts, recorded through
+the turn payload version that persisted the result:
+
+- `PositiveOverlap` (turn payload version 1): a ranked node needs at least one
+  query token of two or more characters in its summary; zero-overlap nodes are
+  excluded as irrelevant.
+- `CompleteSet` (version 2, [ADR 0021](../adr/0021-complete-personal-context-and-typed-turn-failures.md)):
+  97 frozen English function words never count as overlap. When required
+  context plus every eligible ranked node fits the selection budget, all of them
+  are included: overlap first by score, then zero-overlap nodes by ID with the
+  receipt reason `complete-set`. Otherwise selection falls back to positive
+  overlap within the budget.
+
+Run turns build the query from the request text alone. Version-1 runs also
+appended the fixed text `local content read`; replay reconstructs that legacy
+query only for version-1 turns. Neither contract is semantic: at session sizes
+beyond the budget, a paraphrase without shared content words is not selected.
+
 The receipt explains source events, epistemic status, inclusion directive,
 score, derived token cost, and exclusion reason. Pinning and policy-required
 inclusion remain trusted ephemeral directives. Durable version-1 node admission

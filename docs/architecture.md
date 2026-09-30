@@ -120,6 +120,13 @@ supersedes one active memory under the shared admission gate. The CLI and HTTP
 listing use verified snapshots and exact source checks. This adds no memory
 database, model extraction, embedding work, or background lifetime; see ADR 0015.
 
+Runs compile that snapshot with the complete-set contract of ADR 0021: when the
+current memory set fits the context budget, the model receives all of it with
+lexical matches first; otherwise selection falls back to positive lexical
+overlap that ignores function words. Turn payload version 2 records this
+contract and typed failure reasons; version-1 turns replay under their original
+rules.
+
 ## Capability pager
 
 The complete capability universe is virtual address space; model context is RAM.

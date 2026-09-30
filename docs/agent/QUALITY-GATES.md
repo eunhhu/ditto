@@ -7,12 +7,14 @@ Run the canonical gate from the repository root:
 ```
 
 The script checks tracked-artifact, raw-report, tracked-file-size (1 MiB),
-developer-path, and credential-shaped canaries before formatting, strict Clippy, workspace tests, and required agent
-control files. It also runs the five existing actual-CLI fixture scenarios,
-baseline accounting regressions and a small offline baseline scenario (two
-repeated requests per server), plus context-assessment/process regressions and
-a five-case offline corpus smoke (zero versus four unrelated memories, two
-repetitions per query: ten runs per profile, twenty total).
+developer-path, and credential-shaped canaries before formatting, strict
+Clippy, workspace tests, and required agent control files. It also runs the
+five existing actual-CLI fixture scenarios, baseline accounting regressions and
+a small offline baseline scenario (two repeated requests per server), plus
+context-assessment/process regressions and a five-case offline corpus smoke
+(zero versus twelve unrelated memories, two repetitions per query: ten runs per
+profile, twenty total). The two profiles exercise complete-set inclusion and
+the lexical fallback respectively.
 Python 3 uses only its standard library; the measurement scripts build with
 cached dependencies via `--offline --locked`.
 Loopback binding and the existing `/usr/bin/sort` profile must be available.
@@ -24,7 +26,7 @@ CI additionally verifies the declared MSRV.
 | --- | --- |
 | Event storage or streaming | snapshot pagination, concurrent boundary or gap recovery, reconnect cursor behavior |
 | Public ingress | negative test proving clients cannot choose trusted actor/kind |
-| Context selection | relevant inclusion, irrelevant exclusion, provenance rejection, required-context failure |
+| Context selection | relevant inclusion, complete inclusion when the eligible set fits and irrelevant exclusion when it does not, paraphrased requests, provenance rejection, required-context failure, replay under each recorded turn version |
 | Capability retrieval | hard-filter failure, complement resolution, stable bounded epoch, large synthetic catalogue |
 | Policy | missing-scope rejection, orthogonal effect rejection, lease expiry/call budget |
 | Artifact store | deduplication, size limit, tamper detection, symlink/no-follow behavior, range read |
@@ -55,7 +57,7 @@ evidence of long-use quality or a comparison with another agent.
 ```bash
 python3 scripts/test-personal-quality.py
 python3 scripts/test-personal-baseline.py
-python3 scripts/personal-quality.py --history-size 4 --samples 2 --output target/task016/smoke.json
+python3 scripts/personal-quality.py --history-size 12 --samples 2 --output target/task016/smoke.json
 ./scripts/agent-check.sh
 cargo +1.88.0 check --offline --locked --workspace --all-targets
 python3 scripts/personal-quality.py --output target/task016/report.json
@@ -68,14 +70,21 @@ must be available. Python optimization (`-O`) is rejected because shared
 measurement helpers use assertions.
 
 The [Task 016 contract](tasks/016-personal-task-corpus.md) freezes seven seeds
-and five lexical queries before observation. Schema 2 embeds that definition and
-its digest. `--history-size` (1..5000, default 1000) selects the longer profile's
-noise; zero-noise is always included. `--samples` (2..100, default 5) means
-**repetitions per query**: the default has 25 runs per profile, 50 total. The
-unchanged canonical integration uses N=4 and samples=2, now 20 total runs.
+and five lexical queries before observation. Schema 3
+([Task 016.1](tasks/016-1-personal-recall.md)) embeds that definition, the frozen
+complete-set rule and their digest. The expected capsule is derived from seeded
+items only: if all active personal memories fit 900 estimated tokens
+(`ceil(compact item JSON bytes / 4) + 16` each), it is the expected labels
+followed by every other active memory in ID order; otherwise it is the expected
+labels alone. `--history-size` (1..5000, default 1000) selects the longer
+profile's noise; zero-noise is always included. `--samples` (2..100, default 5)
+means **repetitions per query**: the default has 25 runs per profile, 50 total.
+The canonical integration uses N=12 and samples=2, 20 total runs.
 
-Exact set/order, nontrivial ordering, Recall@2, returned precision, all four leak
-categories and durable identity reconciliation must pass each request. Keep raw
+Exact set/order, nontrivial ordering, Recall@2 over expected labels, returned
+precision, the stale and scope leak categories (plus irrelevant and noise leaks
+in the fallback mode) and durable identity reconciliation must pass each
+request. Keep raw
 numerators/denominators/contributors; zero denominators are null with reasons.
 Retain exact capsules, durable input/request and source provenance evidence.
 Check actual query, session/task/turn/event identity and independent calls;
@@ -84,8 +93,9 @@ Fixture answers are never assessed. Normal, failure, SIGTERM and SIGINT cleanup
 must reap children and remove temporary stores. Publish atomically after final
 source/artifact hash verification; independently audit the recorded report.
 
-[Task 016 evidence](tasks/016-evidence.md) supports only five-case synthetic
-lexical ContextCapsule conformance after restart. Model-answer quality, task
+[Task 016 evidence](tasks/016-evidence.md) (schema 2, historical) and
+[Task 016.1](tasks/016-1-personal-recall.md) (schema 3) support only five-case
+synthetic ContextCapsule conformance after restart. Model-answer quality, task
 completion, semantic recall, tool-task success, live cost, first useful progress,
 general agent quality and v0.1 readiness remain unavailable/open.
 Task 015's [report and commands](tasks/015-evidence.md) are historical and are

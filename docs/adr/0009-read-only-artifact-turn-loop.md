@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by [ADR 0021](0021-complete-personal-context-and-typed-turn-failures.md):
+new turns use payload version 2 with typed failure reasons; version-1 turns
+replay under the rules below.
 
 ## Context
 

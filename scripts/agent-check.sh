@@ -34,4 +34,4 @@ quality_report=""
 trap 'rm -f "$baseline_report" "$quality_report"' EXIT
 python3 scripts/personal-baseline.py --samples 2 --idle-seconds 0.05 --output "$baseline_report"
 quality_report=$(mktemp "${TMPDIR:-/tmp}/ditto-quality-gate.XXXXXX")
-python3 scripts/personal-quality.py --history-size 4 --samples 2 --output "$quality_report"
+python3 scripts/personal-quality.py --history-size 12 --samples 2 --output "$quality_report"
