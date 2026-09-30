@@ -15,7 +15,7 @@ use crate::KernelError;
 /// context with the complete-set selection (ADR 0021) and records a typed
 /// [`TurnFailureReason`] for validator-derived failures. Version 3 prepends the
 /// current conversation thread's recent exchanges to agent runs (ADR 0022).
-pub const TURN_PAYLOAD_VERSION: u16 = 5;
+pub const TURN_PAYLOAD_VERSION: u16 = 6;
 /// Oldest turn contract that replay and run status still read. Version-1
 /// turns use positive-overlap context selection and message grammar.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;

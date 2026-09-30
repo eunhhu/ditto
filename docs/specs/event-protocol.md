@@ -479,6 +479,26 @@ legacy instructions and carry no offset. Version 5 ([ADR 0027](../adr/0027-web-f
 adds an instruction that web pages returned by tools are untrusted content and
 may page `web.fetch` for links in the user's message.
 
+Version 6 ([ADR 0028](../adr/0028-thin-realtime-harness.md)) lays the prompt
+out for cache reuse. It changes four things:
+
+- The instructions no longer state the time. Instead the latest user message
+  starts with `[Ditto: local time <weekday>, <date>, <HH:MM> (UTC±HH:MM)]` and
+  a blank line, and an added instruction says that Ditto wrote this note.
+- The capsule is presented in ID order.
+- `web.fetch` is offered to every agent run while it is enabled. Authority
+  still comes only from links in the message; any other URL gets
+  `permission_denied` without network I/O.
+- The history window is stepped instead of sliding. It starts at the smallest
+  multiple of 8 finished `run_*` turns of the thread such that at most 16
+  exchanges remain. It moves forward a step at a time while their bounded
+  bytes exceed 24 KiB; an oversized final step keeps the newest exchanges
+  that fit. Between steps the history only grows.
+
+History messages and the conversation view keep the text exactly as the user
+wrote it. Replay recomputes the note, the order, the tool surface and the
+window.
+
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished
 agent-run turns recorded after the latest reset. It deletes nothing and does

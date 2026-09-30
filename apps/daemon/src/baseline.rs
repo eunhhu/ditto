@@ -61,7 +61,13 @@ impl ModelDriver for OfflineDriver {
                                 ));
                             }
                         }
-                        ContentPart::Text { text } if text == "baseline block" => blocked = true,
+                        // The user's words follow Ditto's version-6 time note.
+                        ContentPart::Text { text }
+                            if text == "baseline block"
+                                || text.ends_with("]\n\nbaseline block") =>
+                        {
+                            blocked = true
+                        }
                         _ => {}
                     }
                 }

@@ -180,18 +180,28 @@ async fn only_links_from_the_message_are_fetched_within_the_call_budget() {
 }
 
 #[tokio::test]
-async fn link_free_messages_and_disabled_fetch_offer_no_tool() {
+async fn link_free_messages_get_the_tool_without_authority_and_disabling_hides_it() {
+    // Version 6 keeps the tool surface stable for prompt caching; authority
+    // still comes only from links in the message.
+    let page = serve_page(ARTICLE);
     let fixture = Fixture::with_web_fetch(Some(FetchPolicy::allow_private_addresses()));
     let (status, driver) = run_with(
         &fixture,
         "Tell me a joke.",
-        vec![fetch_script("fetch-1", "https://example.com/")],
+        vec![
+            fetch_script("fetch-1", &page.url),
+            final_script(&["Why did the chicken cross the road?"]),
+        ],
     )
     .await;
-    assert_eq!(tool_ids(&driver.requests()[0]), ["artifact.read"]);
-    // Calling it anyway is an unknown capability.
-    assert_eq!(status.status, AgentRunStatus::Failed);
-    assert_eq!(status.failure_code.as_deref(), Some("protocol"));
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let requests = driver.requests();
+    assert_eq!(tool_ids(&requests[0]), ["artifact.read", "web.fetch"]);
+    assert_eq!(
+        tool_results(&requests[1])[0],
+        json!({"error": "permission_denied"})
+    );
+    assert_eq!(page.hits(), 0);
     replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
 
     let page = serve_page(ARTICLE);

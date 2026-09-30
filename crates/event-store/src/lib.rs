@@ -278,6 +278,30 @@ impl EventStore {
         rows.map(|row| row?.try_into()).collect()
     }
 
+    /// Finished agent-run turns (task `run_*`) of the session's current thread
+    /// before `before_seq`: after its latest `conversation.reset`. This is the
+    /// thread position that anchors stepped history windows.
+    pub fn conversation_finished_count(
+        &self,
+        session: &str,
+        before_seq: i64,
+    ) -> Result<usize, EventStoreError> {
+        let connection = self.connection()?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM events INDEXED BY events_conversation
+             WHERE session_id = ?1 AND seq < ?2
+               AND kind IN ('conversation.reset', 'turn.finished')
+               AND kind = 'turn.finished' AND task_id GLOB 'run_*'
+               AND seq > (SELECT COALESCE(MAX(seq), 0) FROM events INDEXED BY events_conversation
+                          WHERE session_id = ?1 AND seq < ?2
+                            AND kind IN ('conversation.reset', 'turn.finished')
+                            AND kind = 'conversation.reset')",
+            params![session, before_seq],
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(count).unwrap_or_default())
+    }
+
     /// The first event of one kernel turn, which is its input; indexed.
     pub fn turn_input(
         &self,

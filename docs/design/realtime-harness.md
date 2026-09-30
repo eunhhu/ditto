@@ -1,7 +1,8 @@
 # Thin real-time harness
 
 Status: design, proposed on 2026-09-30 ([ADR 0028](../adr/0028-thin-realtime-harness.md)).
-Nothing here is implemented yet; phases and exit criteria are at the end.
+Phase A is implemented (Task 025, turn payload version 6: prefix reuse 50.6 %
+to 96.4 %); the ADR lists what it deferred. Phases B–E are not implemented.
 
 The goal is a harness that does as little as possible per turn, streams without
 delay, serves several conversations at once, and gives the model exactly the

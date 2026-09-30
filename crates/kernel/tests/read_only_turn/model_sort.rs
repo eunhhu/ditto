@@ -60,7 +60,12 @@ async fn model_sort_continues_with_verified_output_and_survives_restart() {
     fixture.kernel.shutdown_agent_runs().await.unwrap();
     let requests = driver.requests();
     assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].tools.len(), 2);
+    let tools = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tools, ["artifact.read", "artifact.sort", "web.fetch"]);
     let initial = serde_json::to_value(&requests[0].turn.conversation).unwrap();
     assert!(initial.to_string().contains(&input));
     assert!(!initial.to_string().contains("b\\na\\nb"));
@@ -168,7 +173,13 @@ async fn no_permission_means_no_sort_schema_or_execution_even_when_text_asks_for
     let status = terminal(&fixture.kernel, &command).await;
     assert_eq!(status.failure_code.as_deref(), Some("protocol"));
     assert!(status.sort.is_none());
-    assert_eq!(driver.requests()[0].tools.len(), 1);
+    // The stable surface offers web.fetch; artifact.sort needs an attachment.
+    let tools = driver.requests()[0]
+        .tools
+        .iter()
+        .map(|tool| tool.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(tools, ["artifact.read", "web.fetch"]);
     fixture.kernel.shutdown_agent_runs().await.unwrap();
     let events = fixture.events_for_session("personal");
     assert!(!events.iter().any(|e| e.kind.starts_with("agent.sort.")));

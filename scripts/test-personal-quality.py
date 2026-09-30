@@ -26,6 +26,10 @@ def module(name):
 baseline = module("baseline")
 
 
+# Version 6 leads the latest message with Ditto's local-time note.
+NOTE = "[Ditto: local time Wednesday, 30 September 2026, 16:30 (UTC+01:00)]\n\n"
+
+
 class AssessmentTests(unittest.TestCase):
     def setUp(self):
         self.quality = module("quality")
@@ -117,7 +121,8 @@ class AssessmentTests(unittest.TestCase):
         relevant = [self.nodes[1]]
         mode, expected = self.quality.expected_selection(relevant, [self.nodes[0], *relevant, self.nodes[0] | {"id": "a"}])
         self.assertEqual(mode, "complete")
-        self.assertEqual([n["id"] for n in expected], ["train", "a", "packing"])
+        # Version 6 presents the complete set in ID order.
+        self.assertEqual([n["id"] for n in expected], ["a", "packing", "train"])
         many = [dict(noise, id=f"memory-01k{i:023d}") for i in range(13)]
         self.assertGreater(sum(map(self.quality.item_tokens, many)), 900)
         self.assertEqual(self.quality.expected_selection(relevant, many + relevant), ("ranked", relevant))
@@ -170,7 +175,7 @@ class AssessmentTests(unittest.TestCase):
                                         "request": {"request_id": request, "control": {"cancellation_id": turn},
                                                     "turn": {"context": {"nodes": nodes}, "conversation": [
                                                         {"type": "message", "role": "user", "content": [
-                                                            {"type": "text", "text": query}]}]}}}))
+                                                            {"type": "text", "text": NOTE + query}]}]}}}))
             calls.append(request)
             observations.append(self.observation(nodes, request))
         return observations, events, plans, calls, 0
@@ -194,6 +199,7 @@ class AssessmentTests(unittest.TestCase):
             lambda d: d[2][1].update(repetition=1),
             lambda d: d[2][0].update(repetition=False),
             lambda d: d[1][3]["payload"]["request"]["turn"]["conversation"][0]["content"][0].update(text="wrong query"),
+            lambda d: d[1][3]["payload"]["request"]["turn"]["conversation"][0]["content"][0].update(text=NOTE + "wrong query"),
             lambda d: d[1][3].update(session_id="elsewhere"),
             lambda d: d[1][3].update(task_id="wrong"),
             lambda d: d[1][3].update(correlation_id="wrong"),
@@ -306,9 +312,15 @@ class WorkflowTests(unittest.TestCase):
         for run, (query, summaries) in zip(result["requests"], expected):
             self.assertEqual(run["query"], query)
             self.assertEqual(run["input_event"]["payload"]["text"], query)
-            self.assertEqual(run["model_event"]["payload"]["request"]["turn"]["conversation"],
-                             [{"type": "message", "role": "user", "content": [{"type": "text", "text": query}]}])
-            self.assertEqual([n["summary"] for n in json.loads(run["context_json"])["nodes"]], summaries)
+            conversation = run["model_event"]["payload"]["request"]["turn"]["conversation"]
+            self.assertEqual(len(conversation), 1)
+            note, _, question = conversation[0]["content"][0]["text"].partition("]\n\n")
+            self.assertTrue(note.startswith("[Ditto: local time "))
+            self.assertEqual(question, query)
+            # Version 6 presents selected items in ID order, whatever the query.
+            nodes = json.loads(run["context_json"])["nodes"]
+            self.assertEqual(sorted(n["summary"] for n in nodes), sorted(summaries))
+            self.assertEqual([n["id"] for n in nodes], sorted(n["id"] for n in nodes))
             self.assertGreater(run["input_event"]["seq"], result["recovery"]["last_seq_before_restart"])
         self.assertEqual(result["seed_accounting"]["event_counts"], {"input.received": 19, "context.node.recorded": 19})
         self.assertEqual(result["whole_workload_accounting"]["model_requests"], 10)
@@ -337,14 +349,14 @@ class WorkflowTests(unittest.TestCase):
         for run in result["requests"]:
             nodes = json.loads(run["context_json"])["nodes"]
             summaries = [n["summary"] for n in nodes]
-            head = relevant[run["query"]]
-            # Lexical matches first, then every other current memory by ID.
-            self.assertEqual(summaries[:len(head)], head)
+            self.assertTrue(set(relevant[run["query"]]) <= set(summaries))
+            # Version 6: every current memory in ID order, whatever the query.
+            self.assertEqual([n["id"] for n in nodes], sorted(n["id"] for n in nodes))
             self.assertEqual(set(summaries), personal)
             self.assertEqual(len(summaries), len(personal))
-            rest = [n["id"] for n in nodes[len(head):]]
-            self.assertEqual(rest, sorted(rest))
             self.assertFalse({"cedar timezone is UTC", "cedar timezone is PRIVATE"} & set(summaries))
+        # So the model-facing capsule is byte-identical for all ten queries.
+        self.assertEqual(len({run["context_json"] for run in result["requests"]}), 1)
         for key in ("exact_set", "exact_order", "stale_leaks", "scope_leaks"):
             metric = result["metrics"][key]
             self.assertEqual(metric["numerator"], 10 if key.startswith("exact") else 0)

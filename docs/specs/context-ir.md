@@ -130,6 +130,14 @@ the turn payload version that persisted the result:
   receipt reason `complete-set`. Otherwise selection falls back to positive
   overlap within the budget.
 
+Selection and receipts are unchanged by turn payload version 6
+([ADR 0028](../adr/0028-thin-realtime-harness.md)), but the model sees the
+selected capsule items in ID order (admission order for memories). The same
+memories therefore render the same bytes whatever the question, and a prompt
+cache keeps them. The recorded `context.compiled` capsule stays in canonical
+selection order, and replay checks that the request carries its ID-ordered
+presentation.
+
 Conversation history is not context IR: agent runs replay the current
 thread's recent exchanges as native model messages under ADR 0022, while the
 capsule keeps only compiled memory. Run turns build the query from the request

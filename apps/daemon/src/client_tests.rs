@@ -81,6 +81,11 @@ impl ModelDriver for EchoDriver {
                 _ => None,
             })
             .unwrap_or_default();
+        // Like a model, answer the user's words, not Ditto's leading time note.
+        let question = match question.split_once("]\n\n") {
+            Some((note, words)) if note.starts_with("[Ditto:") => words.to_owned(),
+            _ => question,
+        };
         ModelEventStream::new(async_stream::stream! {
             if question.contains("wait") {
                 std::future::pending::<()>().await;

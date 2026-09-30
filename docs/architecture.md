@@ -133,7 +133,16 @@ what the memory block is and what it cannot do, plus the local time of
 acceptance, fixed by a recorded UTC offset so replay reproduces it. Version 5
 (ADR 0027) offers `web.fetch` for links in the user's message: exact-URL
 leases, public addresses only with pinned connections, journaled pages and
-network-free replay.
+network-free replay. Version 6 (ADR 0028 Phase A) keeps everything before the
+latest message byte-identical between turns:
+
+- instructions without the time;
+- a stable tool surface;
+- the capsule in ID order;
+- a history window that moves in steps of eight exchanges.
+
+The local time moves to a note that leads the latest message, so a provider
+or local KV cache reuses the whole earlier prompt.
 
 ## Capability pager
 

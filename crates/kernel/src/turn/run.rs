@@ -40,8 +40,9 @@ use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text
 
 use super::shared::{
     Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, ThreadExchange, agent_run_text,
-    append_assistant_text, bounded_turn_failure_message, history_messages,
-    local_utc_offset_minutes, select_history, system_prefix, turn_failure_code_for_model,
+    append_assistant_text, bounded_turn_failure_message, history_messages, latest_user_text,
+    local_utc_offset_minutes, presented_context, select_history_stepped, system_prefix,
+    turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnStatus, CapabilitiesSelectedPayload,
@@ -63,8 +64,10 @@ pub(super) struct TurnScope {
     effective_deadline: Cell<Option<DateTime<Utc>>>,
     agent_run: bool,
     sort: Option<super::sort::SortGrant>,
-    /// URLs from the user's message that `web.fetch` may read; empty when
-    /// the tool is not offered.
+    /// Whether `web.fetch` is offered. From version 6 it is part of every
+    /// agent run's stable tool surface while enabled.
+    fetch_offered: bool,
+    /// URLs from the user's message that `web.fetch` may read.
     fetch: Vec<String>,
 }
 
@@ -96,6 +99,9 @@ struct TurnRun<'d> {
     driver: &'d dyn ModelDriver,
     /// System instructions, fixed when the context is compiled.
     system_prefix: StableSystemPrefix,
+    /// The host's UTC offset recorded with the context; it fixes the local
+    /// time the latest message's note states.
+    utc_offset_minutes: i32,
 }
 
 /// The sealed execution epoch and the authority derived from it.
@@ -162,6 +168,7 @@ impl DittoKernel {
             sort: agent_run
                 .as_ref()
                 .and_then(|metadata| metadata.sort.clone()),
+            fetch_offered: agent_run.is_some() && self.inner.web_fetch.is_some(),
             fetch: if agent_run.is_some() && self.inner.web_fetch.is_some() {
                 super::fetch::grant(&text)
             } else {
@@ -229,6 +236,7 @@ impl DittoKernel {
             cancellation,
             driver,
             system_prefix: StableSystemPrefix::default(),
+            utc_offset_minutes: 0,
         };
 
         self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
@@ -313,6 +321,7 @@ impl DittoKernel {
             Vec::new()
         };
         let utc_offset_minutes = local_utc_offset_minutes(run.accepted_at);
+        run.utc_offset_minutes = utc_offset_minutes;
         run.system_prefix = system_prefix(
             TURN_PAYLOAD_VERSION,
             run.accepted_at,
@@ -347,9 +356,14 @@ impl DittoKernel {
         scope: &TurnScope,
         input: &EventRecord,
     ) -> Result<Vec<HistoryExchange>, KernelError> {
+        let thread_len = self
+            .inner
+            .events
+            .conversation_finished_count(&scope.session_id, input.seq)?;
         let exchanges =
             self.thread_exchanges(&scope.session_id, input.seq, MAX_HISTORY_CANDIDATES)?;
-        Ok(select_history(
+        Ok(select_history_stepped(
+            thread_len,
             exchanges.into_iter().map(|thread| thread.exchange),
         ))
     }
@@ -453,17 +467,18 @@ impl DittoKernel {
 
         // An unavailable or altered web.fetch package withdraws the tool
         // instead of failing the turn; the epoch is sized after the decision.
-        let fetch_manifest = if run.scope.fetch.is_empty() {
-            None
-        } else {
+        let fetch_manifest = if run.scope.fetch_offered {
             self.inner
                 .capabilities
                 .page_manifest(ditto_web_fetch::ID)
                 .ok()
                 .flatten()
                 .filter(ditto_web_fetch::validate_manifest)
+        } else {
+            None
         };
         if fetch_manifest.is_none() {
+            run.scope.fetch_offered = false;
             run.scope.fetch.clear();
         }
         let deriver = ArtifactReadDeriver::default();
@@ -669,6 +684,13 @@ impl DittoKernel {
         tools: TurnTools,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
         let mut conversation = history_messages(&history);
+        let text = latest_user_text(
+            TURN_PAYLOAD_VERSION,
+            &text,
+            run.accepted_at,
+            Some(run.utc_offset_minutes),
+        )
+        .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
         conversation.extend(super::sort::initial_conversation(
             text,
             run.scope.sort.as_ref(),
@@ -730,7 +752,7 @@ impl DittoKernel {
             run,
             request_index,
             tools.execution_epoch_id.clone(),
-            capsule.clone(),
+            presented_context(TURN_PAYLOAD_VERSION, capsule),
             tools.schemas.clone(),
             conversation.to_vec(),
         )
@@ -1400,7 +1422,7 @@ impl DittoKernel {
     ) -> Result<(), TurnRunError> {
         if capability_id == ARTIFACT_READ_ID
             || (run.scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
-            || (!run.scope.fetch.is_empty() && capability_id == ditto_web_fetch::ID)
+            || (run.scope.fetch_offered && capability_id == ditto_web_fetch::ID)
         {
             return Ok(());
         }

@@ -45,6 +45,8 @@ class Mock(BaseHTTPRequestHandler):
         arrived = time.perf_counter()
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         question = body["messages"][-1]["content"]
+        if question.startswith("[Ditto:"):
+            question = question.split("]\n\n", 1)[-1]
         rendered = json.dumps(body.get("tools", []), sort_keys=True) + "".join(
             f"<|{m['role']}|>{m.get('content') or ''}" for m in body["messages"])
         Mock.prompts.append(rendered)
