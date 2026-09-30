@@ -114,6 +114,47 @@ pub(super) async fn start(
     }
 }
 
+/// Submit one conversational request and wait for its terminal status.
+/// Ctrl+C requests cancellation of this run and returns its current status.
+pub(super) async fn ask(
+    client: &reqwest::Client,
+    api: &str,
+    session: &str,
+    text: &str,
+) -> anyhow::Result<AgentRunResponse> {
+    let query = AgentRunQuery {
+        request_id: ulid::Ulid::new().to_string(),
+        session_id: session.to_owned(),
+    };
+    let accepted = decode(
+        client
+            .post(format!("{api}/v1/commands/run"))
+            .timeout(Duration::from_secs(30))
+            .json(&StartAgentRunCommand {
+                request_id: query.request_id.clone(),
+                session_id: query.session_id.clone(),
+                text: text.to_owned(),
+                sort: None,
+            })
+            .send()
+            .await
+            .context("run submission was not confirmed")?,
+    )
+    .await?;
+    if accepted.status != AgentRunStatus::Running {
+        return Ok(accepted);
+    }
+    let wait = wait_for_terminal(client, api, &query, &accepted.task_id);
+    tokio::pin!(wait);
+    tokio::select! {
+        result = &mut wait => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("could not listen for Ctrl+C")?;
+            request_cancel(client, api, &query).await
+        }
+    }
+}
+
 pub(super) async fn inspect(
     client: &reqwest::Client,
     view: View<'_>,

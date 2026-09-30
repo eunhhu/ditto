@@ -14,7 +14,13 @@ pub mod recurrence;
 mod schedule;
 pub use schedule::{ScheduleEntry, ScheduleState};
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
+
+/// Conversation markers: resets bound a thread; finished turns are its history.
+const MIGRATION_V7: &str = r#"
+CREATE INDEX IF NOT EXISTS events_conversation ON events(session_id, seq)
+    WHERE kind IN ('conversation.reset', 'turn.finished');
+"#;
 
 const MIGRATION_V4: &str = r#"
 CREATE INDEX IF NOT EXISTS events_agent_sort ON events(session_id, task_id, correlation_id, seq)
@@ -235,6 +241,64 @@ impl EventStore {
             raw_event_record_from_row,
         )?;
         rows.map(|row| row?.try_into()).collect()
+    }
+
+    /// Newest-first `turn.finished` events of the session's current thread
+    /// before `before_seq`: after its latest `conversation.reset`, at most
+    /// `limit`. Two partial-index reads, independent of transcript length.
+    pub fn conversation_finished_turns(
+        &self,
+        session: &str,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, EventStoreError> {
+        let connection = self.connection()?;
+        let boundary: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM events INDEXED BY events_conversation
+             WHERE session_id = ?1 AND seq < ?2
+               AND kind IN ('conversation.reset', 'turn.finished')
+               AND kind = 'conversation.reset'",
+            params![session, before_seq],
+            |row| row.get(0),
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+             FROM events INDEXED BY events_conversation
+             WHERE session_id = ?1 AND seq > ?2 AND seq < ?3
+               AND kind IN ('conversation.reset', 'turn.finished')
+               AND kind = 'turn.finished'
+             ORDER BY seq DESC LIMIT ?4",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![session, boundary, before_seq, limit],
+            raw_event_record_from_row,
+        )?;
+        rows.map(|row| row?.try_into()).collect()
+    }
+
+    /// The first event of one kernel turn, which is its input; indexed.
+    pub fn turn_input(
+        &self,
+        session: &str,
+        task: &str,
+        turn_id: &str,
+    ) -> Result<Option<EventRecord>, EventStoreError> {
+        let connection = self.connection()?;
+        let raw = connection
+            .query_row(
+                "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                        payload_json, causation_id, correlation_id, span_id
+                 FROM events INDEXED BY events_session_task_correlation_seq
+                 WHERE session_id = ?1 AND task_id = ?2 AND correlation_id = ?3
+                   AND correlation_id GLOB 'turn_*'
+                 ORDER BY seq LIMIT 1",
+                params![session, task, turn_id],
+                raw_event_record_from_row,
+            )
+            .optional()?;
+        raw.map(TryInto::try_into).transpose()
     }
 
     /// Returns the event with the exact globally unique event ID, if present.
@@ -512,6 +576,9 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> 
         transaction.execute("DROP INDEX IF EXISTS events_schedules", [])?;
         transaction.execute_batch(recurrence::SOURCE_INDEX)?;
     }
+    if version < 7 {
+        transaction.execute_batch(MIGRATION_V7)?;
+    }
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -727,6 +794,117 @@ mod tests {
                 .unwrap()
                 .execute("DELETE FROM events", [])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn schema_six_gains_conversation_lookups_bounded_by_reset_and_sequence() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        let store = EventStore::open(&path).unwrap();
+        let old = store
+            .append(NewEvent::user_input("s", None, "legacy"))
+            .unwrap();
+        drop(store);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("DROP INDEX events_conversation; PRAGMA user_version=6;")
+            .unwrap();
+        drop(db);
+        let store = EventStore::open(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.get_by_event_id(&old.event_id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(old).unwrap()
+        );
+        let plan = store
+            .connection()
+            .unwrap()
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT seq FROM events INDEXED BY events_conversation \
+                 WHERE session_id='s' AND seq > 0 AND seq < 99 \
+                 AND kind IN ('conversation.reset', 'turn.finished') AND kind = 'turn.finished' \
+                 ORDER BY seq DESC LIMIT 32",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" ");
+        assert!(
+            plan.contains("events_conversation") && !plan.contains("TEMP B-TREE"),
+            "{plan}"
+        );
+
+        let marker = |session: &str, kind: &str, turn: &str| NewEvent {
+            session_id: Some(session.into()),
+            task_id: Some(format!("run_{turn}")),
+            actor: EventActor::System,
+            kind: kind.into(),
+            payload: json!({ "turn_id": turn }),
+            causation_id: None,
+            correlation_id: Some(turn.into()),
+            span_id: None,
+        };
+        let mut input = NewEvent::user_input("s", Some("run_turn_a".into()), "first");
+        input.correlation_id = Some("turn_a".into());
+        let first_input = store.append(input).unwrap();
+        store
+            .append(marker("s", event_kind::TURN_FINISHED, "turn_a"))
+            .unwrap();
+        store
+            .append(marker("s", event_kind::CONVERSATION_RESET, "reset"))
+            .unwrap();
+        let b = store
+            .append(marker("s", event_kind::TURN_FINISHED, "turn_b"))
+            .unwrap();
+        store
+            .append(marker("other", event_kind::TURN_FINISHED, "turn_x"))
+            .unwrap();
+        let c = store
+            .append(marker("s", event_kind::TURN_FINISHED, "turn_c"))
+            .unwrap();
+        let later = store
+            .append(marker("s", event_kind::TURN_FINISHED, "turn_d"))
+            .unwrap();
+
+        let ids = |events: Vec<ditto_protocol::EventRecord>| {
+            events
+                .into_iter()
+                .map(|event| event.event_id)
+                .collect::<Vec<_>>()
+        };
+        // Newest first, after the reset, before the cutoff, same session only.
+        assert_eq!(
+            ids(store
+                .conversation_finished_turns("s", later.seq, 32)
+                .unwrap()),
+            [c.event_id.clone(), b.event_id.clone()]
+        );
+        assert_eq!(
+            ids(store
+                .conversation_finished_turns("s", later.seq, 1)
+                .unwrap()),
+            [c.event_id]
+        );
+        assert!(
+            store
+                .conversation_finished_turns("s", b.seq, 32)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .turn_input("s", "run_turn_a", "turn_a")
+                .unwrap()
+                .unwrap()
+                .event_id,
+            first_input.event_id
+        );
+        assert!(
+            store
+                .turn_input("s", "run_turn_a", "turn_b")
+                .unwrap()
+                .is_none()
         );
     }
 

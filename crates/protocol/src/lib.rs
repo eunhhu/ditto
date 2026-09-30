@@ -142,6 +142,7 @@ pub mod event_kind {
     pub const TURN_FINISHED: &str = "turn.finished";
     pub const TURN_FAILED: &str = "turn.failed";
     pub const CONTEXT_NODE_RECORDED: &str = "context.node.recorded";
+    pub const CONVERSATION_RESET: &str = "conversation.reset";
 }
 
 #[cfg(test)]
@@ -351,6 +352,20 @@ pub struct RememberInputCommand {
     pub input_event_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
+}
+
+/// Start a new conversation thread in a session. Memories are unaffected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetConversationCommand {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationResetResponse {
+    pub session_id: String,
+    pub event_id: String,
+    pub event_seq: i64,
 }
 
 pub const MAX_USER_MEMORY_BYTES: usize = 4_096;

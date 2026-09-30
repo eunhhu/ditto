@@ -2,6 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
+mod chat;
 mod memory;
 mod presentation;
 mod repeats;
@@ -56,6 +57,13 @@ enum Command {
     SortStatus(runs::RunIdentity),
     /// Cancel an active local sort request.
     SortCancel(runs::RunIdentity),
+    /// Talk interactively; the session's current thread is remembered.
+    Chat(chat::ChatArgs),
+    /// Start a new conversation thread (memories are kept).
+    New {
+        #[arg(long, default_value = "personal")]
+        session: String,
+    },
     /// Ask the configured model; wait for its answer unless detached.
     Run(runs::RunArgs),
     /// Inspect a run using its original request ID.
@@ -142,6 +150,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Sort(args) => sorts::start(&client, view, args).await?,
         Command::SortStatus(identity) => sorts::inspect(&client, view, identity).await?,
         Command::SortCancel(identity) => sorts::cancel(&client, view, identity).await?,
+        Command::Chat(args) => chat::chat(&client, api, args).await?,
+        Command::New { session } => {
+            let reset = chat::reset(&client, api, &session).await?;
+            if view.human {
+                println!(
+                    "New conversation started in session {}.",
+                    presentation::safe(&reset.session_id)
+                );
+            } else {
+                print_json(&serde_json::to_value(reset)?)?;
+            }
+        }
         Command::Run(args) => runs::start(&client, view, args).await?,
         Command::RunStatus(identity) => runs::inspect(&client, view, identity).await?,
         Command::RunCancel(identity) => runs::cancel(&client, view, identity).await?,

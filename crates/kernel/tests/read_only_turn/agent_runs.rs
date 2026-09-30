@@ -756,6 +756,194 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
     };
     replay_artifact_read_turn(&relabel(1, false), &status.turn_id).unwrap();
     assert!(replay_artifact_read_turn(&relabel(1, true), &status.turn_id).is_err());
-    assert!(replay_artifact_read_turn(&relabel(3, false), &status.turn_id).is_err());
+    // No history exists, so version 2 also replays; unknown versions never do.
+    replay_artifact_read_turn(&relabel(2, false), &status.turn_id).unwrap();
+    let future = ditto_kernel::turn::TURN_PAYLOAD_VERSION + 1;
+    assert!(replay_artifact_read_turn(&relabel(future, false), &status.turn_id).is_err());
     assert!(replay_artifact_read_turn(&relabel(0, false), &status.turn_id).is_err());
+}
+
+fn message_texts(request: &ModelRequest) -> Vec<(String, String)> {
+    request
+        .turn
+        .conversation
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::Message { role, content } => Some((
+                format!("{role:?}"),
+                content
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn ask(
+    kernel: &DittoKernel,
+    session: &str,
+    text: &str,
+    script: Vec<ModelEvent>,
+) -> (AgentRunResponse, ScriptedDriver) {
+    let driver = ScriptedDriver::new(vec![script]);
+    let mut command = start_command(text);
+    command.session_id = session.into();
+    start_when_idle(kernel, &command, Arc::new(driver.clone())).await;
+    (terminal(kernel, &command).await, driver)
+}
+
+#[tokio::test]
+async fn conversation_threads_replay_recent_exchanges_until_a_reset() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let (first, _) = ask(
+        kernel,
+        "personal",
+        "My dog is called Miso.",
+        final_script(&["Noted."]),
+    )
+    .await;
+    assert_eq!(first.status, AgentRunStatus::Unverified);
+    // A failed turn and another session's turn never join this thread.
+    let failing = vec![ModelEvent::Failed {
+        failure: ditto_model::ModelFailure::new(FailureKind::Provider, "fixture outage"),
+    }];
+    let (failed, _) = ask(kernel, "personal", "Are you there?", failing).await;
+    assert_eq!(failed.status, AgentRunStatus::Failed);
+    ask(
+        kernel,
+        "elsewhere",
+        "My cat is called Tofu.",
+        final_script(&["Other thread."]),
+    )
+    .await;
+
+    let (second, driver) = ask(
+        kernel,
+        "personal",
+        "What is his name?",
+        final_script(&["Miso."]),
+    )
+    .await;
+    assert_eq!(second.status, AgentRunStatus::Unverified);
+    assert_eq!(
+        message_texts(&driver.requests()[0]),
+        [
+            ("User".into(), "My dog is called Miso.".into()),
+            ("Assistant".into(), "Noted.".into()),
+            ("User".into(), "What is his name?".into()),
+        ]
+    );
+
+    kernel
+        .reset_conversation(ditto_protocol::ResetConversationCommand {
+            session_id: "personal".into(),
+        })
+        .unwrap();
+    assert!(
+        kernel
+            .reset_conversation(ditto_protocol::ResetConversationCommand {
+                session_id: " not canonical".into(),
+            })
+            .is_err()
+    );
+    let (third, driver) = ask(
+        kernel,
+        "personal",
+        "Start over.",
+        final_script(&["Fresh thread."]),
+    )
+    .await;
+    assert_eq!(
+        message_texts(&driver.requests()[0]),
+        [("User".into(), "Start over.".into())]
+    );
+    kernel.shutdown_agent_runs().await.unwrap();
+
+    let events = fixture.events_for_session("personal");
+    let context_of = |turn: &str| {
+        events
+            .iter()
+            .position(|event| {
+                event.kind == event_kind::CONTEXT_COMPILED
+                    && event.correlation_id.as_deref() == Some(turn)
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        events[context_of(&second.turn_id)].payload["history_turn_ids"],
+        json!([first.turn_id.clone()])
+    );
+    assert!(
+        events[context_of(&third.turn_id)]
+            .payload
+            .get("history_turn_ids")
+            .is_none()
+    );
+    for turn in [&first.turn_id, &second.turn_id, &third.turn_id] {
+        replay_artifact_read_turn(&events, turn).unwrap();
+    }
+
+    // The recorded history must equal the thread recomputed from the journal.
+    let mut forged = events.clone();
+    forged[context_of(&second.turn_id)].payload["history_turn_ids"] = json!([]);
+    assert!(replay_artifact_read_turn(&forged, &second.turn_id).is_err());
+    let mut forged = events.clone();
+    forged[context_of(&third.turn_id)].payload["history_turn_ids"] = json!([first.turn_id]);
+    assert!(replay_artifact_read_turn(&forged, &third.turn_id).is_err());
+    // A request whose conversation omits the history no longer replays.
+    let mut forged = events.clone();
+    let request = forged
+        .iter_mut()
+        .find(|event| {
+            event.kind == event_kind::MODEL_REQUESTED
+                && event.correlation_id.as_deref() == Some(second.turn_id.as_str())
+        })
+        .unwrap();
+    let conversation = request.payload["request"]["turn"]["conversation"]
+        .as_array_mut()
+        .unwrap();
+    conversation.drain(0..2);
+    assert!(replay_artifact_read_turn(&forged, &second.turn_id).is_err());
+    // Payload versions before 3 carry no history.
+    let mut relabeled = events.clone();
+    for event in relabeled.iter_mut().filter(|event| {
+        event.correlation_id.as_deref() == Some(second.turn_id.as_str())
+            && event.payload.get("event_version").is_some()
+    }) {
+        event.payload["event_version"] = json!(2);
+    }
+    assert!(replay_artifact_read_turn(&relabeled, &second.turn_id).is_err());
+}
+
+#[tokio::test]
+async fn conversation_history_keeps_only_the_newest_bounded_exchanges() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    for index in 0..10 {
+        ask(
+            kernel,
+            "personal",
+            &format!("message {index}"),
+            final_script(&[&format!("answer {index}")]),
+        )
+        .await;
+    }
+    let long_answer = "x".repeat(10_000);
+    ask(kernel, "personal", "long", final_script(&[&long_answer])).await;
+    let (last, driver) = ask(kernel, "personal", "latest", final_script(&["done"])).await;
+    kernel.shutdown_agent_runs().await.unwrap();
+    let texts = message_texts(&driver.requests()[0]);
+    // Eight exchanges (sixteen messages) plus the current request.
+    assert_eq!(texts.len(), 17);
+    assert_eq!(texts[0].1, "message 3");
+    assert_eq!(texts[14].1, "long");
+    assert!(texts[15].1.ends_with("...[truncated]") && texts[15].1.len() == 4 * 1_024);
+    assert_eq!(texts[16], ("User".into(), "latest".into()));
+    replay_artifact_read_turn(&fixture.events_for_session("personal"), &last.turn_id).unwrap();
 }

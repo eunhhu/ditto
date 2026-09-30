@@ -26,7 +26,7 @@ spec = importlib.util.spec_from_file_location("baseline", Path(__file__).with_na
 baseline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(baseline)
 REPO = baseline.REPO
-TURN_PAYLOAD_VERSION = 2
+TURN_PAYLOAD_VERSION = 3
 CAPSULE_ITEM_OVERHEAD_TOKENS = 16
 # Frozen independently of runtime capsules and fixture answers (Tasks 016, 016.1).
 CORPUS = {
@@ -389,6 +389,9 @@ def workload(root, binaries, noise_count, samples):
         for repetition in range(samples):
             for case in CORPUS["cases"]:
                 identity = f"01K{noise_count:018d}{len(runs):05d}"
+                # Each measured query starts a fresh thread, so its capsule and
+                # conversation contain no earlier corpus answers (ADR 0022).
+                server.cli("new", "--session", CORPUS["session"])
                 result = server.cli("run", case["query"], "--session", CORPUS["session"],
                                     "--request-id", identity, metric=case["case"])
                 require(result["status"] == "unverified" and result["request_id"] == identity, "run status/identity mismatch")

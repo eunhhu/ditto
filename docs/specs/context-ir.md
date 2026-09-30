@@ -130,7 +130,10 @@ the turn payload version that persisted the result:
   receipt reason `complete-set`. Otherwise selection falls back to positive
   overlap within the budget.
 
-Run turns build the query from the request text alone. Version-1 runs also
+Conversation history is not context IR: agent runs replay the current
+thread's recent exchanges as native model messages under ADR 0022, while the
+capsule keeps only compiled memory. Run turns build the query from the request
+text alone. Version-1 runs also
 appended the fixed text `local content read`; replay reconstructs that legacy
 query only for version-1 turns. Neither contract is semantic: at session sizes
 beyond the budget, a paraphrase without shared content words is not selected.

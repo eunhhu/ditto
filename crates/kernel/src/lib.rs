@@ -22,6 +22,7 @@ mod agent_run;
 mod agent_sort;
 mod context_admission;
 mod context_retrieval;
+mod conversation;
 mod memory;
 mod recurrence;
 mod schedule;
