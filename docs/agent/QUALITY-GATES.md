@@ -23,6 +23,18 @@ build with cached dependencies via `--offline --locked`.
 Loopback binding and the existing `/usr/bin/sort` profile must be available.
 CI additionally verifies the declared MSRV.
 
+Harness performance is measured, not gated: after
+`cargo build --release --locked -p ditto-daemon`,
+`python3 scripts/measure-harness.py` reports:
+
+- time before dispatch, cost per streamed delta, events per turn and journal
+  bytes per answer byte;
+- prompt prefix reuse between turns;
+- how many simultaneous sessions are accepted.
+
+It uses an instant loopback model. Performance phases record before and after
+runs of it.
+
 ## Evidence by change type
 
 | Change | Minimum evidence |

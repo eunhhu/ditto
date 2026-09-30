@@ -16,6 +16,7 @@ smallest useful working set.
 | Long autonomous run | [`OPERATING-MODE.md`](OPERATING-MODE.md) |
 | Tests, CI, release confidence | [`QUALITY-GATES.md`](QUALITY-GATES.md) |
 | Architecture or public contract | [`../architecture.md`](../architecture.md), relevant [`../adr`](../adr), and [`DECISIONS.md`](DECISIONS.md) |
+| Runtime speed, concurrency, streaming, prompt layout | [`../design/realtime-harness.md`](../design/realtime-harness.md) |
 | Event protocol | [`../specs/event-protocol.md`](../specs/event-protocol.md) |
 | Context compiler | [`../specs/context-ir.md`](../specs/context-ir.md) |
 | Capability retrieval/runtime | [`../specs/capability-manifest.md`](../specs/capability-manifest.md) |

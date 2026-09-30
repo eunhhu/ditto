@@ -5,36 +5,40 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-On 2026-09-30 the user redirected the frontier: build a daily-driver personal
-assistant that can stand in for current assistant agents (OpenClaw, Hermes,
-Grok bots, Muse, Dot). Work these slices in order; each lands with tests, an
-ADR when a contract changes, and evidence:
+On 2026-09-30 the user redirected the frontier: design the thinnest possible
+harness around concurrency, real-time streaming, and the timing and scope of
+context injection. The design is
+[docs/design/realtime-harness.md](../design/realtime-harness.md)
+(ADR 0028, proposed). Its measured baseline is from `scripts/measure-harness.py`.
+Implement in this order; each phase lands with tests, its ADR amendment, before
+and after numbers, and the gate:
 
-1. [018](tasks/018-conversation-threads.md) Conversation threads - complete.
-2. [019](tasks/019-openai-compatible-provider.md) OpenAI-compatible model
-   provider - complete.
-3. [020](tasks/020-local-web-app.md) Local web app: chat, memories, schedules
-   and a per-answer inspector - complete.
-4. [021](tasks/021-telegram-gateway.md) Telegram gateway and delivery of
-   scheduled results - complete.
-5. [022](tasks/022-assistant-instructions.md) Assistant instructions and
-   local time (turn payload version 4) - complete.
-6. [023](tasks/023-web-fetch.md) `web.fetch` for links the user sent -
-   complete.
-7. 024 Model-callable memory tools, **awaiting a user decision**. ADR 0015
-   limits memory promotion to task-free input through trusted user ingress
-   and explicitly excludes model tool invocation. The proposal amends it: a
-   leased `memory.remember` tool (one call per turn, no arguments) saves the
-   user's current message verbatim, with provenance to that input, when the
-   user asks to be remembered. The context projection already accepts a
-   session memory sourced from the run's task-scoped input; only the kernel's
-   task-free rule blocks it. `memory.search` would follow, offered only when
-   the memory set exceeds the context budget. Web search waits for approval
-   fulfillment, because a model-chosen query is an outbound channel.
+1. 025 Phase A, cache-stable prompt layout (turn payload version 6):
+   - context planes;
+   - tail injection of time, memory deltas and relevance hints;
+   - memory epochs and stepped extractive compaction;
+   - a stable tool surface and context-window budgets.
 
-The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
-the measurement gate before any claim of parity with other assistants.
-General approval fulfillment remains deferred.
+   Exit: median prefix reuse ≥ 90 % (today 50.6 %).
+2. 026 Phase B, journal writer thread with group commit, WAL reader pool, hot
+   session state, turn prelude in one commit. Exit: before-dispatch ≤ 2 ms
+   median (today 5–10 ms), no SQLite on async workers.
+3. 027 Phase C, live delta plane, coalesced durable text, content-addressed
+   blobs; web and Telegram on live deltas. Exit: ≤ 50 events per 1,000-delta
+   answer (today 1,006), ≤ 3 journal bytes per answer byte (today 81–107).
+4. 028 Phase D, session-parallel runs with provider lanes and a `queued`
+   status. Exit: three sessions at once all stream (today 1 of 3).
+5. 029 Phase E, one builtin tool lifecycle, parallel read-only calls, progress
+   events, read-only `memory.search`.
+
+Still open from the earlier frontier:
+
+- 024, model-invoked memory saving, awaits the user's decision because it
+  reverses ADR 0015's exclusion of model tool invocation.
+- The daily-driver slices 018–023 are complete; see below.
+- Web search waits for per-call approval.
+- The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
+  the measurement gate before any claim of parity with other assistants.
 
 ## Completed
 
