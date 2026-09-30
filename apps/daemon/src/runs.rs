@@ -523,6 +523,12 @@ pub(crate) mod tests {
         use clap::Parser;
         let args = super::super::Args::try_parse_from(["ditto-daemon"]).unwrap();
         assert!(matches!(args.model.provider, Provider::Disabled));
+        assert!(!args.disable_web_fetch);
+        assert!(
+            super::super::Args::try_parse_from(["ditto-daemon", "--disable-web-fetch"])
+                .unwrap()
+                .disable_web_fetch
+        );
         let args = super::super::Args::try_parse_from([
             "ditto-daemon",
             "--provider",

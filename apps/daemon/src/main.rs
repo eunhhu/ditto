@@ -55,6 +55,9 @@ struct Args {
     /// Explicit escape hatch until authenticated remote ingress exists.
     #[arg(long, env = "DITTO_ALLOW_UNAUTHENTICATED_REMOTE")]
     allow_unauthenticated_remote: bool,
+    /// Never offer `web.fetch`, even for links in a message.
+    #[arg(long, env = "DITTO_DISABLE_WEB_FETCH")]
+    disable_web_fetch: bool,
 }
 
 #[derive(Clone)]
@@ -77,8 +80,11 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     validate_bind(args.bind, args.allow_unauthenticated_remote)?;
     let driver = runs::configured_driver(&args.model, args.bind)?;
-    let kernel = DittoKernel::open(KernelConfig::new(args.data_dir, args.capabilities_dir))
-        .context("failed to initialize Ditto kernel")?;
+    let mut config = KernelConfig::new(args.data_dir, args.capabilities_dir);
+    if args.disable_web_fetch {
+        config.web_fetch = None;
+    }
+    let kernel = DittoKernel::open(config).context("failed to initialize Ditto kernel")?;
     kernel
         .record_runtime_started(&args.bind.to_string())
         .context("failed to record runtime start")?;

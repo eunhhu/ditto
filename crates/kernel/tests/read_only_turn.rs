@@ -38,6 +38,8 @@ use tempfile::TempDir;
 mod agent_runs;
 #[path = "read_only_turn/model_sort.rs"]
 mod model_sort;
+#[path = "read_only_turn/web_fetch.rs"]
+mod web_fetch;
 
 #[derive(Clone)]
 struct ScriptedDriver {
@@ -291,10 +293,15 @@ impl IntoIterator for AcceptanceRelativeCandidates {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_web_fetch(Some(ditto_web_fetch::FetchPolicy::public_only()))
+    }
+
+    fn with_web_fetch(web_fetch: Option<ditto_web_fetch::FetchPolicy>) -> Self {
         let directory = tempfile::tempdir().expect("temporary directory");
         let capabilities =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities");
-        let config = KernelConfig::new(directory.path().join("data"), capabilities);
+        let mut config = KernelConfig::new(directory.path().join("data"), capabilities);
+        config.web_fetch = web_fetch;
         let kernel = DittoKernel::open(config.clone()).expect("open kernel");
         Self {
             _directory: directory,
@@ -522,7 +529,8 @@ async fn run_success(
 async fn successful_two_request_continuation_persists_exact_epoch_schema_history_and_replays() {
     let fixture = Fixture::new();
     let loaded = fixture.kernel.capability_load_metrics();
-    assert_eq!(loaded.headers_read, 3);
+    // artifact.read, artifact.sort, device.process.run and web.fetch.
+    assert_eq!(loaded.headers_read, 4);
     assert_eq!(loaded.legacy_manifests_read, 0);
     assert_eq!(loaded.manifests_paged, 0);
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));

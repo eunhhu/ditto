@@ -1,0 +1,46 @@
+{
+  "header_version": 1,
+  "manifest_sha256": "c049a427d5d761c9c807b9c001323cc6e12256bc54e3c9fb1455d5ae1c596afe",
+  "id": "web.fetch",
+  "version": "0.1.0",
+  "namespace": "web",
+  "kind": "tool",
+  "lifecycle": "active",
+  "summary": "Read the text of a web page whose link the user sent in this message.",
+  "placement": {
+    "modes": [
+      "local"
+    ],
+    "requires": []
+  },
+  "retrieval": {
+    "intents": [
+      "read a web page the user linked",
+      "summarize a linked article"
+    ],
+    "negative_examples": [
+      "search the web",
+      "submit a form or post to a website"
+    ],
+    "complements": [],
+    "aliases": [
+      "open link",
+      "read url"
+    ]
+  },
+  "effects": {
+    "minimum": {
+      "access": "content",
+      "mutation": "none",
+      "externality": "network",
+      "privilege": "user"
+    },
+    "maximum": {
+      "access": "content",
+      "mutation": "none",
+      "externality": "network",
+      "privilege": "user"
+    }
+  },
+  "candidate_bytes": 238
+}

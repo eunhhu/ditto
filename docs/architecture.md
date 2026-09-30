@@ -130,7 +130,10 @@ current thread's newest finished exchanges as native messages, bounded to eight
 exchanges and 24 KiB, until a `conversation.reset` starts a new thread.
 Version 4 (ADR 0026) gives the model personal-assistant instructions that say
 what the memory block is and what it cannot do, plus the local time of
-acceptance, fixed by a recorded UTC offset so replay reproduces it.
+acceptance, fixed by a recorded UTC offset so replay reproduces it. Version 5
+(ADR 0027) offers `web.fetch` for links in the user's message: exact-URL
+leases, public addresses only with pinned connections, journaled pages and
+network-free replay.
 
 ## Capability pager
 

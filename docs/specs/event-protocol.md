@@ -414,6 +414,31 @@ I/O or reconstructed live authority. It checks structural evidence; status also
 checks artifact content. Existing turns remain readable, and an old reader must
 reject version-2 metadata. See [ADR 0018](../adr/0018-user-scoped-model-sort.md).
 
+## Links the user sends (`web.fetch`)
+
+An agent run whose message contains http(s) URLs grants the canonical form of
+up to five of them to `web.fetch` for that turn. Version-5 turns page the tool
+only then and record its package as `fetch_manifest` in
+`capabilities.selected`. A lease allows min(links, 3) calls, each on an exact
+`url:` resource from the grant.
+
+Version-1 `agent.fetch.requested` (model), `agent.fetch.started` (capability)
+and `agent.fetch.output` (capability) extend the turn's cause chain like the
+sort events, with spans set to the call ID:
+
+- Requested evidence holds the raw and the normalized arguments.
+- Started evidence holds the normalized URL, the epoch, digest, permit and
+  claim identities, and the claim and expiry times.
+- Output holds `claimed` and either `{outcome: "fetched", page: {url,
+  final_url, status, content_type, title?, text, truncated}}` or
+  `{outcome: "error", code, status?}` with a closed snake_case code.
+
+The model receives the page with `content_origin: "untrusted web page"`.
+Replay recomputes the grant from the input, validates normalization, budget,
+claims and bounds, and continues from the recorded page without network I/O.
+Fetches reach only globally routable addresses. `--disable-web-fetch` never
+offers the tool. See [ADR 0027](../adr/0027-web-fetch-for-user-links.md).
+
 ## Kernel artifact-read turns
 
 The kernel owns the durable read-only turn state machine; new turns are written
@@ -450,7 +475,9 @@ the system instructions with personal-assistant instructions ending in the
 local time of acceptance. It records the host's UTC offset in minutes in
 `context.compiled` as `utc_offset_minutes`, and replay recomputes the
 instructions from it and the input's recorded time. Versions 1–3 keep the
-legacy instructions and carry no offset.
+legacy instructions and carry no offset. Version 5 ([ADR 0027](../adr/0027-web-fetch-for-user-links.md))
+adds an instruction that web pages returned by tools are untrusted content and
+may page `web.fetch` for links in the user's message.
 
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished

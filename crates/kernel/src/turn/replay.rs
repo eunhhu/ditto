@@ -25,6 +25,10 @@ use crate::normalize_input_text;
 mod sort_replay;
 use super::sort::{ReplayedSortCall, SortGrant};
 
+#[path = "fetch_replay.rs"]
+mod fetch_replay;
+use super::fetch::ReplayedFetchCall;
+
 use super::run::turn_signature;
 use super::shared::{
     Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, agent_run_text,
@@ -199,6 +203,12 @@ struct ReplayProjector<'turn, 'snapshot> {
     sort: Option<SortGrant>,
     sort_claimed: bool,
     sort_calls: Vec<ReplayedSortCall>,
+    /// URLs the user's message grants to `web.fetch`, recomputed from it.
+    fetch_grant: Vec<String>,
+    /// Whether the recorded selection paged `web.fetch`.
+    fetch_selected: bool,
+    fetch_claims: u32,
+    fetch_calls: Vec<ReplayedFetchCall>,
     events: &'turn [EventRecord],
     snapshot: &'snapshot [EventRecord],
     index: usize,
@@ -318,12 +328,21 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         let sort = input.agent_run.and_then(|metadata| metadata.sort);
         let input_text = input.text;
         let conversation = super::sort::initial_conversation(input_text.clone(), sort.as_ref());
+        let fetch_grant = if agent_run {
+            super::fetch::grant(&input_text)
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             version: None,
             agent_run,
             sort,
             sort_claimed: false,
             sort_calls: Vec::new(),
+            fetch_grant,
+            fetch_selected: false,
+            fetch_claims: 0,
+            fetch_calls: Vec::new(),
             events,
             snapshot,
             index: 1,
@@ -439,12 +458,36 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 ));
             }
         }
+        if let Some(manifest) = &selected.fetch_manifest {
+            if self.version.is_none_or(|version| version < 5)
+                || self.fetch_grant.is_empty()
+                || !ditto_web_fetch::validate_manifest(manifest)
+            {
+                return Err(replay_invalid(
+                    "selected fetch contract contradicts the user's message",
+                ));
+            }
+            let schema = ditto_web_fetch::schema();
+            expected_revisions.push(
+                CapabilityRevision::from_contract(
+                    manifest,
+                    &schema,
+                    ditto_web_fetch::FetchDeriver::default().revision().clone(),
+                )
+                .map_err(|error| replay_invalid(error.to_string()))?,
+            );
+            expected_schemas.push(schema);
+            expected_cards.push(CapabilityCard::from(manifest));
+            self.fetch_selected = true;
+        }
         if selected.schemas != expected_schemas {
             return Err(replay_invalid(
                 "selected schemas do not equal the installed contracts",
             ));
         }
-        if (!selected.epoch.invocation_revisions().is_empty() || self.sort.is_some())
+        if (!selected.epoch.invocation_revisions().is_empty()
+            || self.sort.is_some()
+            || self.fetch_selected)
             && selected.epoch.invocation_revisions() != expected_revisions
         {
             return Err(replay_invalid("selected invocation revisions changed"));
@@ -611,6 +654,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     } => {
                         if capability_id != ARTIFACT_READ_ID
                             && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+                            && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
                         {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
@@ -660,6 +704,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     } => {
                         if capability_id != ARTIFACT_READ_ID
                             && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+                            && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
                         {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
@@ -832,6 +877,13 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         return Ok(ArtifactReadTurnReplay::Failed { failure });
                     }
 
+                    if call.capability_id == ditto_web_fetch::ID {
+                        if let Some(failure) = self.replay_fetch_call(request_index as u8, &call)? {
+                            return Ok(ArtifactReadTurnReplay::Failed { failure });
+                        }
+                        request_index += 1;
+                        continue;
+                    }
                     if call.capability_id == ditto_artifact_sort::ID {
                         if let Some(failure) = self.replay_sort_call(request_index as u8, &call)? {
                             return Ok(ArtifactReadTurnReplay::Failed { failure });
@@ -1246,6 +1298,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             outputs: self.outputs,
             calls: self.calls,
             sort_calls: self.sort_calls,
+            fetch_calls: self.fetch_calls,
             terminal,
 
             sequence_span: TurnSequenceSpan {

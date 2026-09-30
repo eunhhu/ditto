@@ -122,6 +122,9 @@ pub mod event_kind {
     pub const AGENT_SORT_REQUESTED: &str = "agent.sort.requested";
     pub const AGENT_SORT_STARTED: &str = "agent.sort.started";
     pub const AGENT_SORT_OUTPUT: &str = "agent.sort.output";
+    pub const AGENT_FETCH_REQUESTED: &str = "agent.fetch.requested";
+    pub const AGENT_FETCH_STARTED: &str = "agent.fetch.started";
+    pub const AGENT_FETCH_OUTPUT: &str = "agent.fetch.output";
     pub const SORT_REQUESTED: &str = "sort.requested";
     pub const SORT_STARTED: &str = "sort.started";
     pub const SORT_FAILED: &str = "sort.failed";

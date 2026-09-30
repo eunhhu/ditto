@@ -33,6 +33,9 @@ use ulid::Ulid;
 #[path = "sort_run.rs"]
 mod sort_tool;
 
+#[path = "fetch_run.rs"]
+mod fetch_tool;
+
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
@@ -60,6 +63,9 @@ pub(super) struct TurnScope {
     effective_deadline: Cell<Option<DateTime<Utc>>>,
     agent_run: bool,
     sort: Option<super::sort::SortGrant>,
+    /// URLs from the user's message that `web.fetch` may read; empty when
+    /// the tool is not offered.
+    fetch: Vec<String>,
 }
 
 pub(crate) struct AdmittedReadOnlyTurn {
@@ -156,6 +162,11 @@ impl DittoKernel {
             sort: agent_run
                 .as_ref()
                 .and_then(|metadata| metadata.sort.clone()),
+            fetch: if agent_run.is_some() && self.inner.web_fetch.is_some() {
+                super::fetch::grant(&text)
+            } else {
+                Vec::new()
+            },
         };
         if self.task_is_completed(&scope.session_id, &scope.task_id)? {
             return Err(KernelError::InvalidCommand(format!(
@@ -440,8 +451,25 @@ impl DittoKernel {
             ));
         }
 
+        // An unavailable or altered web.fetch package withdraws the tool
+        // instead of failing the turn; the epoch is sized after the decision.
+        let fetch_manifest = if run.scope.fetch.is_empty() {
+            None
+        } else {
+            self.inner
+                .capabilities
+                .page_manifest(ditto_web_fetch::ID)
+                .ok()
+                .flatten()
+                .filter(ditto_web_fetch::validate_manifest)
+        };
+        if fetch_manifest.is_none() {
+            run.scope.fetch.clear();
+        }
         let deriver = ArtifactReadDeriver::default();
-        let mut live_epoch = LiveExecutionEpoch::new(if run.scope.sort.is_some() { 2 } else { 1 });
+        let mut live_epoch = LiveExecutionEpoch::new(
+            1 + usize::from(run.scope.sort.is_some()) + usize::from(fetch_manifest.is_some()),
+        );
         let paged = live_epoch
             .page_in_invocable(&manifest, &schema, deriver.revision().clone())
             .map_err(|error| {
@@ -514,6 +542,17 @@ impl DittoKernel {
         } else {
             None
         };
+        if let Some(manifest) = &fetch_manifest {
+            live_epoch
+                .page_in_invocable(
+                    manifest,
+                    &ditto_web_fetch::schema(),
+                    ditto_web_fetch::FetchDeriver::default().revision().clone(),
+                )
+                .map_err(|_| {
+                    TurnRunError::Internal("fetch capability could not enter the live epoch")
+                })?;
+        }
         let authorization_ticket = live_epoch.seal_for_authorization().map_err(|error| {
             self.fail_with(
                 run,
@@ -543,6 +582,9 @@ impl DittoKernel {
         if run.scope.sort.is_some() {
             schemas.push(ditto_artifact_sort::schema());
         }
+        if fetch_manifest.is_some() {
+            schemas.push(ditto_web_fetch::schema());
+        }
         self.append_turn_event(
             run,
             EventActor::System,
@@ -552,6 +594,7 @@ impl DittoKernel {
                 turn_id: run.scope.turn_id.clone(),
                 manifest,
                 sort_manifest,
+                fetch_manifest,
                 epoch: live_epoch.evidence().clone(),
                 schemas: schemas.clone(),
             },
@@ -578,6 +621,32 @@ impl DittoKernel {
                     .map_err(|_| TurnRunError::Internal("invalid sort lease"))?,
                 )
                 .map_err(|_| TurnRunError::Internal("sort lease registration failed"))?;
+        }
+        if !run.scope.fetch.is_empty() {
+            let resources = run
+                .scope
+                .fetch
+                .iter()
+                .map(|url| {
+                    ditto_capability::CanonicalResource::url(url.clone())
+                        .map(ditto_policy::ResourceScope::Exact)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| TurnRunError::Internal("invalid fetch grant"))?;
+            authorizer
+                .register_lease(
+                    ditto_policy::CapabilityLease::new(
+                        "agent-fetch",
+                        run.deadline,
+                        ditto_web_fetch::effect(),
+                        super::fetch::call_budget(&run.scope.fetch),
+                        BTreeSet::from([ditto_web_fetch::ID.into()]),
+                        resources,
+                        ditto_policy::ApprovalRequirement::Never,
+                    )
+                    .map_err(|_| TurnRunError::Internal("invalid fetch lease"))?,
+                )
+                .map_err(|_| TurnRunError::Internal("fetch lease registration failed"))?;
         }
 
         Ok(TurnTools {
@@ -1001,7 +1070,25 @@ impl DittoKernel {
             index,
             Some(call.call_id.clone()),
         )?;
-        let (value, is_error) = if call.capability_id == ditto_artifact_sort::ID {
+        let (value, is_error) = if call.capability_id == ditto_web_fetch::ID {
+            let binding = tools
+                .live_epoch
+                .invocable_binding(ditto_web_fetch::ID)
+                .ok_or(TurnRunError::Internal("missing fetch binding"))?;
+            let result = self
+                .run_fetch_tool(
+                    &mut run.scope,
+                    &mut run.cause,
+                    request_index as u8,
+                    &call,
+                    binding,
+                    &tools.authorizer,
+                    run.cancellation.clone(),
+                    run.deadline,
+                )
+                .await?;
+            (result.model_value(), result.is_error())
+        } else if call.capability_id == ditto_artifact_sort::ID {
             let binding = tools
                 .live_epoch
                 .invocable_binding(ditto_artifact_sort::ID)
@@ -1313,6 +1400,7 @@ impl DittoKernel {
     ) -> Result<(), TurnRunError> {
         if capability_id == ARTIFACT_READ_ID
             || (run.scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+            || (!run.scope.fetch.is_empty() && capability_id == ditto_web_fetch::ID)
         {
             return Ok(());
         }

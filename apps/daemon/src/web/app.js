@@ -551,9 +551,10 @@ async function inspect(taskId) {
     section(t('excluded'), [...excluded].map(([reason, count]) => [`${t(reason)}: ${count}`]));
     section(t('history'), (context.payload.history_turn_ids || []).map((turn) => [userTextByTurn.get(turn) || t('earlier')]));
   }
+  const toolKinds = { 'capability.requested': null, 'agent.fetch.requested': 'web.fetch', 'agent.sort.requested': 'artifact.sort' };
   const tools = events
-    .filter((event) => event.kind === 'capability.requested')
-    .map((event) => [event.payload.capability_id, JSON.stringify(event.payload.arguments)]);
+    .filter((event) => event.kind in toolKinds)
+    .map((event) => [toolKinds[event.kind] || event.payload.capability_id, JSON.stringify(event.payload.arguments)]);
   section(t('tools'), tools);
   const requests = events.filter((event) => event.kind === 'model.requested').length;
   const terminal = events.find((event) => event.kind === 'turn.finished' || event.kind === 'turn.failed');

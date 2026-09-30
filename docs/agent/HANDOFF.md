@@ -22,9 +22,9 @@ and checks establish a new fact.
   [Task 017](tasks/017-evaluation-outcomes.md) draft, raw-report and handoff
   trimming, the turn-loop split and Task 016.1; `dev/task-018-conversation-threads`
   stacks Task 018 on it, and `dev/task-019-openai-compatible`,
-  `dev/task-020-web-app`, `dev/task-021-telegram` and
-  `dev/task-022-assistant-instructions` stack Tasks 019–022. Nothing is
-  pushed.
+  `dev/task-020-web-app`, `dev/task-021-telegram`,
+  `dev/task-022-assistant-instructions` and `dev/task-023-web-fetch` stack
+  Tasks 019–023. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made.
@@ -67,6 +67,10 @@ and checks establish a new fact.
   cross-session memory or production semantic retrieval.
   The separate V2 joint working-set query is lexical in production with an
   injected embedding seam for tests.
+- **Web links.** `ditto-web-fetch` (ADR 0027) reads pages linked in the user's
+  own message: exact-URL leases, public addresses only with pinned
+  connections, manual redirects, size and time bounds, text extraction and
+  journaled `agent.fetch.*` evidence replayed without network I/O.
 - **Capabilities.** Generated package headers keep full manifests out of
   startup and search; a selected manifest is paged after digest and projection
   checks. Live invocation uses the closed Invocation Schema Profile V1 through a
@@ -115,28 +119,29 @@ and checks establish a new fact.
   capsules from the complete-set rule. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 022
+## Latest verified slice: Task 023
 
-- [Contract and evidence](tasks/022-assistant-instructions.md). Version-4
-  requests carry assistant instructions and a time segment that the test
-  recomputes from the recorded offset and input time. Replay rejects forged,
-  out-of-range or missing offsets, altered time text and mixed legacy or
-  version-4 forms. The legacy wording is pinned verbatim. A built-CLI
-  `ditto chat` scenario (new, in the gate) saved a memory mid-chat that reached
-  the next request, kept the thread and reset it on `/new`.
-- The canonical gate passed on the final tree (1 min 46 s with warm caches,
-  pinned Rust 1.88.0): 532 Rust tests (525 workspace including doctests,
+- [Contract and evidence](tasks/023-web-fetch.md). The crate tests cover
+  address classes, extraction, URL grants, compile-path derivation, redirects,
+  bounds, timeouts and cancellation. The production policy refused six
+  private targets without a connection. Kernel tests fetched a granted link
+  once and replayed it without network I/O, rejecting four forgeries. They
+  also denied an unlisted URL without contact, enforced the call budget,
+  offered no tool without links or when disabled, and blocked a private link.
+  A real fetch of `https://example.com/` through the built daemon returned
+  "Example Domain"; a loopback link returned `blocked_address`.
+- The canonical gate passed on the final tree (1 min 49 s with warm caches,
+  pinned Rust 1.88.0): 544 Rust tests (537 workspace including doctests,
   seven built-CLI scenarios), 8 baseline and 21 quality Python tests, 12 web
-  renderer cases and both smokes; the staged tree hash was identical before
-  and after. An earlier run failed because the corpus harness pinned version
-  3; that is fixed.
-- Not run: an answer-quality comparison with a real model.
+  renderer cases and both smokes; the tree hash was identical before and
+  after. An earlier run hit the corpus harness's 20 s CLI bound under a load
+  average of 8.7 on the shared machine and passed on rerun.
 
-## Previous slice: Task 021
+## Previous slice: Task 022
 
-- [Contract and evidence](tasks/021-telegram-gateway.md): Telegram gateway
-  with streamed drafts, stop and scheduled delivery (ADR 0025). Its gate
-  passed on its final tree (530 Rust tests); no real Telegram bot was run.
+- [Contract and evidence](tasks/022-assistant-instructions.md): assistant
+  instructions and local time, turn payload version 4 (ADR 0026). Its gate
+  passed on its final tree (532 Rust tests).
 
 ## Known gaps
 
@@ -147,6 +152,9 @@ and checks establish a new fact.
 - The Telegram gateway keeps pending replies in memory: a gateway restart
   during an answer loses that reply unless Telegram redelivers the update.
   Only text messages are handled.
+- `web.fetch` decodes bodies as UTF-8 and runs no JavaScript, so pages in
+  legacy charsets or rendered by scripts yield garbled or little text. Web
+  search waits for per-call approval.
 
 - Answer quality and tool-use reliability with local or hosted
   OpenAI-compatible models are unmeasured; tools need a model with function
