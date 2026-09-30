@@ -9,8 +9,8 @@ Run the canonical gate from the repository root:
 The script checks tracked-artifact, raw-report, tracked-file-size (1 MiB),
 developer-path, and credential-shaped canaries before formatting, strict
 Clippy, workspace tests, and required agent control files. It also runs the
-six actual-CLI fixture scenarios (including the Telegram gateway against a mock
-Bot API), baseline accounting regressions and
+seven actual-CLI fixture scenarios (including `ditto chat` and the Telegram
+gateway against a mock Bot API), baseline accounting regressions and
 a small offline baseline scenario (two repeated requests per server), plus
 context-assessment/process regressions and a five-case offline corpus smoke
 (zero versus twelve unrelated memories, two repetitions per query: ten runs per

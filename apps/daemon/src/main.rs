@@ -29,12 +29,12 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_REPLAY_PAGE_SIZE: usize = 500;
 #[cfg(test)]
 mod baseline;
+#[cfg(test)]
+mod client_tests;
 mod memory;
 mod runs;
 mod schedules;
 mod sorts;
-#[cfg(test)]
-mod telegram_tests;
 mod web;
 
 #[derive(Debug, Parser)]

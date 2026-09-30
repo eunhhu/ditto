@@ -22,8 +22,9 @@ and checks establish a new fact.
   [Task 017](tasks/017-evaluation-outcomes.md) draft, raw-report and handoff
   trimming, the turn-loop split and Task 016.1; `dev/task-018-conversation-threads`
   stacks Task 018 on it, and `dev/task-019-openai-compatible`,
-  `dev/task-020-web-app` and `dev/task-021-telegram` stack Tasks 019–021.
-  Nothing is pushed.
+  `dev/task-020-web-app`, `dev/task-021-telegram` and
+  `dev/task-022-assistant-instructions` stack Tasks 019–022. Nothing is
+  pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made.
@@ -89,8 +90,11 @@ and checks establish a new fact.
   (since version 2) and, for agent runs, the current conversation thread's
   newest finished exchanges (at most eight, 24 KiB) as native messages, with
   their turn IDs recorded and recomputed on replay (ADR 0022). Older versions
-  replay under their original rules; a turn never mixes versions. `ditto chat`
-  is an interactive client; `ditto new` starts a thread. Answers stay `unverified`; model runs never emit
+  replay under their original rules; a turn never mixes versions. Version 4
+  (ADR 0026) replaces the harness-facing system instructions with
+  personal-assistant instructions and the local time of acceptance, fixed by a
+  recorded UTC offset. `ditto chat` is an interactive client with `/new` and
+  `/remember`; `ditto new` starts a thread. Answers stay `unverified`; model runs never emit
   `task.completed`. The loop
   is split into stage functions (context, capability selection, request
   dispatch, stream admission, tool execution, finish); cancellation/deadline
@@ -111,32 +115,28 @@ and checks establish a new fact.
   capsules from the complete-set rule. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 021
+## Latest verified slice: Task 022
 
-- [Contract and evidence](tasks/021-telegram-gateway.md). The built gateway,
-  run against a mock Bot API and the real daemon router and scheduler, did
-  the following:
-  - answered an allowed chat through a stop-button draft and ignored a
-    stranger and a group chat;
-  - handled `/new` (in Korean) and `/remember`, and cancelled from the stop
-    button;
-  - delivered a scheduled result but not another client's run;
-  - after a restart, neither called the model for a redelivered message nor
-    re-sent the scheduled result;
-  - never exposed the token.
-  Disabling the allowlist or the scheduled-only condition made it fail.
-- The canonical gate passed on the final tree (3 min 58 s, pinned Rust
-  1.88.0): 530 Rust tests (524 workspace including doctests, six built-CLI
-  scenarios including the Telegram gateway), 8 baseline and 21 quality Python
-  tests, 12 web renderer cases and both smokes; the staged tree hash was
-  identical before and after.
-- Not run: a real Telegram bot (needs the user's token).
+- [Contract and evidence](tasks/022-assistant-instructions.md). Version-4
+  requests carry assistant instructions and a time segment that the test
+  recomputes from the recorded offset and input time. Replay rejects forged,
+  out-of-range or missing offsets, altered time text and mixed legacy or
+  version-4 forms. The legacy wording is pinned verbatim. A built-CLI
+  `ditto chat` scenario (new, in the gate) saved a memory mid-chat that reached
+  the next request, kept the thread and reset it on `/new`.
+- The canonical gate passed on the final tree (1 min 46 s with warm caches,
+  pinned Rust 1.88.0): 532 Rust tests (525 workspace including doctests,
+  seven built-CLI scenarios), 8 baseline and 21 quality Python tests, 12 web
+  renderer cases and both smokes; the staged tree hash was identical before
+  and after. An earlier run failed because the corpus harness pinned version
+  3; that is fixed.
+- Not run: an answer-quality comparison with a real model.
 
-## Previous slice: Task 020
+## Previous slice: Task 021
 
-- [Contract and evidence](tasks/020-local-web-app.md): local web app,
-  conversation view and loopback host guard (ADR 0024). Its gate passed on its
-  final tree (521 Rust tests), and a browser run passed 26 of 26 checks.
+- [Contract and evidence](tasks/021-telegram-gateway.md): Telegram gateway
+  with streamed drafts, stop and scheduled delivery (ADR 0025). Its gate
+  passed on its final tree (530 Rust tests); no real Telegram bot was run.
 
 ## Known gaps
 

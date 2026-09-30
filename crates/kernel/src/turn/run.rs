@@ -19,7 +19,7 @@ use ditto_model::{
     CancellationId, CancellationToken, ContentPart, ConversationItem, ExecutionEpochId,
     FeatureRequest, FinishReason, GenerationControls, ModelContractError, ModelDriver, ModelEvent,
     ModelFeature, ModelRequest, ModelRequestId, ModelTurn, OutputConstraint, ParallelToolCalls,
-    ProviderCallId, RequestControl, ToolCallBuffer, ToolChoice, ToolUsePolicy,
+    ProviderCallId, RequestControl, StableSystemPrefix, ToolCallBuffer, ToolChoice, ToolUsePolicy,
 };
 use ditto_policy::{AuthorizationOutcome, InvocationAuthorizer, PolicyError, StaticPolicy};
 use ditto_protocol::{
@@ -37,8 +37,8 @@ use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text
 
 use super::shared::{
     Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, ThreadExchange, agent_run_text,
-    append_assistant_text, bounded_turn_failure_message, history_messages, select_history,
-    stable_system_prefix, turn_failure_code_for_model,
+    append_assistant_text, bounded_turn_failure_message, history_messages,
+    local_utc_offset_minutes, select_history, system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnStatus, CapabilitiesSelectedPayload,
@@ -88,6 +88,8 @@ struct TurnRun<'d> {
     deadline: DateTime<Utc>,
     cancellation: CancellationToken,
     driver: &'d dyn ModelDriver,
+    /// System instructions, fixed when the context is compiled.
+    system_prefix: StableSystemPrefix,
 }
 
 /// The sealed execution epoch and the authority derived from it.
@@ -215,6 +217,7 @@ impl DittoKernel {
             deadline,
             cancellation,
             driver,
+            system_prefix: StableSystemPrefix::default(),
         };
 
         self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
@@ -298,6 +301,13 @@ impl DittoKernel {
         } else {
             Vec::new()
         };
+        let utc_offset_minutes = local_utc_offset_minutes(run.accepted_at);
+        run.system_prefix = system_prefix(
+            TURN_PAYLOAD_VERSION,
+            run.accepted_at,
+            Some(utc_offset_minutes),
+        )
+        .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
         self.append_turn_event(
             run,
             EventActor::System,
@@ -312,6 +322,7 @@ impl DittoKernel {
                     .iter()
                     .map(|exchange| exchange.turn_id.clone())
                     .collect(),
+                utc_offset_minutes: Some(utc_offset_minutes),
             },
             None,
         )?;
@@ -647,13 +658,12 @@ impl DittoKernel {
     ) -> Result<(ModelRequest, DateTime<Utc>), TurnRunError> {
         let index = Some(request_index as u8);
         let request = build_model_request(
-            &run.scope,
+            run,
             request_index,
             tools.execution_epoch_id.clone(),
             capsule.clone(),
             tools.schemas.clone(),
             conversation.to_vec(),
-            run.deadline,
         )
         .map_err(|error| self.fail(run, TurnFailureCode::DriverContract, error, index, None))?;
         if let Err(error) = request.validate_at(run.accepted_at) {
@@ -1706,14 +1716,14 @@ fn artifact_read_argument_error(arguments: &Value) -> ArtifactReadError {
 }
 
 fn build_model_request(
-    scope: &TurnScope,
+    run: &TurnRun<'_>,
     request_index: usize,
     execution_epoch_id: ExecutionEpochId,
     context: ContextCapsule,
     tools: Vec<CapabilitySchema>,
     conversation: Vec<ConversationItem>,
-    deadline: DateTime<Utc>,
 ) -> Result<ModelRequest, String> {
+    let (scope, deadline) = (&run.scope, run.deadline);
     let request_id = ModelRequestId::new(format!("model_request_{}", Ulid::new()))
         .map_err(|error| error.to_string())?;
     let cancellation_id =
@@ -1725,7 +1735,7 @@ fn build_model_request(
     let mut request = ModelRequest::new(
         request_id,
         execution_epoch_id,
-        stable_system_prefix(),
+        run.system_prefix.clone(),
         ModelTurn {
             conversation,
             context,

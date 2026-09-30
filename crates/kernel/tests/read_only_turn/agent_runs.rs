@@ -743,24 +743,119 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
     replay_artifact_read_turn(&events, &status.turn_id).unwrap();
 
     // An empty capsule means the same under both selection contracts, so the
-    // same transcript relabeled as version 1 replays through the legacy rules.
-    let relabel = |version: u16, only_first: bool| {
+    // same transcript relabeled as version 1 replays through the legacy rules
+    // once its version-4 instructions and offset are restored to the frozen
+    // legacy form.
+    let relabel = |version: u16, only_first: bool, legacy: bool| {
         let mut relabeled = events.clone();
         for event in relabeled.iter_mut().filter(|event| versioned(event)) {
             event.payload["event_version"] = json!(version);
+            if legacy {
+                if let Some(payload) = event.payload.as_object_mut() {
+                    payload.remove("utc_offset_minutes");
+                }
+                if event.kind == event_kind::MODEL_REQUESTED {
+                    event.payload["request"]["stable_system_prefix"]["segments"] =
+                        json!(LEGACY_INSTRUCTIONS);
+                }
+            }
             if only_first {
                 break;
             }
         }
         relabeled
     };
-    replay_artifact_read_turn(&relabel(1, false), &status.turn_id).unwrap();
-    assert!(replay_artifact_read_turn(&relabel(1, true), &status.turn_id).is_err());
-    // No history exists, so version 2 also replays; unknown versions never do.
-    replay_artifact_read_turn(&relabel(2, false), &status.turn_id).unwrap();
+    replay_artifact_read_turn(&relabel(1, false, true), &status.turn_id).unwrap();
+    assert!(replay_artifact_read_turn(&relabel(1, true, true), &status.turn_id).is_err());
+    // No history exists, so versions 2 and 3 also replay; unknown versions,
+    // and older versions carrying version-4 instructions, never do.
+    replay_artifact_read_turn(&relabel(2, false, true), &status.turn_id).unwrap();
+    replay_artifact_read_turn(&relabel(3, false, true), &status.turn_id).unwrap();
+    assert!(replay_artifact_read_turn(&relabel(3, false, false), &status.turn_id).is_err());
+    assert!(replay_artifact_read_turn(&relabel(4, false, true), &status.turn_id).is_err());
     let future = ditto_kernel::turn::TURN_PAYLOAD_VERSION + 1;
-    assert!(replay_artifact_read_turn(&relabel(future, false), &status.turn_id).is_err());
-    assert!(replay_artifact_read_turn(&relabel(0, false), &status.turn_id).is_err());
+    assert!(replay_artifact_read_turn(&relabel(future, false, false), &status.turn_id).is_err());
+    assert!(replay_artifact_read_turn(&relabel(0, false, true), &status.turn_id).is_err());
+}
+
+/// The frozen system instructions of turn payload versions 1 to 3.
+const LEGACY_INSTRUCTIONS: [&str; 2] = [
+    "You are Ditto's model strategy component. The harness owns context, capability authority, effects, persistence, and verification.",
+    "Use only the complete capability schemas supplied for this execution epoch. A model terminal is not verified task completion.",
+];
+
+#[tokio::test]
+async fn assistant_instructions_state_the_local_time_of_acceptance_and_replay() {
+    let fixture = Fixture::new();
+    let (status, driver) = ask(
+        &fixture.kernel,
+        "personal",
+        "What day is it?",
+        final_script(&["Wednesday."]),
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified);
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+    let events = fixture.events_for_session("personal");
+    let input = events
+        .iter()
+        .find(|event| {
+            event.kind == event_kind::INPUT_RECEIVED
+                && event.correlation_id.as_deref() == Some(status.turn_id.as_str())
+        })
+        .unwrap();
+    let context = events
+        .iter()
+        .position(|event| {
+            event.kind == event_kind::CONTEXT_COMPILED
+                && event.correlation_id.as_deref() == Some(status.turn_id.as_str())
+        })
+        .unwrap();
+    let offset = events[context].payload["utc_offset_minutes"]
+        .as_i64()
+        .unwrap() as i32;
+    let local = input
+        .recorded_at
+        .with_timezone(&chrono::FixedOffset::east_opt(offset * 60).unwrap());
+    let expected_time = format!(
+        "Current local time: {} (UTC{}{:02}:{:02}).",
+        local.format("%A, %-d %B %Y, %H:%M"),
+        if offset < 0 { '-' } else { '+' },
+        offset.abs() / 60,
+        offset.abs() % 60
+    );
+    let segments = &driver.requests()[0].stable_system_prefix.segments;
+    assert_eq!(segments.len(), 4);
+    assert!(segments[0].starts_with("You are Ditto, a personal assistant"));
+    assert!(segments[2].contains("/remember"));
+    assert_eq!(segments[3], expected_time);
+    replay_artifact_read_turn(&events, &status.turn_id).unwrap();
+
+    // The stated time must follow from the recorded offset and input time.
+    let request = events
+        .iter()
+        .position(|event| {
+            event.kind == event_kind::MODEL_REQUESTED
+                && event.correlation_id.as_deref() == Some(status.turn_id.as_str())
+        })
+        .unwrap();
+    let mut forged = events.clone();
+    forged[context].payload["utc_offset_minutes"] = json!(offset + 60);
+    assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
+    let mut forged = events.clone();
+    forged[context].payload["utc_offset_minutes"] = json!(15 * 60);
+    assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
+    let mut forged = events.clone();
+    forged[context]
+        .payload
+        .as_object_mut()
+        .unwrap()
+        .remove("utc_offset_minutes");
+    assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
+    let mut forged = events.clone();
+    forged[request].payload["request"]["stable_system_prefix"]["segments"][3] =
+        json!("Current local time: Monday, 1 January 2001, 00:00 (UTC+00:00).");
+    assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
 }
 
 fn message_texts(request: &ModelRequest) -> Vec<(String, String)> {

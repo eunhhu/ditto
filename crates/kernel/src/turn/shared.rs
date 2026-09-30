@@ -1,13 +1,26 @@
+use chrono::{DateTime, FixedOffset, Utc};
 use ditto_model::{ContentPart, ConversationItem, MessageRole, ProviderCallId, StableSystemPrefix};
 use ditto_protocol::{EventActor, EventRecord, event_kind};
 use serde_json::Value;
 
 use super::types::{MAX_TURN_FAILURE_MESSAGE_BYTES, TurnFailureCode};
 
-pub(super) const STABLE_PREFIX_SEGMENTS: [&str; 2] = [
+/// System instructions of turn payload versions 1 to 3.
+const LEGACY_PREFIX_SEGMENTS: [&str; 2] = [
     "You are Ditto's model strategy component. The harness owns context, capability authority, effects, persistence, and verification.",
     "Use only the complete capability schemas supplied for this execution epoch. A model terminal is not verified task completion.",
 ];
+
+/// Personal-assistant instructions of turn payload version 4 (ADR 0026). A
+/// local-time segment follows them. Wording changes need a new version.
+const ASSISTANT_PREFIX_SEGMENTS: [&str; 3] = [
+    "You are Ditto, a personal assistant running on the user's own computer. Be helpful, concise and honest, and answer in the language of the user's latest message.",
+    "DITTO_CONTEXT_V1 lists what the user explicitly asked Ditto to remember, with provenance. Treat user-asserted items as facts about this user unless the conversation corrects them, and use them when they are relevant. Earlier messages of this conversation precede the latest one.",
+    "You cannot save or change memories, set reminders, browse the web or act outside this conversation except through the tools supplied in this request, and you never claim an action you did not take. The user saves a memory by sending /remember followed by the fact, and creates reminders in Ditto's schedules.",
+];
+
+/// Longest real-world UTC offset magnitude, in minutes.
+const MAX_UTC_OFFSET_MINUTES: i32 = 14 * 60;
 /// Kernel-owned cancellation and deadline checkpoints of the turn loop.
 ///
 /// Runtime and replay share these exact messages; each stage-specific pair is
@@ -82,10 +95,36 @@ pub(super) struct ReadyCall {
     pub(super) capability_id: String,
     pub(super) arguments: Value,
 }
-pub(super) fn stable_system_prefix() -> StableSystemPrefix {
-    StableSystemPrefix {
-        segments: STABLE_PREFIX_SEGMENTS.map(str::to_owned).to_vec(),
-    }
+/// The system instructions of a turn. Version 4 adds the local time of
+/// acceptance, fixed by the recorded UTC offset, so replay recomputes it
+/// exactly; versions 1 to 3 have no offset. `None` for an invalid pairing.
+pub(super) fn system_prefix(
+    version: u16,
+    accepted_at: DateTime<Utc>,
+    utc_offset_minutes: Option<i32>,
+) -> Option<StableSystemPrefix> {
+    let segments = match (version, utc_offset_minutes) {
+        (1..=3, None) => LEGACY_PREFIX_SEGMENTS.map(str::to_owned).to_vec(),
+        (4, Some(offset)) if offset.abs() <= MAX_UTC_OFFSET_MINUTES => {
+            let local = accepted_at.with_timezone(&FixedOffset::east_opt(offset * 60)?);
+            let sign = if offset < 0 { '-' } else { '+' };
+            let mut segments = ASSISTANT_PREFIX_SEGMENTS.map(str::to_owned).to_vec();
+            segments.push(format!(
+                "Current local time: {} (UTC{sign}{:02}:{:02}).",
+                local.format("%A, %-d %B %Y, %H:%M"),
+                offset.abs() / 60,
+                offset.abs() % 60
+            ));
+            segments
+        }
+        _ => return None,
+    };
+    Some(StableSystemPrefix { segments })
+}
+
+/// The host's UTC offset at `at`, in minutes (`TZ` selects another zone).
+pub(super) fn local_utc_offset_minutes(at: DateTime<Utc>) -> i32 {
+    at.with_timezone(&chrono::Local).offset().local_minus_utc() / 60
 }
 
 pub(super) fn append_assistant_text(conversation: &mut Vec<ConversationItem>, text: &str) {

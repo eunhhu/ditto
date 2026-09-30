@@ -1,5 +1,6 @@
-//! The built `ditto telegram` gateway against a mock Bot API and the real
-//! daemon router, with a deterministic model and the real scheduler.
+//! Built CLI clients (`ditto chat`, `ditto telegram`) against the real daemon
+//! router with a deterministic model; the gateway also meets a mock Bot API
+//! and the real scheduler.
 use std::{
     path::Path,
     sync::{
@@ -30,10 +31,11 @@ const TOKEN: &str = "123456:TEST_ONLY_not_a_real_token";
 const SECRET: &str = "TEST_ONLY_not_a_real_token";
 
 /// Answers `Echo: <question>` in two deltas; a question containing "wait"
-/// never finishes, so only cancellation ends it.
+/// never finishes, so only cancellation ends it. Requests are recorded.
 struct EchoDriver {
     descriptor: DriverDescriptor,
     calls: AtomicUsize,
+    requests: Mutex<Vec<ModelRequest>>,
 }
 
 impl EchoDriver {
@@ -51,6 +53,7 @@ impl EchoDriver {
                     .collect(),
             },
             calls: AtomicUsize::new(0),
+            requests: Mutex::default(),
         }
     }
 }
@@ -62,6 +65,7 @@ impl ModelDriver for EchoDriver {
 
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> ModelEventStream {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(request.clone());
         let question = request
             .turn
             .conversation
@@ -164,7 +168,7 @@ async fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
-fn gateway(api: &str, telegram_api: &str, root: &Path) -> std::process::Child {
+fn built_cli() -> std::path::PathBuf {
     let cli = std::env::current_exe()
         .unwrap()
         .parent()
@@ -173,6 +177,44 @@ fn gateway(api: &str, telegram_api: &str, root: &Path) -> std::process::Child {
         .unwrap()
         .join("ditto");
     assert!(cli.is_file(), "build ditto-cli before this smoke test");
+    cli
+}
+
+/// The real daemon router on loopback with `driver`, plus its scheduler.
+async fn daemon(
+    root: &Path,
+    driver: Arc<dyn ModelDriver>,
+) -> (
+    DittoKernel,
+    String,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    let kernel = DittoKernel::open(KernelConfig::new(
+        root.join("data"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
+    ))
+    .unwrap();
+    let shutdown = CancellationToken::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let app = api_routes(true).with_state(AppState {
+        kernel: kernel.clone(),
+        driver: Some(driver.clone()),
+        shutdown: shutdown.clone(),
+    });
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let scheduler = {
+        let (kernel, shutdown) = (kernel.clone(), shutdown.clone());
+        tokio::spawn(async move {
+            let _ = kernel.run_scheduler(Some(driver), shutdown).await;
+        })
+    };
+    (kernel, api, shutdown, scheduler)
+}
+
+fn gateway(api: &str, telegram_api: &str, root: &Path) -> std::process::Child {
+    let cli = built_cli();
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -202,26 +244,8 @@ fn gateway(api: &str, telegram_api: &str, root: &Path) -> std::process::Child {
 #[ignore = "requires cargo build -p ditto-cli; runs the actual Telegram gateway against a mock Bot API"]
 async fn built_cli_telegram_gateway_relays_allowed_chats_and_scheduled_results() {
     let root = tempfile::tempdir().unwrap();
-    let kernel = DittoKernel::open(KernelConfig::new(
-        root.path().join("data"),
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
-    ))
-    .unwrap();
     let echo = Arc::new(EchoDriver::new());
-    let driver: Arc<dyn ModelDriver> = echo.clone();
-    let shutdown = CancellationToken::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let api = format!("http://{}", listener.local_addr().unwrap());
-    let app = api_routes(true).with_state(AppState {
-        kernel: kernel.clone(),
-        driver: Some(driver.clone()),
-        shutdown: shutdown.clone(),
-    });
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let scheduler = {
-        let (kernel, driver, shutdown) = (kernel.clone(), driver.clone(), shutdown.clone());
-        tokio::spawn(async move { kernel.run_scheduler(Some(driver), shutdown).await })
-    };
+    let (kernel, api, shutdown, scheduler) = daemon(root.path(), echo.clone()).await;
 
     let telegram = Arc::new(Telegram::default());
     let mock = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -417,6 +441,70 @@ async fn built_cli_telegram_gateway_relays_allowed_chats_and_scheduled_results()
     .unwrap();
     assert!(!events.contains(SECRET));
     assert!(!events.contains("intruder") && !events.contains("group hello"));
+    shutdown.cancel();
+    kernel.shutdown_agent_runs().await.unwrap();
+    let _ = scheduler.await;
+}
+
+#[tokio::test]
+#[ignore = "requires cargo build -p ditto-cli; runs the actual ditto chat"]
+async fn built_cli_chat_threads_remembers_and_resets() {
+    let root = tempfile::tempdir().unwrap();
+    let echo = Arc::new(EchoDriver::new());
+    let (kernel, api, shutdown, scheduler) = daemon(root.path(), echo.clone()).await;
+    let input = "hello\n/remember I like green tea\nsecond\n/new\nthird\n/exit\n";
+    let output = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut child = std::process::Command::new(built_cli())
+            .args(["--api", &api, "chat"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    for expected in [
+        "ditto> Echo: hello",
+        "-- saved to memory --",
+        "ditto> Echo: second",
+        "-- new conversation --",
+        "ditto> Echo: third",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "{expected} missing from {stdout}"
+        );
+    }
+
+    // The follow-up carried the first exchange; after /new only the question.
+    let conversation = |index: usize| echo.requests.lock().unwrap()[index].turn.conversation.len();
+    assert_eq!(echo.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        (conversation(0), conversation(1), conversation(2)),
+        (1, 3, 1)
+    );
+    // The memory saved mid-chat reached the next request's context.
+    let context = serde_json::to_string(&echo.requests.lock().unwrap()[1].turn.context).unwrap();
+    assert!(context.contains("I like green tea"));
+    let memories = kernel
+        .list_memories(MemoryQuery {
+            session_id: "personal".into(),
+            after_id: None,
+            limit: None,
+        })
+        .unwrap();
+    assert_eq!(memories.memories.len(), 1);
     shutdown.cancel();
     kernel.shutdown_agent_runs().await.unwrap();
     let _ = scheduler.await;

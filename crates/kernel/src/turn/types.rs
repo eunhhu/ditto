@@ -15,7 +15,7 @@ use crate::KernelError;
 /// context with the complete-set selection (ADR 0021) and records a typed
 /// [`TurnFailureReason`] for validator-derived failures. Version 3 prepends the
 /// current conversation thread's recent exchanges to agent runs (ADR 0022).
-pub const TURN_PAYLOAD_VERSION: u16 = 3;
+pub const TURN_PAYLOAD_VERSION: u16 = 4;
 /// Oldest turn contract that replay and run status still read. Version-1
 /// turns use positive-overlap context selection and message grammar.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -37,6 +37,10 @@ pub struct ContextCompiledPayload {
     /// Version 3: prior turns replayed as conversation history, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history_turn_ids: Vec<String>,
+    /// Version 4: the host's UTC offset at acceptance, in minutes, which fixes
+    /// the local time stated in the system instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub utc_offset_minutes: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
