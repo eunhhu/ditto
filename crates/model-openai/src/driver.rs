@@ -12,8 +12,8 @@ use futures_util::StreamExt;
 
 use crate::{
     OPENAI_CONTINUATION_FORMAT, OPENAI_GPT_5_6_DRIVER_ID, OPENAI_PROVIDER, OpenAiApiKey,
-    OpenAiConfigError, OpenAiReqwestTransport, OpenAiTransport, OpenAiTransportConfig,
-    OpenAiTransportError, OpenAiTransportErrorKind,
+    OpenAiConfigError, OpenAiHttpRequest, OpenAiReqwestTransport, OpenAiTransport,
+    OpenAiTransportConfig, OpenAiTransportError, OpenAiTransportErrorKind,
     compile::{CompileError, compile_request},
     sse::{ResponseMapper, SseDecoder, SseEvent},
 };
@@ -154,132 +154,180 @@ impl ModelDriver for OpenAiResponsesDriver {
     }
 
     fn stream(&self, request: ModelRequest, cancellation: CancellationToken) -> ModelEventStream {
-        let descriptor = self.descriptor.clone();
-        let transport = Arc::clone(&self.transport);
         let storage = self.storage;
-        let retry = self.retry;
-        let raw = stream! {
-            if cancellation.is_cancelled() {
-                yield control_failure(FailureKind::Cancelled, "model request was cancelled before transport");
+        provider_stream(
+            self.descriptor.clone(),
+            Arc::clone(&self.transport),
+            self.retry,
+            request,
+            cancellation,
+            move |request| {
+                let usage_required = request.features.required.contains(&ModelFeature::Usage);
+                let compiled = compile_request(request, storage).map_err(compile_failure)?;
+                let mapper = ResponseMapper::new(
+                    compiled.reverse_names,
+                    compiled.output_mode,
+                    storage,
+                    usage_required,
+                    compiled.previous_response_id,
+                );
+                Ok((compiled.http, mapper))
+            },
+        )
+    }
+}
+
+/// Maps one provider's decoded SSE events onto provider-neutral model events.
+pub(crate) trait EventMapper: Send {
+    fn map(&mut self, event: SseEvent) -> Result<Vec<ModelEvent>, ModelFailure>;
+    /// Events owed when the body ends: a terminal unless one was emitted.
+    fn finish(&mut self) -> Vec<ModelEvent>;
+}
+
+impl EventMapper for ResponseMapper {
+    fn map(&mut self, event: SseEvent) -> Result<Vec<ModelEvent>, ModelFailure> {
+        ResponseMapper::map(self, event)
+    }
+
+    fn finish(&mut self) -> Vec<ModelEvent> {
+        if self.is_terminal() {
+            Vec::new()
+        } else {
+            vec![ModelEvent::Failed {
+                failure: self.eof_failure(),
+            }]
+        }
+    }
+}
+
+/// The request lifecycle shared by every OpenAI-shaped driver: control checks,
+/// request and descriptor validation, compilation, bounded pre-response retry,
+/// and cancellation/deadline-controlled SSE streaming. Nothing is retried after
+/// response headers are accepted.
+pub(crate) fn provider_stream<M, C>(
+    descriptor: DriverDescriptor,
+    transport: Arc<dyn OpenAiTransport>,
+    retry: OpenAiRetryPolicy,
+    request: ModelRequest,
+    cancellation: CancellationToken,
+    compile: C,
+) -> ModelEventStream
+where
+    M: EventMapper + 'static,
+    C: FnOnce(&ModelRequest) -> Result<(OpenAiHttpRequest, M), ModelEvent> + Send + 'static,
+{
+    let raw = stream! {
+        if cancellation.is_cancelled() {
+            yield control_failure(FailureKind::Cancelled, "model request was cancelled before transport");
+            return;
+        }
+        if deadline_expired(request.control.deadline) {
+            yield control_failure(FailureKind::DeadlineExceeded, "model request deadline elapsed before transport");
+            return;
+        }
+        if let Err(error) = request.validate() {
+            yield ModelEvent::Failed {
+                failure: ModelFailure::new(FailureKind::Protocol, error.to_string()),
+            };
+            return;
+        }
+        if let Err(error) = request.validate_against(&descriptor) {
+            yield ModelEvent::Failed {
+                failure: ModelFailure::new(FailureKind::UnsupportedFeature, error.to_string()),
+            };
+            return;
+        }
+        let (http, mut mapper) = match compile(&request) {
+            Ok(compiled) => compiled,
+            Err(failure) => {
+                yield failure;
                 return;
             }
-            if deadline_expired(request.control.deadline) {
-                yield control_failure(FailureKind::DeadlineExceeded, "model request deadline elapsed before transport");
-                return;
-            }
-            if let Err(error) = request.validate() {
-                yield ModelEvent::Failed {
-                    failure: ModelFailure::new(FailureKind::Protocol, error.to_string()),
-                };
-                return;
-            }
-            if let Err(error) = request.validate_against(&descriptor) {
-                yield ModelEvent::Failed {
-                    failure: ModelFailure::new(FailureKind::UnsupportedFeature, error.to_string()),
-                };
-                return;
-            }
-            let usage_required = request.features.required.contains(&ModelFeature::Usage);
-            let compiled = match compile_request(&request, storage) {
-                Ok(compiled) => compiled,
-                Err(error) => {
-                    yield compile_failure(error);
+        };
+        let deadline = request.control.deadline;
+        let mut attempt = 1_u8;
+        let response = loop {
+            let future = transport.send(http.clone());
+            match controlled(future, &cancellation, deadline).await {
+                Controlled::Cancelled => {
+                    yield control_failure(FailureKind::Cancelled, "model request was cancelled during transport handshake");
                     return;
                 }
-            };
-            let deadline = request.control.deadline;
-            let mut attempt = 1_u8;
-            let response = loop {
-                let future = transport.send(compiled.http.clone());
-                match controlled(future, &cancellation, deadline).await {
-                    Controlled::Cancelled => {
-                        yield control_failure(FailureKind::Cancelled, "model request was cancelled during transport handshake");
-                        return;
-                    }
-                    Controlled::Deadline => {
-                        yield control_failure(FailureKind::DeadlineExceeded, "model request deadline elapsed during transport handshake");
-                        return;
-                    }
-                    Controlled::Value(Ok(response)) => break response,
-                    Controlled::Value(Err(error)) => {
-                        if error.is_retryable_before_response() && attempt < retry.max_attempts {
-                            let delay = retry.delay_after(attempt, error.retry_after());
-                            match controlled_sleep(delay, &cancellation, deadline).await {
-                                ControlledSleep::Elapsed => {
-                                    attempt += 1;
-                                    continue;
-                                }
-                                ControlledSleep::Cancelled => {
-                                    yield control_failure(FailureKind::Cancelled, "model request was cancelled during retry backoff");
-                                    return;
-                                }
-                                ControlledSleep::Deadline => {
-                                    yield control_failure(FailureKind::DeadlineExceeded, "model request deadline elapsed during retry backoff");
-                                    return;
-                                }
+                Controlled::Deadline => {
+                    yield control_failure(FailureKind::DeadlineExceeded, "model request deadline elapsed during transport handshake");
+                    return;
+                }
+                Controlled::Value(Ok(response)) => break response,
+                Controlled::Value(Err(error)) => {
+                    if error.is_retryable_before_response() && attempt < retry.max_attempts {
+                        let delay = retry.delay_after(attempt, error.retry_after());
+                        match controlled_sleep(delay, &cancellation, deadline).await {
+                            ControlledSleep::Elapsed => {
+                                attempt += 1;
+                                continue;
+                            }
+                            ControlledSleep::Cancelled => {
+                                yield control_failure(FailureKind::Cancelled, "model request was cancelled during retry backoff");
+                                return;
+                            }
+                            ControlledSleep::Deadline => {
+                                yield control_failure(FailureKind::DeadlineExceeded, "model request deadline elapsed during retry backoff");
+                                return;
                             }
                         }
-                        yield transport_failure(error);
-                        return;
                     }
-                }
-            };
-
-            let mut body = response.into_body();
-            let mut decoder = SseDecoder::default();
-            let mut mapper = ResponseMapper::new(
-                compiled.reverse_names,
-                compiled.output_mode,
-                storage,
-                usage_required,
-                compiled.previous_response_id,
-            );
-            loop {
-                match controlled(body.next(), &cancellation, deadline).await {
-                    Controlled::Cancelled => {
-                        yield control_failure(FailureKind::Cancelled, "model request was cancelled while streaming");
-                        return;
-                    }
-                    Controlled::Deadline => {
-                        yield control_failure(FailureKind::DeadlineExceeded, "model request deadline elapsed while streaming");
-                        return;
-                    }
-                    Controlled::Value(Some(Ok(chunk))) => {
-                        let (decoded, decode_failure) = decoder.push_preserving_prefix(&chunk);
-                        let events = map_decoded_batch(&mut mapper, decoded, decode_failure);
-                        let terminal = events.iter().any(ModelEvent::is_terminal);
-                        for event in events {
-                            yield event;
-                        }
-                        if terminal {
-                            return;
-                        }
-                    }
-                    Controlled::Value(Some(Err(error))) => {
-                        // Headers were already accepted. This path is never retried.
-                        yield transport_failure(error);
-                        return;
-                    }
-                    Controlled::Value(None) => {
-                        let (decoded, decode_failure) = decoder.finish_preserving_prefix();
-                        let events = map_decoded_batch(&mut mapper, decoded, decode_failure);
-                        let terminal = events.iter().any(ModelEvent::is_terminal);
-                        for event in events {
-                            yield event;
-                        }
-                        if terminal {
-                            return;
-                        }
-                        if !mapper.is_terminal() {
-                            yield ModelEvent::Failed { failure: mapper.eof_failure() };
-                        }
-                        return;
-                    }
+                    yield transport_failure(error);
+                    return;
                 }
             }
         };
-        ModelEventStream::new(raw)
-    }
+
+        let mut body = response.into_body();
+        let mut decoder = SseDecoder::default();
+        loop {
+            match controlled(body.next(), &cancellation, deadline).await {
+                Controlled::Cancelled => {
+                    yield control_failure(FailureKind::Cancelled, "model request was cancelled while streaming");
+                    return;
+                }
+                Controlled::Deadline => {
+                    yield control_failure(FailureKind::DeadlineExceeded, "model request deadline elapsed while streaming");
+                    return;
+                }
+                Controlled::Value(Some(Ok(chunk))) => {
+                    let (decoded, decode_failure) = decoder.push_preserving_prefix(&chunk);
+                    let events = map_decoded_batch(&mut mapper, decoded, decode_failure);
+                    let terminal = events.iter().any(ModelEvent::is_terminal);
+                    for event in events {
+                        yield event;
+                    }
+                    if terminal {
+                        return;
+                    }
+                }
+                Controlled::Value(Some(Err(error))) => {
+                    // Headers were already accepted. This path is never retried.
+                    yield transport_failure(error);
+                    return;
+                }
+                Controlled::Value(None) => {
+                    let (decoded, decode_failure) = decoder.finish_preserving_prefix();
+                    let events = map_decoded_batch(&mut mapper, decoded, decode_failure);
+                    let terminal = events.iter().any(ModelEvent::is_terminal);
+                    for event in events {
+                        yield event;
+                    }
+                    if !terminal {
+                        for event in mapper.finish() {
+                            yield event;
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    };
+    ModelEventStream::new(raw)
 }
 
 fn descriptor(storage: OpenAiStoragePolicy) -> DriverDescriptor {
@@ -329,7 +377,7 @@ fn descriptor(storage: OpenAiStoragePolicy) -> DriverDescriptor {
     }
 }
 
-fn compile_failure(error: CompileError) -> ModelEvent {
+pub(crate) fn compile_failure(error: CompileError) -> ModelEvent {
     let kind = if matches!(error, CompileError::Unsupported(_)) {
         FailureKind::UnsupportedFeature
     } else {
@@ -362,8 +410,8 @@ fn transport_failure(error: OpenAiTransportError) -> ModelEvent {
     ModelEvent::Failed { failure }
 }
 
-fn map_decoded_batch(
-    mapper: &mut ResponseMapper,
+fn map_decoded_batch<M: EventMapper>(
+    mapper: &mut M,
     decoded: Vec<SseEvent>,
     trailing_failure: Option<ModelFailure>,
 ) -> Vec<ModelEvent> {

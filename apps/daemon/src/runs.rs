@@ -9,7 +9,10 @@ use axum::{
 };
 use ditto_kernel::AgentRunError;
 use ditto_model::ModelDriver;
-use ditto_model_openai::{OpenAiApiKey, OpenAiResponsesDriver, OpenAiStoragePolicy};
+use ditto_model_openai::{
+    ChatCompletionsConfig, ChatCompletionsDriver, ChatCompletionsEndpoint, OpenAiApiKey,
+    OpenAiResponsesDriver, OpenAiStoragePolicy,
+};
 use ditto_protocol::{AgentRunQuery, AgentRunResponse, AgentRunStatus, StartAgentRunCommand};
 
 use super::AppState;
@@ -18,19 +21,65 @@ use super::AppState;
 pub(super) enum Provider {
     Disabled,
     Openai,
+    /// Any OpenAI-compatible `/chat/completions` server (Ollama, llama.cpp,
+    /// vLLM, LM Studio, OpenRouter, xAI, ...).
+    OpenaiCompatible,
+}
+
+/// Operator model selection. The API key only ever comes from the environment.
+#[derive(Debug, clap::Args)]
+pub(super) struct ModelArgs {
+    /// Enable explicit model runs. Default startup makes no model request.
+    #[arg(long, env = "DITTO_PROVIDER", value_enum, default_value = "disabled")]
+    pub provider: Provider,
+    /// Model name for `openai-compatible`, such as `qwen2.5:7b` or `grok-4`.
+    #[arg(long, env = "DITTO_MODEL")]
+    pub model: Option<String>,
+    /// API root for `openai-compatible`, such as `http://127.0.0.1:11434/v1`.
+    /// Plain HTTP is accepted only for loopback hosts.
+    #[arg(long, env = "DITTO_BASE_URL")]
+    pub base_url: Option<String>,
+    /// Ask an `openai-compatible` server for token usage in the stream.
+    #[arg(long, env = "DITTO_INCLUDE_USAGE")]
+    pub include_usage: bool,
 }
 
 pub(super) fn configured_driver(
-    provider: Provider,
+    model: &ModelArgs,
     bind: SocketAddr,
 ) -> anyhow::Result<Option<Arc<dyn ModelDriver>>> {
-    match provider {
+    if !matches!(model.provider, Provider::Disabled) {
+        anyhow::ensure!(
+            bind.ip().is_loopback(),
+            "enabled model runs require a loopback listener"
+        );
+    }
+    match model.provider {
         Provider::Disabled => Ok(None),
+        Provider::OpenaiCompatible => {
+            let (Some(name), Some(base_url)) = (&model.model, &model.base_url) else {
+                anyhow::bail!("openai-compatible requires --model and --base-url");
+            };
+            let endpoint = ChatCompletionsEndpoint::new(base_url)
+                .map_err(|error| anyhow::anyhow!("--base-url: {error}"))?;
+            let mut config = ChatCompletionsConfig::new(endpoint, name.clone())
+                .map_err(|error| anyhow::anyhow!("--model: {error}"))?;
+            if model.include_usage {
+                config = config.with_usage();
+            }
+            let api_key = match std::env::var("DITTO_MODEL_API_KEY") {
+                Ok(value) if !value.is_empty() => Some(
+                    OpenAiApiKey::new(value)
+                        .map_err(|_| anyhow::anyhow!("DITTO_MODEL_API_KEY is invalid"))?,
+                ),
+                _ => None,
+            };
+            let driver = ChatCompletionsDriver::new(config, api_key).map_err(|_| {
+                anyhow::anyhow!("chat completions transport could not be configured")
+            })?;
+            Ok(Some(Arc::new(driver)))
+        }
         Provider::Openai => {
-            anyhow::ensure!(
-                bind.ip().is_loopback(),
-                "enabled model runs require a loopback listener"
-            );
             let value = std::env::var("OPENAI_API_KEY").map_err(|_| {
                 anyhow::anyhow!("explicit OpenAI selection requires OPENAI_API_KEY")
             })?;
@@ -331,17 +380,200 @@ pub(crate) mod tests {
         let _ = server_task.await;
     }
 
+    /// A canned OpenAI-compatible server: the first request answers with one
+    /// streamed tool call, the second with final text. Bodies are captured.
+    async fn compatible_server(
+        reference: String,
+    ) -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&captured);
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let log = Arc::clone(&log);
+                let reference = reference.clone();
+                async move {
+                    let count = {
+                        let mut log = log.lock().unwrap();
+                        log.push(body);
+                        log.len()
+                    };
+                    let arguments =
+                        json!({"reference": reference, "offset": 0, "length": 32}).to_string();
+                    let (first, second) = arguments.split_at(arguments.len() / 2);
+                    let chunks = if count == 1 {
+                        vec![
+                            json!({"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "artifact_read", "arguments": first}}]}}]}),
+                            json!({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": second}}]}}]}),
+                            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+                        ]
+                    } else {
+                        vec![
+                            json!({"choices": [{"index": 0, "delta": {"content": "The file says "}}]}),
+                            json!({"choices": [{"index": 0, "delta": {"content": "hello."}, "finish_reason": "stop"}]}),
+                        ]
+                    };
+                    let mut body = chunks
+                        .iter()
+                        .map(|chunk| format!("data: {chunk}\n\n"))
+                        .collect::<String>();
+                    body.push_str("data: [DONE]\n\n");
+                    ([("content-type", "text/event-stream")], body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base, captured)
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_driver_completes_a_tool_continuation_end_to_end() {
+        let root = tempfile::tempdir().unwrap();
+        let kernel = DittoKernel::open(KernelConfig::new(
+            root.path().join("data"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
+        ))
+        .unwrap();
+        let reference = kernel
+            .store_artifact(
+                b"hello from a local model",
+                ditto_kernel::ArtifactWriteContext {
+                    session_id: Some("personal".into()),
+                    mime: Some("text/plain".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .metadata
+            .reference
+            .to_string();
+        let (base, captured) = compatible_server(reference.clone()).await;
+        let driver = configured_driver(
+            &model(Provider::OpenaiCompatible, Some("local-mock"), Some(&base)),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        let command = StartAgentRunCommand {
+            request_id: "01K5Z9X3Y4W5V6T7S8R9Q0P1N2".into(),
+            session_id: "personal".into(),
+            text: "What does the stored file say?".into(),
+            sort: None,
+        };
+        let query = AgentRunQuery {
+            request_id: command.request_id.clone(),
+            session_id: "personal".into(),
+        };
+        let mut events = kernel.subscribe();
+        kernel.start_agent_run(command, driver).unwrap();
+        let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let status = kernel.inspect_agent_run(query.clone()).unwrap();
+                if status.status != AgentRunStatus::Running {
+                    return status;
+                }
+                let _ = events.recv().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+        assert_eq!(status.response.as_deref(), Some("The file says hello."));
+
+        let captured = captured.lock().unwrap().clone();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0]["model"], "local-mock");
+        assert_eq!(captured[0]["tools"][0]["function"]["name"], "artifact_read");
+        assert_eq!(captured[0]["tool_choice"], "auto");
+        assert_eq!(captured[0]["parallel_tool_calls"], false);
+        let continuation = captured[1]["messages"].as_array().unwrap();
+        let call = &continuation[continuation.len() - 2];
+        assert_eq!(call["role"], "assistant");
+        assert_eq!(call["tool_calls"][0]["id"], "call_1");
+        assert_eq!(call["tool_calls"][0]["function"]["name"], "artifact_read");
+        let result = &continuation[continuation.len() - 1];
+        assert_eq!(result["role"], "tool");
+        assert_eq!(result["tool_call_id"], "call_1");
+        assert!(result["content"].as_str().unwrap().contains(&reference));
+
+        kernel.shutdown_agent_runs().await.unwrap();
+        let events = kernel
+            .list_events(&EventQuery {
+                session_id: Some("personal".into()),
+                limit: Some(1_000),
+                ..EventQuery::default()
+            })
+            .unwrap();
+        ditto_kernel::replay_artifact_read_turn(&events, &status.turn_id).unwrap();
+    }
+
+    fn model(provider: Provider, model: Option<&str>, base_url: Option<&str>) -> ModelArgs {
+        ModelArgs {
+            provider,
+            model: model.map(str::to_owned),
+            base_url: base_url.map(str::to_owned),
+            include_usage: false,
+        }
+    }
+
     #[test]
     fn provider_is_disabled_by_default_and_remote_execution_fails_before_credentials() {
         use clap::Parser;
         let args = super::super::Args::try_parse_from(["ditto-daemon"]).unwrap();
-        assert!(matches!(args.provider, Provider::Disabled));
+        assert!(matches!(args.model.provider, Provider::Disabled));
+        let args = super::super::Args::try_parse_from([
+            "ditto-daemon",
+            "--provider",
+            "openai-compatible",
+            "--base-url",
+            "http://127.0.0.1:11434/v1",
+            "--model",
+            "qwen2.5:7b",
+            "--include-usage",
+        ])
+        .unwrap();
+        assert!(matches!(args.model.provider, Provider::OpenaiCompatible));
+        assert_eq!(
+            args.model.base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+        assert_eq!(args.model.model.as_deref(), Some("qwen2.5:7b"));
+        assert!(args.model.include_usage);
+        let loopback = "127.0.0.1:0".parse().unwrap();
+        let remote = "0.0.0.0:0".parse().unwrap();
         assert!(
-            configured_driver(Provider::Disabled, "127.0.0.1:0".parse().unwrap())
+            configured_driver(&model(Provider::Disabled, None, None), loopback)
                 .unwrap()
                 .is_none()
         );
-        assert!(configured_driver(Provider::Openai, "0.0.0.0:0".parse().unwrap()).is_err());
+        assert!(configured_driver(&model(Provider::Openai, None, None), remote).is_err());
+        let local = Some("http://127.0.0.1:11434/v1");
+        assert!(
+            configured_driver(&model(Provider::OpenaiCompatible, Some("m"), local), remote)
+                .is_err()
+        );
+        // The compatible provider needs an explicit model and base URL, and
+        // plain HTTP only reaches loopback servers.
+        for (name, base) in [
+            (None, local),
+            (Some("m"), None),
+            (Some("m"), Some("http://example.com/v1")),
+            (Some(" m"), local),
+        ] {
+            assert!(
+                configured_driver(&model(Provider::OpenaiCompatible, name, base), loopback)
+                    .is_err()
+            );
+        }
+        let driver = configured_driver(
+            &model(Provider::OpenaiCompatible, Some("qwen2.5:7b"), local),
+            loopback,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(driver.descriptor().id.as_str(), "openai-compatible.chat");
     }
 
     #[tokio::test]

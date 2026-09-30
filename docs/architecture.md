@@ -245,6 +245,12 @@ and explicit ephemeral or provider-managed response storage. Its terminal is a
 model terminal only; the adapter neither selects itself for the daemon nor makes
 a task-completion claim.
 
+The same crate owns an OpenAI-compatible `/chat/completions` driver (ADR 0023)
+for operator-configured local or hosted servers. It shares the request
+lifecycle, SSE decoder and credential redaction with the Responses profile,
+projects capability IDs to readable function names, and accepts plain HTTP only
+for loopback servers.
+
 The semantic kernel owns the first injected-driver continuation loop. It
 compiles context, pages the complete `artifact.read` schema into one bounded
 epoch, persists validated model/tool transitions before publication, and can

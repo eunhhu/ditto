@@ -3,11 +3,16 @@
 //! This crate owns OpenAI wire projection and transport. Provider credentials
 //! and raw wire events never enter `ditto-model`.
 
+mod chat;
 mod compile;
 mod driver;
 mod sse;
 mod transport;
 
+pub use chat::{
+    CHAT_COMPLETIONS_DRIVER_ID, ChatCompletionsConfig, ChatCompletionsDriver,
+    ChatCompletionsEndpoint, ChatReqwestTransport,
+};
 pub use driver::{OpenAiResponsesDriver, OpenAiRetryPolicy, OpenAiStoragePolicy};
 pub use transport::{
     OpenAiApiKey, OpenAiConfigError, OpenAiHttpRequest, OpenAiHttpResponse, OpenAiReqwestTransport,

@@ -40,9 +40,8 @@ mod sorts;
     about = "Ditto semantic agent microkernel"
 )]
 struct Args {
-    /// Enable explicit model runs. Default startup makes no model request.
-    #[arg(long, env = "DITTO_PROVIDER", value_enum, default_value = "disabled")]
-    provider: runs::Provider,
+    #[command(flatten)]
+    model: runs::ModelArgs,
     #[arg(long, env = "DITTO_DATA_DIR", default_value = ".ditto")]
     data_dir: PathBuf,
     #[arg(long, env = "DITTO_CAPABILITIES_DIR", default_value = "capabilities")]
@@ -73,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     validate_bind(args.bind, args.allow_unauthenticated_remote)?;
-    let driver = runs::configured_driver(args.provider, args.bind)?;
+    let driver = runs::configured_driver(&args.model, args.bind)?;
     let kernel = DittoKernel::open(KernelConfig::new(args.data_dir, args.capabilities_dir))
         .context("failed to initialize Ditto kernel")?;
     kernel

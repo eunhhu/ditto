@@ -21,7 +21,8 @@ and checks establish a new fact.
   `dev/task-016-1-personal-recall` holds the preserved
   [Task 017](tasks/017-evaluation-outcomes.md) draft, raw-report and handoff
   trimming, the turn-loop split and Task 016.1; `dev/task-018-conversation-threads`
-  stacks Task 018 on it. Nothing is pushed.
+  stacks Task 018 on it and `dev/task-019-openai-compatible` stacks Task 019 on
+  that. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made.
@@ -68,9 +69,12 @@ and checks establish a new fact.
   ledger. `artifact.read` uses a static no-approval permit; `artifact.sort`
   consumes a one-shot `ExecutionClaim` under an exact-resource, one-call lease.
 - **Model and turns.** `ditto-model` owns the provider-neutral request/stream
-  contract; `ditto-model-openai` is a closed `gpt-5.6` Responses profile with a
-  redacted transport-only key and ephemeral storage. The daemon defaults to a
-  disabled provider. The kernel turn loop compiles context, pages
+  contract. `ditto-model-openai` holds two drivers on one request lifecycle:
+  the closed `gpt-5.6` Responses profile (ephemeral storage) and an
+  OpenAI-compatible `/chat/completions` driver for an operator-configured
+  local or hosted server (ADR 0023; HTTPS unless loopback, no redirects,
+  optional key only from `DITTO_MODEL_API_KEY`). Keys are redacted and
+  transport-only. The daemon defaults to a disabled provider. The kernel turn loop compiles context, pages
   `artifact.read` (plus `artifact.sort` only for a permitted attachment), runs
   at most eight model requests, journals versioned transitions before
   publication and replays without provider or artifact I/O. New turns write
@@ -100,36 +104,35 @@ and checks establish a new fact.
   capsules from the complete-set rule. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 018
+## Latest verified slice: Task 019
 
-- [Contract and evidence](tasks/018-conversation-threads.md). Follow-ups receive
-  the previous exchange; resets, failed turns and other sessions never join a
-  thread; bounds and truncation are deterministic; replay rejects altered
-  history IDs, a conversation without its history and history under an older
-  version. A real `ditto chat` session against the fixture server sent
-  `[user]`, `[user, assistant, user]` and, after `/new`, `[user]`.
-- The canonical gate passed on the final tree (8 min 34 s, pinned Rust 1.88.0):
-  505 Rust tests (500 workspace including doctests, five built-CLI scenarios),
-  8 baseline and 21 quality Python tests and both smokes; git status and diff
-  hashes were identical before and after.
+- [Contract and evidence](tasks/019-openai-compatible-provider.md). A mock
+  `/v1/chat/completions` server drove a streamed `artifact_read` call and its
+  continuation through the kernel turn loop, with replay. Adapter tests cover
+  Ollama-style streams (whole calls, `stop` with calls, missing IDs or indexes,
+  object arguments) and fail-closed error, malformed and unfinished streams.
+  The built daemon, configured by flags and then by `DITTO_*` variables, served
+  `ditto run` and `ditto chat` through an Ollama-shaped mock: bearer key on
+  every request, memory in the system message, thread history growing and
+  resetting on `/new`, and no key in the daemon log or data directory.
+- The canonical gate passed on the final tree (3 min 48 s with warm caches,
+  pinned Rust 1.88.0): 517 Rust tests (512 workspace including doctests, five
+  built-CLI scenarios), 8 baseline and 21 quality Python tests and both
+  smokes; the staged tree hash was identical before and after.
+- Not run: a live hosted provider or a real local model (none installed, no
+  charges approved).
 
-## Previous slice: Task 016.1
+## Previous slice: Task 018
 
-- [Contract and evidence](tasks/016-1-personal-recall.md). A kernel regression
-  copied onto the pre-change tree failed (`left: 0, right: 6`: no memory reached
-  the model for a paraphrased question) and passes now; superseded and
-  other-session memories stay absent. Replay covers version-1 relabeling, mixed
-  and unsupported versions, and forged or missing typed reasons, including all
-  three driver-contract reasons.
-- The canonical gate passed on the final tree on 2026-09-30 (10 min 40 s on a
-  Raspberry Pi 5): canaries, formatting, strict Clippy, 500 Rust tests (495
-  workspace including doctests, five built-CLI scenarios), 8 baseline and 21
-  quality Python tests, and both smoke workloads; the corpus smoke ran the
-  complete-set mode (zero noise) and the lexical fallback (twelve noise).
-  `cargo +1.88.0 check --offline --locked --workspace --all-targets` passed.
-- Previous slice: Task 016 ([evidence](tasks/016-evidence.md)), schema 2.
+- [Contract and evidence](tasks/018-conversation-threads.md): conversation
+  threads, `ditto chat` and `ditto new`, turn payload version 3. Its gate
+  passed on its final tree (8 min 34 s, 505 Rust tests).
 
 ## Known gaps
+
+- Answer quality and tool-use reliability with local or hosted
+  OpenAI-compatible models are unmeasured; tools need a model with function
+  calling.
 
 - Sessions whose current memories exceed the context budget fall back to
   lexical overlap, so a pure paraphrase can miss. Semantic retrieval (deferred)
@@ -143,8 +146,8 @@ and checks establish a new fact.
 
 - Calendar recurrence, notification delivery, scheduled effect grants and
   additional effectful tool profiles.
-- Additional providers and model profiles, reasoning replay, remote cancel and
-  explicit prompt-cache breakpoints.
+- Native non-OpenAI wire formats, reasoning replay, remote cancel and explicit
+  prompt-cache breakpoints.
 - Additional capability derivers, durable/cross-process authorization, approval
   fulfillment and the capability worker protocol.
 - Device registry, general process profiles, SSH transport and secrets.

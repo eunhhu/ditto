@@ -11,7 +11,8 @@ Grok bots, Muse, Dot). Work these slices in order; each lands with tests, an
 ADR when a contract changes, and evidence:
 
 1. [018](tasks/018-conversation-threads.md) Conversation threads - complete.
-2. 019 OpenAI-compatible model provider (local and hosted models).
+2. [019](tasks/019-openai-compatible-provider.md) OpenAI-compatible model
+   provider - complete.
 3. 020 Local web app: chat, memories, schedules and a per-answer inspector.
 4. 021 Telegram gateway and delivery of scheduled results.
 5. 022 Builtin tool interface with model-callable memory tools.
@@ -25,6 +26,8 @@ General approval fulfillment remains deferred.
 
 One line per slice; each task file and its evidence hold the details.
 
+- [019](tasks/019-openai-compatible-provider.md) OpenAI-compatible chat
+  provider for local and hosted models (ADR 0023).
 - [018](tasks/018-conversation-threads.md) Conversation threads, `ditto chat`
   and `ditto new`, turn payload version 3 (ADR 0022).
 - [016.1](tasks/016-1-personal-recall.md) Personal-scale recall (complete-set
