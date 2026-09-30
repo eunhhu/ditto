@@ -123,8 +123,9 @@ selected nodes and capsule bytes, hardware and build settings.
    `./scripts/agent-check.sh`, cached Rust 1.88 offline workspace/all-target check,
    hash/audit checks and diff hygiene. Never download a missing dependency or
    toolchain or substitute mocked success for a blocked process check.
-4. Only after gates pass, record the full default
-   [raw report](016-personal-task-corpus.json). Publish via a same-directory
+4. Only after gates pass, record the full default raw report (now retained in
+   git history: `git show 58b2b02:docs/agent/tasks/016-personal-task-corpus.json`).
+   Publish via a same-directory
    atomic replacement after complete pass and final source/artifact hash checks.
    Independently recompute aggregates and all source/artifact/corpus hashes.
 5. Update [evidence](016-evidence.md), QUALITY-GATES, NEXT and HANDOFF with actual

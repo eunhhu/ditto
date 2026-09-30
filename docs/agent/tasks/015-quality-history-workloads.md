@@ -65,6 +65,6 @@ canonical gate and the default 1,000-memory/five-query comparison passed. All te
 observed capsules contained one corrected node (227 serialized bytes), with every
 required exclusion. Independent fail-closed review found no security concern or
 logic error; PR #20's Linux `rust` and `msrv` checks passed on that implementation
-head. See [verification and measurements](015-evidence.md) and the
-[raw report](015-quality-history.json). Broader personal-agent quality and v0.1
-readiness remain open.
+head. See [verification and measurements](015-evidence.md); the raw report is
+kept out of the working tree (`git show 58b2b02:docs/agent/tasks/015-quality-history.json`).
+Broader personal-agent quality and v0.1 readiness remain open.

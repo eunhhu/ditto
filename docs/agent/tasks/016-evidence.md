@@ -4,8 +4,9 @@
 
 [Contract](016-personal-task-corpus.md),
 [harness](../../../scripts/personal-quality.py),
-[tests](../../../scripts/test-personal-quality.py),
-[raw default report](016-personal-task-corpus.json).
+[tests](../../../scripts/test-personal-quality.py). The raw default report is
+kept out of the working tree; retrieve it with
+`git show 58b2b02:docs/agent/tasks/016-personal-task-corpus.json` (SHA-256 below).
 
 Schema 2 extends Task 015's harness with the exact seven seeds, five queries,
 ordered expectations and exclusions frozen in the task contract. Samples now mean
