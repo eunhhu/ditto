@@ -27,7 +27,9 @@ and checks establish a new fact.
   Tasks 019–023. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
-  [NEXT](NEXT.md) orders the slices. No parity claim is made.
+  [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
+  are done. Model-invoked memory saving (024) awaits the user's decision
+  because it reverses ADR 0015's exclusion of model tool invocation.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
   validator wording. The user prioritized fixing both, trimming process
