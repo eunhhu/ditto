@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by [ADR 0028](0028-thin-realtime-harness.md) Phase B: a
+delta reads only its `context.node.recorded` events, through the kind index,
+and the normal-delta event limit counts those nodes.
 
 ## Context
 

@@ -69,7 +69,7 @@ pub(super) async fn terminal(
     .expect("terminal event")
 }
 
-fn save_memory(
+pub(super) fn save_memory(
     kernel: &DittoKernel,
     session: &str,
     text: &str,
@@ -566,7 +566,7 @@ async fn invalid_context_source_fails_before_model_io_and_is_replayable() {
 
 /// Start a run once the previous run's task has released the single slot. A
 /// terminal status is durable slightly before the finished task drops its guard.
-async fn start_when_idle(
+pub(super) async fn start_when_idle(
     kernel: &DittoKernel,
     command: &StartAgentRunCommand,
     driver: Arc<dyn ModelDriver>,
@@ -583,7 +583,7 @@ async fn start_when_idle(
     panic!("the previous run never released the execution slot");
 }
 
-fn context_ids(request: &ModelRequest) -> Vec<String> {
+pub(super) fn context_ids(request: &ModelRequest) -> Vec<String> {
     request
         .turn
         .context
@@ -908,7 +908,7 @@ async fn assistant_instructions_state_the_local_time_of_acceptance_and_replay() 
     assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
 }
 
-fn message_texts(request: &ModelRequest) -> Vec<(String, String)> {
+pub(super) fn message_texts(request: &ModelRequest) -> Vec<(String, String)> {
     request
         .turn
         .conversation
@@ -945,7 +945,7 @@ fn message_texts_without_note(request: &ModelRequest) -> Vec<(String, String)> {
     texts
 }
 
-async fn ask(
+pub(super) async fn ask(
     kernel: &DittoKernel,
     session: &str,
     text: &str,

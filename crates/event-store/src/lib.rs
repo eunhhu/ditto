@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -15,6 +16,17 @@ mod schedule;
 pub use schedule::{ScheduleEntry, ScheduleState};
 
 const CURRENT_SCHEMA_VERSION: i64 = 7;
+
+thread_local! {
+    static ASYNC_RUNTIME_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Mark the calling thread as one that drives async tasks. Debug builds then
+/// reject any journal access on it: SQLite work belongs on blocking threads,
+/// never on a thread that other tasks wait for (ADR 0028 Phase B).
+pub fn mark_async_runtime_thread() {
+    ASYNC_RUNTIME_THREAD.with(|marked| marked.set(true));
+}
 
 /// Conversation markers: resets bound a thread; finished turns are its history.
 const MIGRATION_V7: &str = r#"
@@ -131,6 +143,26 @@ impl EventStore {
         }
     }
 
+    /// Append events in one transaction, in order. Their IDs are assigned by
+    /// the caller, so a later event can name an earlier one as its cause.
+    pub fn append_batch(
+        &self,
+        events: Vec<(String, NewEvent)>,
+    ) -> Result<Vec<EventRecord>, EventStoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let mut records = Vec::with_capacity(events.len());
+        for (event_id, event) in events {
+            let record = insert_event_with_id(&transaction, event_id, event)?;
+            if schedule::is_schedule_kind(&record.kind) {
+                schedule::project(&transaction, &record)?;
+            }
+            records.push(record);
+        }
+        transaction.commit()?;
+        Ok(records)
+    }
+
     pub fn list(&self, query: &EventQuery) -> Result<Vec<EventRecord>, EventStoreError> {
         self.list_through(query, i64::MAX)
     }
@@ -175,6 +207,47 @@ impl EventStore {
             events.push(row?.try_into()?);
         }
         Ok(events)
+    }
+
+    /// One page of a single event kind after `after_seq` through the inclusive
+    /// high-water, in sequence order, read from the kind index.
+    pub fn list_kind_through(
+        &self,
+        kind: &str,
+        after_seq: i64,
+        through_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, EventStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare_cached(
+            "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+             FROM events INDEXED BY events_kind_seq
+             WHERE kind = ?1 AND seq > ?2 AND seq <= ?3
+             ORDER BY seq ASC LIMIT ?4",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![kind, after_seq.max(0), through_seq, limit],
+            raw_event_record_from_row,
+        )?;
+        rows.map(|row| row?.try_into()).collect()
+    }
+
+    /// Whether an event of `kind` lies after `after_seq` through the inclusive
+    /// high-water; one kind-index probe.
+    pub fn has_kind_between(
+        &self,
+        kind: &str,
+        after_seq: i64,
+        through_seq: i64,
+    ) -> Result<bool, EventStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM events INDEXED BY events_kind_seq
+                           WHERE kind = ?1 AND seq > ?2 AND seq <= ?3)",
+        )?;
+        Ok(statement.query_row(params![kind, after_seq, through_seq], |row| row.get(0))?)
     }
 
     /// Two indexed boundary reads, independent of transcript length. The latest
@@ -273,6 +346,32 @@ impl EventStore {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = statement.query_map(
             params![session, boundary, before_seq, limit],
+            raw_event_record_from_row,
+        )?;
+        rows.map(|row| row?.try_into()).collect()
+    }
+
+    /// The session's `conversation.reset` and `turn.finished` events after
+    /// `after_seq` and before `before_seq`, oldest first, at most `limit`.
+    pub fn conversation_events_between(
+        &self,
+        session: &str,
+        after_seq: i64,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, EventStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare_cached(
+            "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+             FROM events INDEXED BY events_conversation
+             WHERE session_id = ?1 AND seq > ?2 AND seq < ?3
+               AND kind IN ('conversation.reset', 'turn.finished')
+             ORDER BY seq ASC LIMIT ?4",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![session, after_seq, before_seq, limit],
             raw_event_record_from_row,
         )?;
         rows.map(|row| row?.try_into()).collect()
@@ -382,6 +481,10 @@ impl EventStore {
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, EventStoreError> {
+        debug_assert!(
+            !ASYNC_RUNTIME_THREAD.with(Cell::get),
+            "journal access on an async runtime thread; run it on a blocking thread"
+        );
         self.connection
             .lock()
             .map_err(|_| EventStoreError::Poisoned)
@@ -524,11 +627,19 @@ fn unsafe_path(path: &Path, reason: &str) -> std::io::Error {
 }
 
 fn insert_event(connection: &Connection, event: NewEvent) -> Result<EventRecord, EventStoreError> {
+    insert_event_with_id(connection, Ulid::new().to_string(), event)
+}
+
+fn insert_event_with_id(
+    connection: &Connection,
+    event_id: String,
+    event: NewEvent,
+) -> Result<EventRecord, EventStoreError> {
     let recorded_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
         .expect("a current UTC timestamp is representable at millisecond precision");
     let record = EventRecord {
         seq: 0,
-        event_id: Ulid::new().to_string(),
+        event_id,
         recorded_at,
         session_id: event.session_id,
         task_id: event.task_id,
@@ -544,14 +655,16 @@ fn insert_event(connection: &Connection, event: NewEvent) -> Result<EventRecord,
         .recorded_at
         .to_rfc3339_opts(SecondsFormat::Millis, true);
 
-    connection.execute(
-        r#"
+    connection
+        .prepare_cached(
+            r#"
             INSERT INTO events (
                 event_id, recorded_at, session_id, task_id, actor, kind,
                 payload_json, causation_id, correlation_id, span_id
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
-        params![
+        )?
+        .execute(params![
             &record.event_id,
             recorded_at,
             record.session_id.as_deref(),
@@ -562,8 +675,7 @@ fn insert_event(connection: &Connection, event: NewEvent) -> Result<EventRecord,
             record.causation_id.as_deref(),
             record.correlation_id.as_deref(),
             record.span_id.as_deref(),
-        ],
-    )?;
+        ])?;
     let seq = connection.last_insert_rowid();
 
     Ok(EventRecord { seq, ..record })
@@ -672,6 +784,56 @@ mod tests {
     use tempfile::tempdir;
 
     use super::EventStore;
+
+    #[test]
+    fn a_batch_commits_every_event_or_none() {
+        let directory = tempdir().expect("temporary directory");
+        let store = EventStore::open(directory.path().join("state.db")).expect("open store");
+        let input = |text: &str| NewEvent::user_input("batch", None, text);
+        let first = ulid::Ulid::new().to_string();
+        let committed = store
+            .append_batch(vec![
+                (first.clone(), input("first")),
+                (ulid::Ulid::new().to_string(), input("second")),
+            ])
+            .expect("append batch");
+        assert_eq!(committed[0].event_id, first);
+        assert_eq!(committed[1].seq, committed[0].seq + 1);
+        let high_water = store.latest_seq().expect("latest seq");
+        // A repeated ID in the second event rolls back the first as well.
+        assert!(
+            store
+                .append_batch(vec![
+                    (ulid::Ulid::new().to_string(), input("third")),
+                    (first, input("fourth")),
+                ])
+                .is_err()
+        );
+        assert_eq!(store.latest_seq().expect("latest seq"), high_water);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn journal_access_is_rejected_on_a_marked_async_runtime_thread() {
+        let directory = tempdir().expect("temporary directory");
+        let store = EventStore::open(directory.path().join("state.db")).expect("open store");
+        let unmarked = store.clone();
+        assert_eq!(
+            std::thread::spawn(move || unmarked.latest_seq().expect("latest seq"))
+                .join()
+                .expect("an unmarked thread reads the journal"),
+            0
+        );
+        let marked = store.clone();
+        let rejected = std::thread::spawn(move || {
+            super::mark_async_runtime_thread();
+            marked.latest_seq()
+        })
+        .join();
+        assert!(rejected.is_err(), "a marked thread must not reach SQLite");
+        // The rejection happens before the connection lock: nothing is poisoned.
+        assert_eq!(store.latest_seq().expect("store still usable"), 0);
+    }
 
     #[test]
     fn schema_four_sort_lookup_migrates_without_rewrite_and_bounds_exact_turn_work() {

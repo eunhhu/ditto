@@ -131,7 +131,7 @@ impl DittoKernel {
         };
         let kernel = self.clone();
         let accepted = input.clone();
-        drop(runtime.spawn(async move {
+        Self::spawn_journaling(&runtime, async move {
             let _guard = guard;
             if let Err(code) = kernel
                 .execute_sort(&accepted, &command.text, &manifest, cancellation)
@@ -146,7 +146,7 @@ impl DittoKernel {
                     accepted.event_id.clone(),
                 );
             }
-        }));
+        });
         self.sort_status(query, input.clone(), input, &slot)
     }
 

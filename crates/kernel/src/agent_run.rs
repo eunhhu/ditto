@@ -61,20 +61,60 @@ impl From<KernelError> for AgentRunError {
     }
 }
 
+/// Sessions whose verified context is kept for reuse; past this the map is
+/// cleared rather than tracked for recency.
+const MAX_REUSED_SESSIONS: usize = 64;
+
+/// Verified session context kept between turns (ADR 0028 Phase B). It lives
+/// under the context admission gate, which orders it with context writes.
+#[derive(Default)]
+pub(crate) struct ContextReuse {
+    sessions: std::collections::HashMap<String, ReusableContext>,
+}
+
+struct ReusableContext {
+    through_seq: i64,
+    nodes: Vec<ditto_context::ContextNode>,
+    sources_verified: bool,
+}
+
+/// A run's verified context, and whether its sources are already known to
+/// resolve for every task of the session.
+pub(crate) struct RunContext {
+    pub(crate) candidates: Vec<ditto_context::ContextCandidate>,
+    pub(crate) sources_verified: bool,
+}
+
 impl DittoKernel {
+    /// The run's verified active context. A session whose context depends
+    /// only on its node set reuses the snapshot while no context node has
+    /// been committed since, whoever committed it; otherwise the projection
+    /// is synchronized and verified as before.
     pub(crate) fn agent_context_candidates(
         &self,
         session: &str,
         task: &str,
         evaluated_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<ditto_context::ContextCandidate>, KernelError> {
-        let _gate = self
+    ) -> Result<RunContext, KernelError> {
+        let mut reuse = self
             .inner
             .context_admission_gate
             .lock()
             .map_err(|_| KernelError::ContextAdmissionGatePoisoned)?;
         let high_water = self.inner.events.latest_seq()?;
-        let snapshot = self
+        if let Some(reusable) = reuse.sessions.get(session)
+            && !self.inner.events.has_kind_between(
+                event_kind::CONTEXT_NODE_RECORDED,
+                reusable.through_seq,
+                high_water,
+            )?
+        {
+            return Ok(RunContext {
+                candidates: ranked(reusable.nodes.clone()),
+                sources_verified: reusable.sources_verified,
+            });
+        }
+        let nodes = self
             .inner
             .context_projection
             .synchronize_and_verified_snapshot_through_at(
@@ -84,12 +124,61 @@ impl DittoKernel {
                 Some(task),
                 evaluated_at,
                 &mut ditto_retrieval::RetrievalWorkBudget::new(),
-            )?;
-        Ok(snapshot
-            .into_candidates()
-            .into_iter()
-            .map(ditto_context::ContextCandidate::ranked)
-            .collect())
+            )?
+            .into_candidates();
+        let mut sources_verified = false;
+        if self
+            .inner
+            .context_projection
+            .session_context_is_invariant(session)?
+        {
+            sources_verified = self.sources_are_session_wide(session, &nodes, high_water)?;
+            if reuse.sessions.len() >= MAX_REUSED_SESSIONS {
+                reuse.sessions.clear();
+            }
+            reuse.sessions.insert(
+                session.to_owned(),
+                ReusableContext {
+                    through_seq: high_water,
+                    nodes: nodes.clone(),
+                    sources_verified,
+                },
+            );
+        } else {
+            reuse.sessions.remove(session);
+        }
+        Ok(RunContext {
+            candidates: ranked(nodes),
+            sources_verified,
+        })
+    }
+
+    /// Whether every node has sources and all were recorded in this session,
+    /// without a task, by `high_water`. The per-turn provenance check then
+    /// passes for any subset, task and later cutoff, so reuse may skip it.
+    fn sources_are_session_wide(
+        &self,
+        session: &str,
+        nodes: &[ditto_context::ContextNode],
+        high_water: i64,
+    ) -> Result<bool, KernelError> {
+        for node in nodes {
+            if node.source_event_ids.is_empty() {
+                return Ok(false);
+            }
+            for id in &node.source_event_ids {
+                let Some(source) = self.inner.events.get_by_event_id(id)? else {
+                    return Ok(false);
+                };
+                if source.seq > high_water
+                    || source.session_id.as_deref() != Some(session)
+                    || source.task_id.is_some()
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Admit once before dispatch. HTTP ownership is intentionally absent.
@@ -216,7 +305,9 @@ impl DittoKernel {
             finished,
         };
         let kernel = self.clone();
-        let task = runtime.spawn(async move {
+        // The slot's cancellation/completion tokens own the lifetime; the
+        // caller's ownership ends here, not shutdown accounting.
+        Self::spawn_journaling(&runtime, async move {
             let _guard = guard;
             let _result = kernel
                 .continue_read_only_turn(
@@ -230,9 +321,6 @@ impl DittoKernel {
             // Turn failures are journaled by the loop. A storage failure is left
             // interrupted; no invented terminal and no automatic provider retry.
         });
-        // The slot's cancellation/completion tokens own the lifetime. Dropping
-        // the join handle detaches HTTP ownership, not shutdown accounting.
-        drop(task);
         self.agent_status_from_boundary(query, input.clone(), input, slot)
     }
 
@@ -338,6 +426,13 @@ impl Drop for ActiveGuard {
 }
 
 /// Run status reads every turn payload version that replay still accepts.
+fn ranked(nodes: Vec<ditto_context::ContextNode>) -> Vec<ditto_context::ContextCandidate> {
+    nodes
+        .into_iter()
+        .map(ditto_context::ContextCandidate::ranked)
+        .collect()
+}
+
 fn supported_turn_version(version: u16) -> bool {
     (crate::turn::MIN_TURN_PAYLOAD_VERSION..=crate::turn::TURN_PAYLOAD_VERSION).contains(&version)
 }

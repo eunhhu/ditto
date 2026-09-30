@@ -67,8 +67,32 @@ struct AppState {
     shutdown: ditto_model::CancellationToken,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    runtime()?.block_on(serve())
+}
+
+/// The daemon's runtime. A worker parks only between async tasks; from then
+/// on debug builds reject journal access on it (ADR 0028 Phase B).
+fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_park(ditto_kernel::mark_async_runtime_thread)
+        .build()
+        .context("failed to start the async runtime")
+}
+
+/// The scheduler journals claims, so it runs on a blocking thread that
+/// drives its timers through the runtime.
+fn spawn_scheduler(
+    kernel: DittoKernel,
+    driver: Option<std::sync::Arc<dyn ditto_model::ModelDriver>>,
+    shutdown: ditto_model::CancellationToken,
+) -> tokio::task::JoinHandle<Result<(), ditto_kernel::AgentRunError>> {
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || runtime.block_on(kernel.run_scheduler(driver, shutdown)))
+}
+
+async fn serve() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("ditto=info")),
@@ -103,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {}", args.bind))?;
     info!(address = %args.bind, "Ditto daemon listening");
+    // Startup storage work is done; this thread now drives the server.
+    ditto_kernel::mark_async_runtime_thread();
 
     let drain_kernel = kernel.clone();
     let server_shutdown = shutdown.clone();
@@ -122,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     };
     // Start only after successful bind. A failed scheduler shuts down the server;
     // it must never leave a healthy-looking daemon silently missing due work.
-    let scheduler = kernel.run_scheduler(driver, shutdown.clone());
+    let scheduler = spawn_scheduler(kernel.clone(), driver, shutdown.clone());
     tokio::pin!(server, scheduler);
     let (server_result, scheduler_result) = tokio::select! {
         result = &mut server => { shutdown.cancel(); (result, scheduler.await) },
@@ -133,8 +159,24 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to drain agent runtime")?;
     server_result.context("Ditto daemon stopped unexpectedly")?;
-    scheduler_result.context("schedule runtime stopped unexpectedly")?;
+    scheduler_result
+        .context("schedule runtime panicked")?
+        .context("schedule runtime stopped unexpectedly")?;
     Ok(())
+}
+
+/// Kernel calls read or write SQLite and files, so handlers run them on the
+/// blocking pool: no async runtime thread waits on storage (ADR 0028 Phase B).
+/// A panic in the call resumes in the handler, as if the call were inline.
+async fn blocking<T: Send + 'static>(
+    kernel: &DittoKernel,
+    work: impl FnOnce(&DittoKernel) -> T + Send + 'static,
+) -> T {
+    let kernel = kernel.clone();
+    match tokio::task::spawn_blocking(move || work(&kernel)).await {
+        Ok(value) => value,
+        Err(error) => std::panic::resume_unwind(error.into_panic()),
+    }
 }
 
 /// Every HTTP route. The daemon and the offline fixture server share this
@@ -173,8 +215,8 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthResponse>, A
     Ok(Json(HealthResponse {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
-        durable_events: state.kernel.event_count()?,
-        latest_seq: state.kernel.latest_event_seq()?,
+        durable_events: blocking(&state.kernel, |kernel| kernel.event_count()).await?,
+        latest_seq: blocking(&state.kernel, |kernel| kernel.latest_event_seq()).await?,
     }))
 }
 
@@ -182,7 +224,10 @@ async fn submit_input(
     State(state): State<AppState>,
     Json(command): Json<SubmitInputCommand>,
 ) -> Result<(StatusCode, Json<SubmitInputResponse>), ApiError> {
-    let event = state.kernel.record_user_input(command)?;
+    let event = blocking(&state.kernel, move |kernel| {
+        kernel.record_user_input(command)
+    })
+    .await?;
     Ok((StatusCode::CREATED, Json(SubmitInputResponse { event })))
 }
 
@@ -190,7 +235,10 @@ async fn reset_conversation(
     State(state): State<AppState>,
     Json(command): Json<ResetConversationCommand>,
 ) -> Result<(StatusCode, Json<ConversationResetResponse>), ApiError> {
-    let reset = state.kernel.reset_conversation(command)?;
+    let reset = blocking(&state.kernel, move |kernel| {
+        kernel.reset_conversation(command)
+    })
+    .await?;
     Ok((StatusCode::CREATED, Json(reset)))
 }
 
@@ -198,14 +246,18 @@ async fn conversation(
     State(state): State<AppState>,
     Query(query): Query<ConversationQuery>,
 ) -> Result<Json<ConversationView>, ApiError> {
-    Ok(Json(state.kernel.conversation_view(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.conversation_view(query)).await?,
+    ))
 }
 
 async fn list_events(
     State(state): State<AppState>,
     Query(query): Query<EventQuery>,
 ) -> Result<Json<Vec<EventRecord>>, ApiError> {
-    Ok(Json(state.kernel.list_events(&query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.list_events(&query)).await?,
+    ))
 }
 
 async fn capabilities(
@@ -233,7 +285,7 @@ async fn stream_events(
     // present in both the durable replay and the receiver and are deduplicated by seq.
     let kernel = state.kernel.clone();
     let mut receiver = kernel.subscribe();
-    let initial_high_water = kernel.latest_event_seq()?;
+    let initial_high_water = blocking(&kernel, |kernel| kernel.latest_event_seq()).await?;
     let page_size = query
         .limit
         .unwrap_or(DEFAULT_REPLAY_PAGE_SIZE)
@@ -307,7 +359,7 @@ async fn stream_events(
                     }
                 }
                 Err(RecvError::Lagged(skipped)) => {
-                    let catch_up_high_water = match kernel.latest_event_seq() {
+                    let catch_up_high_water = match blocking(&kernel, |kernel| kernel.latest_event_seq()).await {
                         Ok(seq) => seq,
                         Err(error) => {
                             error!(%error, "failed to capture lag-recovery high-water mark");
@@ -357,15 +409,16 @@ fn replay_events(
     stream! {
         let mut cursor = after_seq.max(0);
         while cursor < through_seq {
-            let page = kernel.list_events_through(
-                &EventQuery {
-                    after_seq: Some(cursor),
-                    limit: Some(page_size),
-                    session_id: filter.session_id.clone(),
-                    task_id: filter.task_id.clone(),
-                },
-                through_seq,
-            );
+            let query = EventQuery {
+                after_seq: Some(cursor),
+                limit: Some(page_size),
+                session_id: filter.session_id.clone(),
+                task_id: filter.task_id.clone(),
+            };
+            let page = blocking(&kernel, move |kernel| {
+                kernel.list_events_through(&query, through_seq)
+            })
+            .await;
             match page {
                 Ok(events) => {
                     if events.is_empty() {

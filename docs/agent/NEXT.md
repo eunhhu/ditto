@@ -15,9 +15,10 @@ and after numbers, and the gate:
 
 1. [025](tasks/025-cache-stable-layout.md) Phase A, cache-stable prompt
    layout, turn payload version 6 - complete (prefix reuse 50.6 % → 96.4 %).
-2. 026 Phase B, journal writer thread with group commit, WAL reader pool, hot
-   session state, turn prelude in one commit. Exit: before-dispatch ≤ 2 ms
-   median (today 5–10 ms), no SQLite on async workers.
+2. [026](tasks/026-thin-turn-start.md) Phase B, reused session context, kept
+   threads, one-commit prelude, storage off async threads - complete
+   (before-dispatch 5–10 ms → 1 ms; writer thread and reader pool deferred
+   with measurements).
 3. 027 Phase C, live delta plane, coalesced durable text, content-addressed
    blobs; web and Telegram on live deltas. Exit: ≤ 50 events per 1,000-delta
    answer (today 1,006), ≤ 3 journal bytes per answer byte (today 81–107).
@@ -39,6 +40,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [026](tasks/026-thin-turn-start.md) Thin turn start and storage off async
+  threads (ADR 0028 Phase B).
 - [025](tasks/025-cache-stable-layout.md) Cache-stable prompt layout, turn
   payload version 6 (ADR 0028 Phase A).
 - [023](tasks/023-web-fetch.md) `web.fetch` for links in the user's message,

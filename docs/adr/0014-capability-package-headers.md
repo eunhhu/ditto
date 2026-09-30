@@ -4,7 +4,9 @@
 
 Accepted for Task 007. Supersedes eager file-catalogue loading in the capability
 manifest specification; invocation, retrieval ordering, and event versions stay
-unchanged.
+unchanged. Amended by [ADR 0028](0028-thin-realtime-harness.md) Phase B: the
+kernel keeps the validated contracts of its three builtin tools after their
+first paging; the cache does not grow with selections.
 
 ## Context
 

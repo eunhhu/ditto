@@ -5,7 +5,7 @@ use axum::{
 };
 use ditto_protocol::{AgentRunQuery, ScheduleListQuery, ScheduleResponse, ScheduleRunCommand};
 
-use super::{AppState, runs::RunApiError};
+use super::{AppState, blocking, runs::RunApiError};
 
 pub(super) fn routes(loopback: bool) -> Router<AppState> {
     if !loopback {
@@ -26,52 +26,72 @@ async fn create(
     State(state): State<AppState>,
     Json(command): Json<ScheduleRunCommand>,
 ) -> Result<Json<ScheduleResponse>, RunApiError> {
-    Ok(Json(state.kernel.schedule_run(command)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.schedule_run(command)).await?,
+    ))
 }
 async fn inspect(
     State(state): State<AppState>,
     Query(query): Query<AgentRunQuery>,
 ) -> Result<Json<ScheduleResponse>, RunApiError> {
-    Ok(Json(state.kernel.inspect_schedule(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.inspect_schedule(query)).await?,
+    ))
 }
 async fn pending(
     State(state): State<AppState>,
     Query(query): Query<ScheduleListQuery>,
 ) -> Result<Json<Vec<ScheduleResponse>>, RunApiError> {
     Ok(Json(
-        state.kernel.list_pending_schedules(&query.session_id)?,
+        blocking(&state.kernel, move |kernel| {
+            kernel.list_pending_schedules(&query.session_id)
+        })
+        .await?,
     ))
 }
 async fn cancel(
     State(state): State<AppState>,
     Json(query): Json<AgentRunQuery>,
 ) -> Result<Json<ScheduleResponse>, RunApiError> {
-    Ok(Json(state.kernel.cancel_schedule(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.cancel_schedule(query)).await?,
+    ))
 }
 
 async fn create_repeat(
     State(state): State<AppState>,
     Json(command): Json<ditto_protocol::RepeatScheduleCommand>,
 ) -> Result<Json<ditto_protocol::RepeatScheduleResponse>, RunApiError> {
-    Ok(Json(state.kernel.repeat_schedule(command)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.repeat_schedule(command)).await?,
+    ))
 }
 async fn inspect_repeat(
     State(state): State<AppState>,
     Query(query): Query<AgentRunQuery>,
 ) -> Result<Json<ditto_protocol::RepeatScheduleResponse>, RunApiError> {
-    Ok(Json(state.kernel.inspect_repeat(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.inspect_repeat(query)).await?,
+    ))
 }
 async fn active_repeats(
     State(state): State<AppState>,
     Query(query): Query<ScheduleListQuery>,
 ) -> Result<Json<Vec<ditto_protocol::RepeatScheduleResponse>>, RunApiError> {
-    Ok(Json(state.kernel.list_active_repeats(&query.session_id)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| {
+            kernel.list_active_repeats(&query.session_id)
+        })
+        .await?,
+    ))
 }
 async fn cancel_repeat(
     State(state): State<AppState>,
     Json(query): Json<AgentRunQuery>,
 ) -> Result<Json<ditto_protocol::RepeatScheduleResponse>, RunApiError> {
-    Ok(Json(state.kernel.cancel_repeat(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.cancel_repeat(query)).await?,
+    ))
 }
 
 #[cfg(test)]

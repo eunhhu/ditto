@@ -38,6 +38,8 @@ use tempfile::TempDir;
 mod agent_runs;
 #[path = "read_only_turn/model_sort.rs"]
 mod model_sort;
+#[path = "read_only_turn/reuse.rs"]
+mod reuse;
 #[path = "read_only_turn/web_fetch.rs"]
 mod web_fetch;
 

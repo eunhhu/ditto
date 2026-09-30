@@ -90,9 +90,15 @@ impl ModelDriver for OfflineDriver {
     }
 }
 
-#[tokio::test]
+/// The daemon's own runtime, so debug builds reject journal access on async
+/// threads here as in production.
+#[test]
 #[ignore = "offline server launched and terminated by scripts/personal-baseline.py"]
-async fn fixture_server() {
+fn fixture_server() {
+    super::runtime().unwrap().block_on(serve_fixture());
+}
+
+async fn serve_fixture() {
     let data =
         PathBuf::from(std::env::var_os("DITTO_BASELINE_DATA").expect("baseline data required"));
     let bind = std::env::var("DITTO_BASELINE_BIND").expect("baseline bind required");
@@ -126,6 +132,7 @@ async fn fixture_server() {
         shutdown: shutdown.clone(),
     });
     let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
+    ditto_kernel::mark_async_runtime_thread();
     // Test-only first-process phase: explicit runs still use the fixture driver,
     // but due schedule/repeat work cannot acquire a claim until an enabled restart.
     let scheduler_driver = if std::env::var_os("DITTO_BASELINE_DISABLE_SCHEDULER_DRIVER").is_some()
@@ -136,7 +143,7 @@ async fn fixture_server() {
     };
     let (_, scheduler) = tokio::join!(
         async { axum::serve(listener, app).await.unwrap() },
-        kernel.run_scheduler(scheduler_driver, shutdown),
+        super::spawn_scheduler(kernel, scheduler_driver, shutdown),
     );
-    scheduler.unwrap();
+    scheduler.unwrap().unwrap();
 }

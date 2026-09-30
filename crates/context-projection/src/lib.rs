@@ -49,7 +49,8 @@ pub const MAX_SERIALIZED_CONTEXT_PAYLOAD_BYTES: usize = 131_072;
 pub const MAX_SESSION_INDEX_IDENTITIES: u64 = 65_536;
 /// Maximum accounted bytes retained for one session index.
 pub const MAX_SESSION_INDEX_BYTES: u64 = 256 * 1024 * 1024;
-/// Maximum canonical events inspected by one normal delta synchronization.
+/// Maximum context-node events applied by one normal delta synchronization;
+/// other event kinds are never read by a delta.
 pub const MAX_NORMAL_DELTA_EVENTS: u64 = 65_536;
 /// Maximum serialized context payload bytes inspected by one normal delta.
 pub const MAX_NORMAL_DELTA_CONTEXT_BYTES: u64 = 64 * 1024 * 1024;
@@ -564,6 +565,8 @@ pub struct ContextProjection {
     post_rebuild_snapshot_hook: Arc<Mutex<Option<PostRebuildSnapshotHook>>>,
     #[cfg(test)]
     post_active_snapshot_hook: Arc<Mutex<Option<PostActiveSnapshotHook>>>,
+    #[cfg(test)]
+    delta_event_limit: Arc<Mutex<Option<u64>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -592,9 +595,19 @@ struct CatchUpWork {
     verification_work: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DeltaVerificationBudget {
     work: CatchUpWork,
+    max_events: u64,
+}
+
+impl Default for DeltaVerificationBudget {
+    fn default() -> Self {
+        Self {
+            work: CatchUpWork::default(),
+            max_events: MAX_NORMAL_DELTA_EVENTS,
+        }
+    }
 }
 
 impl DeltaVerificationBudget {
@@ -603,7 +616,7 @@ impl DeltaVerificationBudget {
             &mut self.work.events,
             1,
             "normal delta events",
-            MAX_NORMAL_DELTA_EVENTS,
+            self.max_events,
         )?;
         self.charge_work(1)
     }
@@ -639,7 +652,7 @@ impl DeltaVerificationBudget {
     }
 
     fn remaining_events(&self) -> u64 {
-        MAX_NORMAL_DELTA_EVENTS.saturating_sub(self.work.events)
+        self.max_events.saturating_sub(self.work.events)
     }
 }
 
@@ -697,6 +710,8 @@ impl ContextProjection {
             post_rebuild_snapshot_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             post_active_snapshot_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            delta_event_limit: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -738,6 +753,28 @@ impl ContextProjection {
                 }
             }),
         )
+    }
+
+    /// Whether the session's active context depends only on the node set: no
+    /// task-scoped node and no validity window. Its snapshot is then the same
+    /// for every task and evaluation time until the next context node.
+    pub fn session_context_is_invariant(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, ContextProjectionError> {
+        SessionId::new(session_id)?;
+        let _gate = self.sync_gate()?;
+        let connection = self.connection()?;
+        Ok(connection.query_row(
+            "SELECT NOT EXISTS(
+                 SELECT 1 FROM projected_nodes
+                 WHERE session_id = ?1
+                   AND (task_id IS NOT NULL
+                        OR valid_from_millis IS NOT NULL
+                        OR valid_until_millis IS NOT NULL))",
+            [session_id],
+            |row| row.get(0),
+        )?)
     }
 
     fn has_source_verification(&self) -> Result<bool, ContextProjectionError> {
@@ -1491,15 +1528,12 @@ impl ContextProjection {
         through_seq: i64,
     ) -> Result<(), ContextProjectionError> {
         let mut overlay = HashMap::<(String, String), SessionIndexIdentity>::new();
-        let mut budget = DeltaVerificationBudget::default();
+        let mut budget = self.delta_budget();
         let mut cursor = after_seq;
         while cursor < through_seq {
             if budget.remaining_events() == 0 {
-                return Err(ContextProjectionError::SessionIndexLimitExceeded {
-                    dimension: "normal delta events",
-                    attempted: MAX_NORMAL_DELTA_EVENTS + 1,
-                    maximum: MAX_NORMAL_DELTA_EVENTS,
-                });
+                ensure_no_context_event_after(event_store, cursor, through_seq, budget.max_events)?;
+                break;
             }
             let limit = usize::try_from(
                 budget
@@ -1507,19 +1541,9 @@ impl ContextProjection {
                     .min(u64::try_from(SYNC_PAGE_SIZE).unwrap_or(u64::MAX)),
             )
             .unwrap_or(SYNC_PAGE_SIZE);
-            let page = event_store.list_through(
-                &EventQuery {
-                    after_seq: Some(cursor),
-                    limit: Some(limit),
-                    ..EventQuery::default()
-                },
-                through_seq,
-            )?;
+            let page = context_page(event_store, cursor, through_seq, limit)?;
             let Some(last) = page.last() else {
-                return Err(ContextProjectionError::HighWaterUnreachable {
-                    cursor,
-                    high_water: through_seq,
-                });
+                break;
             };
             let mut previous = cursor;
             for event in &page {
@@ -1723,6 +1747,27 @@ impl ContextProjection {
         })
     }
 
+    /// The normal delta envelope; in-crate tests may lower its node ceiling.
+    fn delta_budget(&self) -> DeltaVerificationBudget {
+        #[cfg(test)]
+        if let Some(max_events) = *self
+            .delta_event_limit
+            .lock()
+            .expect("delta event limit lock")
+        {
+            return DeltaVerificationBudget {
+                max_events,
+                ..DeltaVerificationBudget::default()
+            };
+        }
+        DeltaVerificationBudget::default()
+    }
+
+    /// Apply the context-node events after the checkpoint through the
+    /// high-water, read from the kind index. No other event kind changes
+    /// projection state, so the work follows context changes rather than
+    /// journal length. Each full page commits with its last node as the
+    /// anchor; the final page anchors the checkpoint at the high-water event.
     fn catch_up_from_checkpoint(
         &self,
         event_store: &EventStore,
@@ -1730,19 +1775,19 @@ impl ContextProjection {
         mut checkpoint: ProjectionCheckpoint,
         mode: CatchUpMode,
     ) -> Result<CatchUpResult, CatchUpError> {
-        let mut delta_budget =
-            (mode == CatchUpMode::VerifiedDelta).then(DeltaVerificationBudget::default);
+        let mut delta_budget = (mode == CatchUpMode::VerifiedDelta).then(|| self.delta_budget());
         let mut work = CatchUpWork::default();
         let mut cursor = checkpoint.through_seq;
         while cursor < high_water {
             let page_limit = match delta_budget.as_ref() {
                 Some(budget) if budget.remaining_events() == 0 => {
-                    return Err(ContextProjectionError::SessionIndexLimitExceeded {
-                        dimension: "normal delta events",
-                        attempted: MAX_NORMAL_DELTA_EVENTS + 1,
-                        maximum: MAX_NORMAL_DELTA_EVENTS,
-                    }
-                    .into());
+                    ensure_no_context_event_after(
+                        event_store,
+                        cursor,
+                        high_water,
+                        budget.max_events,
+                    )?;
+                    0
                 }
                 Some(budget) => usize::try_from(
                     budget
@@ -1752,21 +1797,8 @@ impl ContextProjection {
                 .unwrap_or(SYNC_PAGE_SIZE),
                 None => SYNC_PAGE_SIZE,
             };
-            let page = event_store
-                .list_through(
-                    &EventQuery {
-                        after_seq: Some(cursor),
-                        limit: Some(page_limit),
-                        ..EventQuery::default()
-                    },
-                    high_water,
-                )
-                .map_err(ContextProjectionError::from)?;
-            let Some(last) = page.last().cloned() else {
-                return Err(
-                    ContextProjectionError::HighWaterUnreachable { cursor, high_water }.into(),
-                );
-            };
+            let page = context_page(event_store, cursor, high_water, page_limit)?;
+            let anchor = page_anchor(event_store, &page, page_limit, cursor, high_water)?;
             let mut previous = cursor;
             for event in &page {
                 if let Some(budget) = delta_budget.as_mut() {
@@ -1805,8 +1837,8 @@ impl ContextProjection {
                     "UPDATE projection_checkpoint SET schema_version = ?1, through_seq = ?2, through_event_id = ?3, canonical_state_digest = ?4 WHERE singleton = 1",
                     params![
                         CONTEXT_PROJECTION_SCHEMA_VERSION,
-                        last.seq,
-                        &last.event_id,
+                        anchor.seq,
+                        &anchor.event_id,
                         page_digest.as_slice(),
                     ],
                 )
@@ -1817,11 +1849,11 @@ impl ContextProjection {
                 transaction.commit().map_err(ContextProjectionError::from)?;
                 checkpoint.canonical_state_digest = page_digest;
             }
-            cursor = last.seq;
+            cursor = anchor.seq;
             checkpoint = ProjectionCheckpoint {
                 schema_version: CONTEXT_PROJECTION_SCHEMA_VERSION,
-                through_seq: last.seq,
-                through_event_id: Some(last.event_id),
+                through_seq: anchor.seq,
+                through_event_id: Some(anchor.event_id),
                 canonical_state_digest: checkpoint.canonical_state_digest,
             };
         }
@@ -2490,6 +2522,58 @@ fn read_checkpoint(
         })
     })
     .transpose()
+}
+
+/// One page of context-node events after `cursor` through `high_water`.
+fn context_page(
+    event_store: &EventStore,
+    cursor: i64,
+    high_water: i64,
+    limit: usize,
+) -> Result<Vec<EventRecord>, ContextProjectionError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(event_store.list_kind_through(
+        event_kind::CONTEXT_NODE_RECORDED,
+        cursor,
+        high_water,
+        limit,
+    )?)
+}
+
+/// The event a page's checkpoint anchors at: its last node while more may
+/// follow, otherwise the high-water event itself.
+fn page_anchor(
+    event_store: &EventStore,
+    page: &[EventRecord],
+    limit: usize,
+    cursor: i64,
+    high_water: i64,
+) -> Result<EventRecord, ContextProjectionError> {
+    match page.last() {
+        Some(last) if page.len() == limit => Ok(last.clone()),
+        _ => event_store
+            .get_by_seq(high_water)?
+            .ok_or(ContextProjectionError::HighWaterUnreachable { cursor, high_water }),
+    }
+}
+
+/// An exhausted delta budget fails only when another context node is due.
+fn ensure_no_context_event_after(
+    event_store: &EventStore,
+    cursor: i64,
+    high_water: i64,
+    maximum: u64,
+) -> Result<(), ContextProjectionError> {
+    if event_store.has_kind_between(event_kind::CONTEXT_NODE_RECORDED, cursor, high_water)? {
+        return Err(ContextProjectionError::SessionIndexLimitExceeded {
+            dimension: "normal delta events",
+            attempted: maximum.saturating_add(1),
+            maximum,
+        });
+    }
+    Ok(())
 }
 
 fn checkpoint_anchor_matches(
@@ -4166,6 +4250,97 @@ mod tests {
     use ditto_protocol::NewEvent;
     use ditto_retrieval::{MAX_TOTAL_CANDIDATE_BYTES, RetrievalWorkKind};
     use serde_json::json;
+
+    #[test]
+    fn delta_applies_n_context_nodes_and_rejects_node_n_plus_one_unread() {
+        fn record(store: &EventStore, source: &EventRecord, id: &str) -> EventRecord {
+            let node = ContextNode {
+                id: id.into(),
+                kind: ContextNodeKind::Claim,
+                summary: format!("bounded {id}"),
+                origin: ContextOrigin::User,
+                epistemic: EpistemicStatus::Verified,
+                scope: ContextScope::Session,
+                lens: ContextLens::Task,
+                confidence: 1.0,
+                source_event_ids: vec![source.event_id.clone()],
+                supersedes: Vec::new(),
+                valid_from: None,
+                valid_until: None,
+            };
+            store
+                .append(NewEvent {
+                    session_id: Some("session-bound".into()),
+                    task_id: None,
+                    actor: EventActor::System,
+                    kind: event_kind::CONTEXT_NODE_RECORDED.into(),
+                    payload: serde_json::to_value(ContextNodeRecordedPayloadV1::new(node))
+                        .expect("context payload"),
+                    causation_id: Some(source.event_id.clone()),
+                    correlation_id: Some("session-bound".into()),
+                    span_id: None,
+                })
+                .expect("context event")
+        }
+        fn ordinary(store: &EventStore) -> EventRecord {
+            store
+                .append(NewEvent {
+                    session_id: Some("session-bound".into()),
+                    task_id: None,
+                    actor: EventActor::User,
+                    kind: "fixture.source".into(),
+                    payload: json!({"source": true}),
+                    causation_id: None,
+                    correlation_id: Some("session-bound".into()),
+                    span_id: None,
+                })
+                .expect("ordinary event")
+        }
+        for (nodes, accepted) in [(3, true), (4, false)] {
+            let directory = tempfile::tempdir().expect("delta bound fixture");
+            let store = EventStore::open(directory.path().join("state.db")).expect("event store");
+            let projection = ContextProjection::open_in(directory.path()).expect("projection");
+            let source = ordinary(&store);
+            projection.rebuild(&store).expect("verify source prefix");
+            *projection
+                .delta_event_limit
+                .lock()
+                .expect("delta event limit") = Some(3);
+            let mut last_node = 0;
+            for index in 0..nodes {
+                ordinary(&store);
+                last_node = record(&store, &source, &format!("bound-{index}")).seq;
+            }
+            let tail = ordinary(&store);
+            let result = projection.synchronize_through(&store, tail.seq);
+            if accepted {
+                let synchronized = result.expect("exactly N context nodes are accepted");
+                assert_eq!(synchronized.checkpoint.through_seq, tail.seq);
+            } else {
+                let error = result.expect_err("context node N+1 is rejected");
+                assert!(matches!(
+                    error,
+                    ContextProjectionError::SessionIndexLimitExceeded {
+                        dimension: "normal delta events",
+                        attempted: 4,
+                        maximum: 3,
+                    }
+                ));
+                let nth = store
+                    .list_kind_through(event_kind::CONTEXT_NODE_RECORDED, 0, tail.seq, 3)
+                    .expect("first N nodes")
+                    .last()
+                    .expect("node N")
+                    .seq;
+                assert!(nth < last_node);
+                assert_eq!(
+                    projection.checkpoint().expect("checkpoint").through_seq,
+                    nth,
+                    "node N+1 must not be read into or committed by a projection page"
+                );
+            }
+        }
+    }
 
     #[test]
     fn persistent_post_rebuild_corruption_returns_typed_snapshot_integrity_failure() {

@@ -1,7 +1,8 @@
 # ADR 0028: Thin real-time harness
 
 Status: proposed on 2026-09-30 and decided per phase as each lands. Phase A
-was accepted with Task 025 (turn payload version 6). The full design is in
+was accepted with Task 025 (turn payload version 6) and Phase B with Task 026.
+The full design is in
 [docs/design/realtime-harness.md](../design/realtime-harness.md).
 
 ## Context
@@ -85,3 +86,52 @@ Four parts of the design were deferred:
   still varies with the question, now presented in ID order.
 - **Excerpt blocks for exchanges that left the window.** They are dropped, as
   before.
+
+## Phase B as accepted (Task 026)
+
+Phase B removes the journal from the turn's critical path and SQLite from
+async runtime threads, with no wire or payload change:
+
+- **Reused session context.** A run reuses its session's verified context
+  while no `context.node.recorded` event has been committed since it was
+  taken; one kind-index probe checks that, including for other writers.
+  Sessions with a task-scoped node or a validity window are compiled from the
+  projection every turn. Sources are checked once for every task of the
+  session, so reused context skips per-turn provenance lookups.
+- **Kept threads.** Each session's thread is kept and advanced by the
+  conversation events committed since the last turn, and reloaded when absent,
+  far behind or ahead.
+- **Context-only deltas.** The projection reads only the delta's context nodes
+  through the kind index, and its normal-delta ceiling counts them. This
+  amends ADR 0013, whose deltas read every event.
+- **Tool contracts validated once.** `InvocableContract` binds a manifest,
+  schema and revision validated at first use into every later epoch. The
+  kernel keeps at most its three builtin contracts, which amends ADR 0014's
+  "no manifest cache" for that fixed set; package changes already need a
+  restart.
+- **One commit before dispatch.** Context compilation and capability
+  selection are staged and committed with the first model request, or with
+  the failure that ends the turn first. Events are published after that
+  commit, so "durable before published" holds per batch.
+- **Storage off async threads.** Handlers use the blocking pool; runs, sorts
+  and the scheduler run on blocking threads that drive their I/O through the
+  runtime (tasks on a current-thread runtime). Debug builds reject journal
+  access on any thread that drives async tasks.
+
+Measured with `scripts/measure-harness.py` on the same machine, the durable
+input to `model.requested` fell from a 5 ms (200 deltas) and 10 ms (1,000
+deltas) median to 1 ms for both (mean 1.0–1.4 ms), and the client's POST to
+the provider receiving the request from 6.5 ms and 11.8 ms to 2.7–3.0 ms.
+The cost per streamed delta fell from 74–80 µs to 55–60 µs. Acceptance gained
+0.1 ms for the hop to the blocking pool.
+
+Three parts of the design were deferred:
+
+- **A journal writer thread with group commit.** Appends from blocking
+  threads under the one connection lock showed no contention at personal
+  scale, and Phase C cuts the event rate 20–50×. Measure again with Phase D's
+  parallel sessions.
+- **A WAL reader pool.** Same reason: no read contention was measured.
+- **Session actors.** Hot state is kept as reused context and kept threads;
+  per-session run queues belong to Phase D.
+

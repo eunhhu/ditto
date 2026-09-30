@@ -46,8 +46,9 @@ schema-4, checkpointed, WAL-backed cache that can be deleted and rebuilt from
 canonical events; it never replaces event history. Startup and recovery replay
 the source in bounded pages and issue a process-local verification proof for
 the exact event anchor, global digest, and compact per-session identity index.
-Normal retrieval and admission then use only a bounded event delta, exact
-source-event lookups, and proof-gated index lookups. Global and per-session
+Normal retrieval and admission then read only the context nodes of the event
+delta through the kind index, exact source-event lookups, and proof-gated index
+lookups. Global and per-session
 digest chains cover canonical node, provenance, causation, scope, and
 supersession metadata, while fixed entry, byte, event, payload, and work limits
 reject rather than truncate an over-limit operation.
@@ -170,7 +171,8 @@ complements and malformed headers fail catalogue load. Full manifests remain
 runtime input: selected paging verifies their digest and exact header projection
 before schema binding or invocation. Header-backed startup/search read no full
 manifest bodies; headerless packages use a metered bounded compatibility read.
-No full-manifest cache accumulates as packages are selected. See ADR 0014.
+No full-manifest cache accumulates as packages are selected; the kernel keeps
+only its three builtin tool contracts once validated. See ADR 0014 and 0028.
 
 ## Effect firewall
 
@@ -278,6 +280,13 @@ kernel durably records one client retry identity before dispatch, owns one
 bounded active execution independent of the HTTP connection, and derives
 terminal/interrupted state from indexed event boundaries. A verified context
 snapshot supplies current scoped memory; model inference is never housekeeping.
+A run reuses its session's verified context while no context node has been
+committed since, and each session's thread is kept and advanced by the
+conversation events committed since the last turn; the turn's prelude commits
+with its first model request (ADR 0028 Phase B).
+Runs, sorts and the scheduler journal from blocking threads, and daemon
+handlers run kernel calls on the blocking pool, so no async runtime thread
+waits on SQLite; debug builds reject journal access on those threads.
 The daemon defaults to disabled execution and only an explicit operator provider
 selection enables requests. Cancellation and graceful shutdown use the same
 loop token and deadline. No durable queue or automatic restart is implied.
