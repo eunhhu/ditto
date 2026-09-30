@@ -8,6 +8,7 @@ use ditto_artifact_store::{ArtifactStore, ArtifactStoreError, DEFAULT_MAX_OBJECT
 use ditto_capability::{CapabilityCard, CapabilityCatalog, CapabilityError};
 pub use ditto_capability::{ExecutionEpochEvidence, SearchContext};
 use ditto_context_projection::{ContextProjection, ContextProjectionError};
+pub use ditto_event_store::mark_async_runtime_thread;
 use ditto_event_store::{EventStore, EventStoreError};
 use ditto_protocol::{
     EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
@@ -131,13 +132,15 @@ struct KernelInner {
     artifacts: ArtifactStore,
     capabilities: CapabilityCatalog,
     context_projection: ContextProjection,
-    context_admission_gate: Mutex<()>,
+    context_admission_gate: Mutex<agent_run::ContextReuse>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     event_sender: broadcast::Sender<EventRecord>,
     agent_runs: Mutex<agent_run::RunSlot>,
     scheduler_wake: tokio::sync::Notify,
     scheduler_state: std::sync::atomic::AtomicU8,
     web_fetch: Option<ditto_web_fetch::FetchPolicy>,
+    tool_contracts: turn::ToolContracts,
+    thread_reuse: Mutex<turn::ThreadReuse>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -192,13 +195,15 @@ impl DittoKernel {
                 artifacts,
                 capabilities,
                 context_projection,
-                context_admission_gate: Mutex::new(()),
+                context_admission_gate: Mutex::new(Default::default()),
                 embedding_provider,
                 event_sender,
                 agent_runs: Mutex::new(agent_run::RunSlot::default()),
                 scheduler_wake: tokio::sync::Notify::new(),
                 scheduler_state: std::sync::atomic::AtomicU8::new(0),
                 web_fetch: config.web_fetch,
+                tool_contracts: Default::default(),
+                thread_reuse: Default::default(),
             }),
         })
     }
@@ -357,8 +362,40 @@ impl DittoKernel {
         Ok(self.inner.events.append(event)?)
     }
 
+    /// One commit for several events, published in order once durable.
+    fn append_and_publish_batch(
+        &self,
+        events: Vec<(String, NewEvent)>,
+    ) -> Result<Vec<EventRecord>, KernelError> {
+        let records = self.inner.events.append_batch(events)?;
+        for record in &records {
+            self.publish(record);
+        }
+        Ok(records)
+    }
+
+    /// Run journaling work on the blocking pool while the runtime drives its
+    /// I/O, so its SQLite calls never occupy an async worker (ADR 0028 Phase
+    /// B). A current-thread runtime has no worker pool to protect and must
+    /// drive the work's I/O on its one thread, so there it stays a task. The
+    /// work is detached; its own tokens and guards own its lifetime.
+    fn spawn_journaling(
+        runtime: &tokio::runtime::Handle,
+        work: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            drop(runtime.spawn(work));
+        } else {
+            let driver = runtime.clone();
+            drop(runtime.spawn_blocking(move || driver.block_on(work)));
+        }
+    }
+
     fn publish(&self, event: &EventRecord) {
-        let _ = self.inner.event_sender.send(event.clone());
+        // Durable already; only a live subscriber needs the copy.
+        if self.inner.event_sender.receiver_count() > 0 {
+            let _ = self.inner.event_sender.send(event.clone());
+        }
     }
 }
 

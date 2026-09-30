@@ -4334,7 +4334,7 @@ fn verified_snapshot_reuses_one_full_replay_and_advances_by_delta() {
         .verification_metrics()
         .expect("initial metrics");
     assert_eq!(initial.full_replays, 1);
-    assert_eq!(initial.full_replay_events, 2);
+    assert_eq!(initial.full_replay_events, 1);
     assert_eq!(initial.delta_events, 0);
 
     verified_snapshot(&fixture, SESSION, None).expect("first fast snapshot");
@@ -4346,7 +4346,7 @@ fn verified_snapshot_reuses_one_full_replay_and_advances_by_delta() {
     assert_eq!(steady.full_replays, 1);
     assert_eq!(steady.delta_synchronizations, 0);
     assert_eq!(steady.fast_snapshots, 2);
-    assert_eq!(steady.full_replay_events, 2);
+    assert_eq!(steady.full_replay_events, 1);
     assert_eq!(steady.delta_events, 0);
 
     record_node(
@@ -4375,7 +4375,7 @@ fn verified_snapshot_reuses_one_full_replay_and_advances_by_delta() {
     assert_eq!(delta.full_replays, 1);
     assert_eq!(delta.delta_synchronizations, 1);
     assert_eq!(delta.fast_snapshots, 3);
-    assert_eq!(delta.full_replay_events, 2);
+    assert_eq!(delta.full_replay_events, 1);
     assert_eq!(delta.delta_events, 1);
     assert!(delta.delta_context_payload_bytes > 0);
     assert!(delta.delta_verification_work >= 5);
@@ -4561,79 +4561,32 @@ fn compact_index_row_state_and_checkpoint_tampering_rebuild_once_without_authori
 }
 
 #[test]
-fn normal_delta_accepts_n_events_and_rejects_before_committing_n_plus_one() {
-    let at_limit = fixture();
-    at_limit
+fn normal_delta_never_reads_ordinary_events() {
+    // A delta longer than the context-node ceiling still synchronizes to its
+    // high-water with no event work: only context nodes are read.
+    let noisy = fixture();
+    noisy
         .projection
-        .rebuild(&at_limit.store)
+        .rebuild(&noisy.store)
         .expect("verify empty source prefix");
-    let at_limit_path = at_limit._dir.path().join("state.db");
     bulk_insert_noise(
-        &at_limit_path,
+        &noisy._dir.path().join("state.db"),
         SESSION,
-        "delta-at-limit",
-        MAX_NORMAL_DELTA_EVENTS,
+        "delta-noise",
+        MAX_NORMAL_DELTA_EVENTS + 1,
     );
-    let high_water = at_limit.store.latest_seq().expect("delta high-water");
-    assert_eq!(
-        u64::try_from(high_water).expect("positive high-water"),
-        MAX_NORMAL_DELTA_EVENTS
-    );
-    let synchronized = at_limit
+    let high_water = noisy.store.latest_seq().expect("noise high-water");
+    let synchronized = noisy
         .projection
-        .synchronize_through(&at_limit.store, high_water)
-        .expect("exactly N delta events are accepted");
+        .synchronize_through(&noisy.store, high_water)
+        .expect("ordinary events are skipped by the kind index");
     assert_eq!(synchronized.checkpoint.through_seq, high_water);
-    let metrics = at_limit
+    let metrics = noisy
         .projection
         .verification_metrics()
-        .expect("at-limit metrics");
-    assert_eq!(metrics.full_replay_events, 0);
-    assert_eq!(metrics.delta_events, MAX_NORMAL_DELTA_EVENTS);
-    assert_eq!(metrics.delta_verification_work, MAX_NORMAL_DELTA_EVENTS);
-
-    let over_limit = fixture();
-    over_limit
-        .projection
-        .rebuild(&over_limit.store)
-        .expect("verify second empty source prefix");
-    let over_limit_path = over_limit._dir.path().join("state.db");
-    bulk_insert_noise(
-        &over_limit_path,
-        SESSION,
-        "delta-over-limit",
-        MAX_NORMAL_DELTA_EVENTS + 1,
-    );
-    let over_high_water = over_limit
-        .store
-        .latest_seq()
-        .expect("over-limit high-water");
-    let error = over_limit
-        .projection
-        .synchronize_through(&over_limit.store, over_high_water)
-        .expect_err("delta event N+1 is rejected");
-    assert!(matches!(
-        error,
-        ContextProjectionError::SessionIndexLimitExceeded {
-            dimension: "normal delta events",
-            attempted,
-            maximum: MAX_NORMAL_DELTA_EVENTS,
-        } if attempted == MAX_NORMAL_DELTA_EVENTS + 1
-    ));
-    let checkpoint = over_limit
-        .projection
-        .checkpoint()
-        .expect("checkpoint after bounded failure");
-    assert_eq!(
-        u64::try_from(checkpoint.through_seq).expect("positive checkpoint"),
-        MAX_NORMAL_DELTA_EVENTS,
-        "the over-limit event must not be read into or committed by a projection page"
-    );
-    assert_eq!(
-        over_limit.store.count().expect("canonical source count"),
-        MAX_NORMAL_DELTA_EVENTS + 1,
-        "projection rejection must not modify the event spine"
-    );
+        .expect("noise metrics");
+    assert_eq!(metrics.delta_events, 0);
+    assert_eq!(metrics.delta_verification_work, 0);
 }
 
 #[test]
@@ -4688,7 +4641,7 @@ fn million_event_prefix_steady_state_visits_only_delta_and_compact_index() {
         .verification_metrics()
         .expect("scale replay metrics");
     assert_eq!(initial_metrics.full_replays, 1);
-    assert_eq!(initial_metrics.full_replay_events, prefix_events);
+    assert_eq!(initial_metrics.full_replay_events, CONTEXT_IDENTITIES);
     assert_eq!(initial_metrics.delta_events, 0);
 
     let delta = noise(&fixture.store, Some(SESSION), None);
@@ -4702,11 +4655,11 @@ fn million_event_prefix_steady_state_visits_only_delta_and_compact_index() {
         .verification_metrics()
         .expect("scale steady-state metrics");
     assert_eq!(steady_metrics.full_replays, 1);
-    assert_eq!(steady_metrics.full_replay_events, prefix_events);
+    assert_eq!(steady_metrics.full_replay_events, CONTEXT_IDENTITIES);
     assert_eq!(steady_metrics.delta_synchronizations, 1);
-    assert_eq!(steady_metrics.delta_events, 1);
+    assert_eq!(steady_metrics.delta_events, 0);
     assert_eq!(steady_metrics.delta_context_payload_bytes, 0);
-    assert_eq!(steady_metrics.delta_verification_work, 1);
+    assert_eq!(steady_metrics.delta_verification_work, 0);
 
     let draft = ContextNodeDraft::session(
         SESSION,
@@ -4731,7 +4684,7 @@ fn million_event_prefix_steady_state_visits_only_delta_and_compact_index() {
         1
     );
     assert_eq!(admission_metrics.full_replays, 1);
-    assert_eq!(admission_metrics.delta_events, 1);
+    assert_eq!(admission_metrics.delta_events, 0);
 
     eprintln!(
         "task006_scale_evidence ordinary_events={ORDINARY_EVENTS} context_identities={CONTEXT_IDENTITIES} full_replay_events={} steady_delta_events={} admission_index_lookups={}",

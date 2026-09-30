@@ -356,7 +356,7 @@ pub(super) fn agent_run_text(input: &EventRecord) -> Option<&str> {
     input.payload.get("text")?.as_str()
 }
 
-fn bounded_history_text(text: &str) -> String {
+pub(super) fn bounded_history_text(text: &str) -> String {
     const SUFFIX: &str = "...[truncated]";
     if text.len() <= MAX_HISTORY_MESSAGE_BYTES {
         return text.to_owned();

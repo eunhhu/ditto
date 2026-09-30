@@ -89,8 +89,8 @@ compact-index digest. Bounded startup/recovery replay derives global and
 per-session digest chains plus immutable identity, provenance, causation,
 scope, and supersession metadata; only a process-local proof for that exact
 generation permits normal index use. Steady-state synchronization reads the
-checkpoint delta and exact cited source IDs instead of rescanning an affected
-session from sequence zero. The index and delta have fixed entry, byte, event,
+context nodes of the checkpoint delta, through the kind index, and exact cited
+source IDs instead of rescanning an affected session from sequence zero. The index and delta have fixed entry, byte, event,
 payload, and verification-work limits and never repair or rewrite canonical
 events. A durable append is the acceptance point. If post-append projection
 synchronization fails, the kernel still makes one live publication attempt and
@@ -206,7 +206,9 @@ drains it, and closes event followers. Crashes/storage failure can leave an
 interrupted identity. The supported writer remains one kernel and its clones.
 
 Current session/task context comes from a bounded source-verified projection
-snapshot, with supersession and scope filtering before lexical compilation.
+snapshot, with supersession and scope filtering before lexical compilation. A
+run reuses that snapshot while no context node has been committed since it was
+taken, unless the session has task-scoped or time-windowed nodes.
 The recorded capsule is stable for the turn; subsequent corrections affect
 later turns. Retrieval failure blocks provider I/O. No transcript injection,
 memory inference, semantic embedding worker, or housekeeping call is added.
@@ -512,7 +514,9 @@ event through `through_seq` was considered, so a follower streams after it.
 Unknown fields and non-canonical sessions return 400. The view writes nothing.
 Model request/output events use the request ID as their span; capability and
 execution events use the call ID. Every transition is durably appended before it
-is published or returned. Each `model.output` also records the
+is published or returned. A turn's `context.compiled` and
+`capabilities.selected` commit with its first `model.requested`, or with the
+`turn.failed` that ends it first, in one transaction. Each `model.output` also records the
 integer-millisecond instant at which the fully validated, bounded semantic event
 was admitted.
 

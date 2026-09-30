@@ -6,7 +6,7 @@ use axum::{
 };
 use ditto_protocol::{AgentRunQuery, SortRunResponse, SortRunStatus, StartSortCommand};
 
-use super::{AppState, runs::RunApiError};
+use super::{AppState, blocking, runs::RunApiError};
 
 /// This route group is composed only for a loopback listener.
 pub(super) fn routes(loopback: bool) -> Router<AppState> {
@@ -23,7 +23,7 @@ async fn start(
     State(state): State<AppState>,
     Json(command): Json<StartSortCommand>,
 ) -> Result<(StatusCode, Json<SortRunResponse>), RunApiError> {
-    let result = state.kernel.start_sort(command)?;
+    let result = blocking(&state.kernel, move |kernel| kernel.start_sort(command)).await?;
     let code = if result.status == SortRunStatus::Running {
         StatusCode::ACCEPTED
     } else {
@@ -36,14 +36,18 @@ async fn inspect(
     State(state): State<AppState>,
     Query(query): Query<AgentRunQuery>,
 ) -> Result<Json<SortRunResponse>, RunApiError> {
-    Ok(Json(state.kernel.inspect_sort(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.inspect_sort(query)).await?,
+    ))
 }
 
 async fn cancel(
     State(state): State<AppState>,
     Json(query): Json<AgentRunQuery>,
 ) -> Result<Json<SortRunResponse>, RunApiError> {
-    Ok(Json(state.kernel.cancel_sort(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.cancel_sort(query)).await?,
+    ))
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use ditto_protocol::{
     MemoryPage, MemoryQuery, MemoryWriteOutcome, RememberInputCommand, RememberInputResponse,
 };
 
-use super::AppState;
+use super::{AppState, blocking};
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -22,7 +22,7 @@ async fn remember(
     State(state): State<AppState>,
     Json(command): Json<RememberInputCommand>,
 ) -> Result<(StatusCode, Json<RememberInputResponse>), MemoryApiError> {
-    let response = state.kernel.remember_input(command)?;
+    let response = blocking(&state.kernel, move |kernel| kernel.remember_input(command)).await?;
     let status = match response.outcome {
         MemoryWriteOutcome::Recorded => StatusCode::CREATED,
         MemoryWriteOutcome::AlreadyRecorded => StatusCode::OK,
@@ -35,7 +35,9 @@ async fn list(
     State(state): State<AppState>,
     Query(query): Query<MemoryQuery>,
 ) -> Result<Json<MemoryPage>, MemoryApiError> {
-    Ok(Json(state.kernel.list_memories(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.list_memories(query)).await?,
+    ))
 }
 
 struct MemoryApiError(KernelError);

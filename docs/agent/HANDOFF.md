@@ -24,7 +24,9 @@ and checks establish a new fact.
   stacks Task 018 on it, and `dev/task-019-openai-compatible`,
   `dev/task-020-web-app`, `dev/task-021-telegram`,
   `dev/task-022-assistant-instructions` and `dev/task-023-web-fetch` stack
-  Tasks 019–023. Nothing is pushed.
+  Tasks 019–023; `dev/design-realtime-harness`,
+  `dev/task-025-cache-stable-layout` and `dev/task-026-thin-turn-start` stack
+  the harness design and Tasks 025–026. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -32,9 +34,8 @@ and checks establish a new fact.
   because it reverses ADR 0015's exclusion of model tool invocation.
 - Still on 2026-09-30 the user asked for the thinnest harness designed around
   concurrency, real-time streaming and context injection timing and scope. The
-  design ([realtime-harness](../design/realtime-harness.md), ADR 0028) is on
-  `dev/design-realtime-harness`. Phase A is implemented on
-  `dev/task-025-cache-stable-layout` (Task 025); phases B–E are not.
+  design is [realtime-harness](../design/realtime-harness.md) and ADR 0028.
+  Phases A and B are implemented (Tasks 025–026); phases C–E are not.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
   validator wording. The user prioritized fixing both, trimming process
@@ -52,7 +53,11 @@ and checks establish a new fact.
   authority; schedule and repeat indexes are projected in the same transaction.
   Artifacts are SHA-256 content-addressed with verified reads. The context
   projection (`context-projection.db`, schema 4) is a rebuildable,
-  digest-verified cache replayed once at open, then delta-verified.
+  digest-verified cache replayed once at open, then delta-verified; replay and
+  deltas read only context nodes, through the kind index. Storage work runs on
+  blocking threads: daemon handlers use the blocking pool, and runs, sorts and
+  the scheduler journal from blocking threads. Debug builds reject journal
+  access on threads that drive async tasks.
 - **Ingress.** Typed commands only: record-only input, memory save/list/correct,
   run/status/cancel, conversation reset and view, and loopback-only sort,
   schedule and repeat. The daemon also serves the embedded web app (ADR 0024)
@@ -112,7 +117,11 @@ and checks establish a new fact.
     most 16, 24 KiB).
 
   Older versions replay under their original rules; a turn never mixes
-  versions. `ditto chat` is an interactive client with `/new` and
+  versions. A run reuses its session's verified context while no context node
+  has been committed since (sessions with task-scoped or windowed nodes are
+  recompiled), keeps each session's thread between turns, and commits
+  `context.compiled` and `capabilities.selected` with its first model request.
+  Builtin tool contracts are validated once per process. `ditto chat` is an interactive client with `/new` and
   `/remember`; `ditto new` starts a thread. Answers stay `unverified`; model runs never emit
   `task.completed`. The loop
   is split into stage functions (context, capability selection, request
@@ -135,37 +144,31 @@ and checks establish a new fact.
   version-6 ID-ordered presentation. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 025
+## Latest verified slice: Task 026
 
-- [Contract and evidence](tasks/025-cache-stable-layout.md). Turn payload
-  version 6 makes everything before the latest message byte-identical between
-  turns:
-  - the local time moves from the instructions into a note leading the
-    message;
-  - the capsule is presented in ID order;
-  - `web.fetch` is always offered while enabled;
-  - the history window steps by eight exchanges.
+- [Contract and evidence](tasks/026-thin-turn-start.md) (ADR 0028 Phase B).
+  Reused session context, kept threads, context-only projection deltas, tool
+  contracts validated once and a one-commit prelude cut the durable input to
+  `model.requested` from a 5 ms and 10 ms median (200- and 1,000-delta
+  answers) to 1 ms for both, independent of the previous answer. Storage work
+  left the async runtime threads, enforced by a debug guard. No wire or
+  payload change; replay is unchanged.
+- Its gate passed on its final tree (557 Rust tests).
 
-  Median prefix reuse rose from 50.6 % to 96.4 %. The prefix test fails with
-  relevance ordering restored. Replay rejects forged notes, offsets, windows
-  and mixed versions.
-- Its gate passed on its final tree (547 Rust tests). The first run failed
-  because the offline baseline's blocking double compared the whole message,
-  which now starts with the note.
+## Previous slice: Task 025
 
-## Previous slice: Task 023
-
-- [Contract and evidence](tasks/023-web-fetch.md): `web.fetch` for links in
-  the user's message (ADR 0027). Its gate passed on its final tree (544 Rust
-  tests).
+- [Contract and evidence](tasks/025-cache-stable-layout.md): turn payload
+  version 6 keeps the prompt prefix stable (median reuse 50.6 % to 96.4 %).
+  Its gate passed on its final tree (547 Rust tests).
 
 ## Known gaps
 
 - Measured harness baseline (2026-09-30, Raspberry Pi 5, release build,
   instant loopback model, `scripts/measure-harness.py`):
-  - 5–10 ms of work before dispatch;
-  - 74–80 µs and one SQLite transaction per streamed delta, 206 or 1,006
-    events per turn, 81–107 journal bytes per answer byte;
+  - 5–10 ms of work before dispatch (1 ms after Task 026);
+  - 74–80 µs (55–60 µs after Task 026) and one SQLite transaction per
+    streamed delta, 206 or 1,006 events per turn, 81–107 journal bytes per
+    answer byte;
   - median prompt prefix reuse between turns of 50.6 % (96.4 % after
     Task 025);
   - one of three simultaneous sessions accepted, the others HTTP 429.
@@ -214,9 +217,10 @@ and checks establish a new fact.
   verify the whole object; measure before adding indexes or caches.
 - Memory listing materializes the bounded active snapshot before paging; its
   10,000-candidate and byte limits include other active session context.
-- SQLite calls are synchronous inside async handlers, and the run slot holds a
-  `std::sync::Mutex` across storage writes; measure before adding a
-  high-concurrency gateway.
+- The run slot holds a `std::sync::Mutex` across storage writes, now on
+  blocking threads, and one connection lock serializes every journal read and
+  write; measure with Phase D's parallel sessions before adding a writer
+  thread or reader pool.
 - Context graph edges are validated but unused in ranking.
 - The context-projection authority workflow is one large module; split it
   without weakening its single-gate, single-rebuild or atomic-checkpoint

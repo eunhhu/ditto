@@ -1,4 +1,8 @@
-use std::{cell::Cell, collections::BTreeSet};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeSet,
+    sync::OnceLock,
+};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ditto_artifact_read::{
@@ -8,8 +12,8 @@ use ditto_artifact_read::{
 };
 use ditto_artifact_store::ArtifactRef;
 use ditto_capability::{
-    CapabilityDeriver, CapabilitySchema, InvocationCompiler, InvocationError, LiveExecutionEpoch,
-    UntrustedToolCall, UntrustedToolCallError,
+    CapabilityDeriver, CapabilitySchema, InvocableContract, InvocationCompiler, InvocationError,
+    LiveExecutionEpoch, UntrustedToolCall, UntrustedToolCallError,
 };
 use ditto_context::{
     CompiledContext, ContextCandidate, ContextCapsule, ContextCompileError, ContextCompiler,
@@ -39,9 +43,8 @@ mod fetch_tool;
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
-    Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, ThreadExchange, agent_run_text,
-    append_assistant_text, bounded_turn_failure_message, history_messages, latest_user_text,
-    local_utc_offset_minutes, presented_context, select_history_stepped, system_prefix,
+    Checkpoint, HistoryExchange, ReadyCall, append_assistant_text, bounded_turn_failure_message,
+    history_messages, latest_user_text, local_utc_offset_minutes, presented_context, system_prefix,
     turn_failure_code_for_model,
 };
 use super::types::{
@@ -69,6 +72,9 @@ pub(super) struct TurnScope {
     fetch_offered: bool,
     /// URLs from the user's message that `web.fetch` may read.
     fetch: Vec<String>,
+    /// Prelude transitions awaiting the turn's next append, which commits
+    /// them with it in one transaction (ADR 0028 Phase B).
+    staged: RefCell<Vec<(String, NewEvent)>>,
 }
 
 pub(crate) struct AdmittedReadOnlyTurn {
@@ -128,6 +134,28 @@ struct ModelResponse {
     text: String,
 }
 
+/// Builtin tool contracts, paged and validated on first use and then reused
+/// for the process: the startup header pins each package digest, so a
+/// verified contract cannot change underneath a running kernel. Failures are
+/// not kept; the next turn pages again.
+#[derive(Default)]
+pub(crate) struct ToolContracts {
+    read: OnceLock<InvocableContract>,
+    fetch: OnceLock<InvocableContract>,
+    sort: OnceLock<InvocableContract>,
+}
+
+fn cached_contract<E>(
+    cell: &OnceLock<InvocableContract>,
+    build: impl FnOnce() -> Result<InvocableContract, E>,
+) -> Result<&InvocableContract, E> {
+    if let Some(contract) = cell.get() {
+        return Ok(contract);
+    }
+    let contract = build()?;
+    Ok(cell.get_or_init(|| contract))
+}
+
 impl DittoKernel {
     /// Run one bounded, provider-neutral turn with the installed
     /// `artifact.read` builtin as its only executable capability.
@@ -174,6 +202,7 @@ impl DittoKernel {
             } else {
                 Vec::new()
             },
+            staged: RefCell::default(),
         };
         if self.task_is_completed(&scope.session_id, &scope.task_id)? {
             return Err(KernelError::InvalidCommand(format!(
@@ -256,14 +285,14 @@ impl DittoKernel {
         context_candidates: Option<impl IntoIterator<Item = ContextCandidate>>,
         input_event: &EventRecord,
     ) -> Result<(ContextCapsule, Vec<HistoryExchange>), TurnRunError> {
-        let context_candidates = match context_candidates {
-            Some(candidates) => candidates.into_iter().collect(),
+        let (context_candidates, sources_verified) = match context_candidates {
+            Some(candidates) => (candidates.into_iter().collect(), false),
             None => match self.agent_context_candidates(
                 &run.scope.session_id,
                 &run.scope.task_id,
                 run.accepted_at,
             ) {
-                Ok(candidates) => candidates,
+                Ok(context) => (context.candidates, context.sources_verified),
                 Err(_) => {
                     return Err(self.fail_with(
                         run,
@@ -295,11 +324,13 @@ impl DittoKernel {
             })?;
         let capsule = ContextCapsule::from(&compiled);
         let provenance_through_seq = self.latest_event_seq()?;
-        match self.validate_compiled_context_provenance(
-            &run.scope,
-            &compiled,
-            provenance_through_seq,
-        ) {
+        // Session-wide sources were checked once when the context was taken.
+        let provenance = if sources_verified {
+            Ok(())
+        } else {
+            self.validate_compiled_context_provenance(&run.scope, &compiled, provenance_through_seq)
+        };
+        match provenance {
             Ok(()) => {}
             Err(ContextProvenanceError::Kernel(error)) => return Err(TurnRunError::Kernel(error)),
             Err(ContextProvenanceError::Invalid(reason, message)) => {
@@ -307,7 +338,7 @@ impl DittoKernel {
             }
         }
         let history = if run.scope.agent_run {
-            self.conversation_history(&run.scope, input_event)
+            self.conversation_history(&run.scope.session_id, input_event.seq)
                 .map_err(|_| {
                     self.fail_with(
                         run,
@@ -328,7 +359,7 @@ impl DittoKernel {
             Some(utc_offset_minutes),
         )
         .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
-        self.append_turn_event(
+        self.stage_turn_event(
             run,
             EventActor::System,
             event_kind::CONTEXT_COMPILED,
@@ -349,64 +380,6 @@ impl DittoKernel {
         Ok((capsule, history))
     }
 
-    /// The current thread's finished agent-run exchanges before this input:
-    /// bounded indexed reads of the latest candidates after the last reset.
-    fn conversation_history(
-        &self,
-        scope: &TurnScope,
-        input: &EventRecord,
-    ) -> Result<Vec<HistoryExchange>, KernelError> {
-        let thread_len = self
-            .inner
-            .events
-            .conversation_finished_count(&scope.session_id, input.seq)?;
-        let exchanges =
-            self.thread_exchanges(&scope.session_id, input.seq, MAX_HISTORY_CANDIDATES)?;
-        Ok(select_history_stepped(
-            thread_len,
-            exchanges.into_iter().map(|thread| thread.exchange),
-        ))
-    }
-
-    /// Finished agent-run exchanges of the session's current thread before
-    /// `before_seq`, newest first. At most `candidates` finished turns are
-    /// examined; other turns in the thread are skipped.
-    pub(crate) fn thread_exchanges(
-        &self,
-        session: &str,
-        before_seq: i64,
-        candidates: usize,
-    ) -> Result<Vec<ThreadExchange>, KernelError> {
-        let finished = self
-            .inner
-            .events
-            .conversation_finished_turns(session, before_seq, candidates)?;
-        let mut exchanges = Vec::with_capacity(finished.len());
-        for event in finished {
-            let payload: TurnFinishedPayload = serde_json::from_value(event.payload)?;
-            let task = event
-                .task_id
-                .ok_or_else(|| KernelError::InvalidCommand("finished turn has no task".into()))?;
-            let turn_input = self
-                .inner
-                .events
-                .turn_input(session, &task, &payload.turn_id)?
-                .ok_or_else(|| KernelError::InvalidCommand("finished turn has no input".into()))?;
-            if let Some(user) = agent_run_text(&turn_input) {
-                exchanges.push(ThreadExchange {
-                    task_id: task,
-                    finished_seq: event.seq,
-                    exchange: HistoryExchange {
-                        turn_id: payload.turn_id,
-                        user: user.to_owned(),
-                        assistant: payload.outcome.response,
-                    },
-                });
-            }
-        }
-        Ok(exchanges)
-    }
-
     /// Page the permitted capabilities into one sealed execution epoch,
     /// journal the selection, and derive its authorization ledger.
     fn select_turn_tools(
@@ -414,88 +387,49 @@ impl DittoKernel {
         run: &mut TurnRun<'_>,
         input_event: &EventRecord,
     ) -> Result<TurnTools, TurnRunError> {
-        let manifest = match self.inner.capabilities.page_manifest(ARTIFACT_READ_ID) {
-            Ok(Some(manifest)) => manifest,
-            Ok(None) => {
-                return Err(self.fail_with(
-                    run,
-                    TurnFailureReason::ArtifactReadUnavailable,
-                    "installed artifact.read capability is unavailable",
-                    None,
-                    None,
-                ));
-            }
-            Err(_) => {
-                return Err(self.fail_with(
-                    run,
-                    TurnFailureReason::ArtifactReadPackageUnverified,
-                    "installed artifact.read package could not be verified",
-                    None,
-                    None,
-                ));
-            }
-        };
-        if let Err(error) = validate_artifact_read_manifest(&manifest) {
-            return Err(self.fail_with(
-                run,
-                TurnFailureReason::ArtifactReadManifestMismatch,
-                error.to_string(),
-                None,
-                None,
-            ));
-        }
-
-        let schema = capability_schema();
-        if schema.id != manifest.id || schema.version != manifest.version {
-            return Err(self.fail_with(
-                run,
-                TurnFailureReason::ArtifactReadSchemaMismatch,
-                "artifact.read level-2 schema does not match the installed manifest",
-                None,
-                None,
-            ));
-        }
-        if let Err(error) = schema.validate() {
-            return Err(self.fail_with(
-                run,
-                TurnFailureReason::ArtifactReadSchemaMismatch,
-                error.to_string(),
-                None,
-                None,
-            ));
-        }
-
+        let read = cached_contract(&self.inner.tool_contracts.read, || {
+            self.artifact_read_contract(run)
+        })?;
         // An unavailable or altered web.fetch package withdraws the tool
         // instead of failing the turn; the epoch is sized after the decision.
-        let fetch_manifest = if run.scope.fetch_offered {
-            self.inner
-                .capabilities
-                .page_manifest(ditto_web_fetch::ID)
-                .ok()
-                .flatten()
-                .filter(ditto_web_fetch::validate_manifest)
+        let fetch = if run.scope.fetch_offered {
+            cached_contract(&self.inner.tool_contracts.fetch, || {
+                self.inner
+                    .capabilities
+                    .page_manifest(ditto_web_fetch::ID)
+                    .ok()
+                    .flatten()
+                    .filter(ditto_web_fetch::validate_manifest)
+                    .and_then(|manifest| {
+                        InvocableContract::new(
+                            &manifest,
+                            &ditto_web_fetch::schema(),
+                            ditto_web_fetch::FetchDeriver::default().revision().clone(),
+                        )
+                        .ok()
+                    })
+                    .ok_or(())
+            })
+            .ok()
         } else {
             None
         };
-        if fetch_manifest.is_none() {
+        if fetch.is_none() {
             run.scope.fetch_offered = false;
             run.scope.fetch.clear();
         }
-        let deriver = ArtifactReadDeriver::default();
         let mut live_epoch = LiveExecutionEpoch::new(
-            1 + usize::from(run.scope.sort.is_some()) + usize::from(fetch_manifest.is_some()),
+            1 + usize::from(run.scope.sort.is_some()) + usize::from(fetch.is_some()),
         );
-        let paged = live_epoch
-            .page_in_invocable(&manifest, &schema, deriver.revision().clone())
-            .map_err(|error| {
-                self.fail_with(
-                    run,
-                    TurnFailureReason::ArtifactReadSelectionFailed,
-                    error.to_string(),
-                    None,
-                    None,
-                )
-            })?;
+        let paged = live_epoch.page_in_contract(read).map_err(|error| {
+            self.fail_with(
+                run,
+                TurnFailureReason::ArtifactReadSelectionFailed,
+                error.to_string(),
+                None,
+                None,
+            )
+        })?;
         if paged != 1
             || live_epoch.evidence().capabilities().len() != 1
             || live_epoch.evidence().capabilities()[0].id != ARTIFACT_READ_ID
@@ -508,7 +442,7 @@ impl DittoKernel {
                 None,
             ));
         }
-        let sort_manifest = if let Some(grant) = &run.scope.sort {
+        let sort = if let Some(grant) = &run.scope.sort {
             let root = self
                 .inner
                 .events
@@ -526,15 +460,25 @@ impl DittoKernel {
                     None,
                 ));
             }
-            let selected = self
-                .inner
-                .capabilities
-                .page_manifest(ditto_artifact_sort::ID)
-                .ok()
-                .flatten();
-            let Some(selected) = selected
-                .filter(|manifest| ditto_artifact_sort::validate_manifest(manifest).is_ok())
-            else {
+            let Ok(contract) = cached_contract(&self.inner.tool_contracts.sort, || {
+                self.inner
+                    .capabilities
+                    .page_manifest(ditto_artifact_sort::ID)
+                    .ok()
+                    .flatten()
+                    .filter(|manifest| ditto_artifact_sort::validate_manifest(manifest).is_ok())
+                    .and_then(|manifest| {
+                        InvocableContract::new(
+                            &manifest,
+                            &ditto_artifact_sort::schema(),
+                            ditto_artifact_sort::SortDeriver::default()
+                                .revision()
+                                .clone(),
+                        )
+                        .ok()
+                    })
+                    .ok_or(())
+            }) else {
                 return Err(self.fail_with(
                     run,
                     TurnFailureReason::SortContractUnavailable,
@@ -543,30 +487,17 @@ impl DittoKernel {
                     None,
                 ));
             };
-            let sort_deriver = ditto_artifact_sort::SortDeriver::default();
-            live_epoch
-                .page_in_invocable(
-                    &selected,
-                    &ditto_artifact_sort::schema(),
-                    sort_deriver.revision().clone(),
-                )
-                .map_err(|_| {
-                    TurnRunError::Internal("sort capability could not enter the live epoch")
-                })?;
-            Some(selected)
+            live_epoch.page_in_contract(contract).map_err(|_| {
+                TurnRunError::Internal("sort capability could not enter the live epoch")
+            })?;
+            Some(contract)
         } else {
             None
         };
-        if let Some(manifest) = &fetch_manifest {
-            live_epoch
-                .page_in_invocable(
-                    manifest,
-                    &ditto_web_fetch::schema(),
-                    ditto_web_fetch::FetchDeriver::default().revision().clone(),
-                )
-                .map_err(|_| {
-                    TurnRunError::Internal("fetch capability could not enter the live epoch")
-                })?;
+        if let Some(contract) = fetch {
+            live_epoch.page_in_contract(contract).map_err(|_| {
+                TurnRunError::Internal("fetch capability could not enter the live epoch")
+            })?;
         }
         let authorization_ticket = live_epoch.seal_for_authorization().map_err(|error| {
             self.fail_with(
@@ -594,13 +525,11 @@ impl DittoKernel {
         })?;
         let manifest = binding.manifest().clone();
         let mut schemas = vec![binding.schema().clone()];
-        if run.scope.sort.is_some() {
-            schemas.push(ditto_artifact_sort::schema());
-        }
-        if fetch_manifest.is_some() {
-            schemas.push(ditto_web_fetch::schema());
-        }
-        self.append_turn_event(
+        schemas.extend(sort.map(|contract| contract.schema().clone()));
+        schemas.extend(fetch.map(|contract| contract.schema().clone()));
+        let sort_manifest = sort.map(|contract| contract.manifest().clone());
+        let fetch_manifest = fetch.map(|contract| contract.manifest().clone());
+        self.stage_turn_event(
             run,
             EventActor::System,
             event_kind::CAPABILITIES_SELECTED,
@@ -670,6 +599,74 @@ impl DittoKernel {
             execution_epoch_id,
             schemas,
             authority: ArtifactReadAuthority::new(self.inner.artifacts.clone()),
+        })
+    }
+
+    /// Page and validate the installed `artifact.read` contract. Every failure
+    /// is a typed, journaled turn failure.
+    fn artifact_read_contract(&self, run: &TurnRun<'_>) -> Result<InvocableContract, TurnRunError> {
+        let manifest = match self.inner.capabilities.page_manifest(ARTIFACT_READ_ID) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => {
+                return Err(self.fail_with(
+                    run,
+                    TurnFailureReason::ArtifactReadUnavailable,
+                    "installed artifact.read capability is unavailable",
+                    None,
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(self.fail_with(
+                    run,
+                    TurnFailureReason::ArtifactReadPackageUnverified,
+                    "installed artifact.read package could not be verified",
+                    None,
+                    None,
+                ));
+            }
+        };
+        if let Err(error) = validate_artifact_read_manifest(&manifest) {
+            return Err(self.fail_with(
+                run,
+                TurnFailureReason::ArtifactReadManifestMismatch,
+                error.to_string(),
+                None,
+                None,
+            ));
+        }
+        let schema = capability_schema();
+        if schema.id != manifest.id || schema.version != manifest.version {
+            return Err(self.fail_with(
+                run,
+                TurnFailureReason::ArtifactReadSchemaMismatch,
+                "artifact.read level-2 schema does not match the installed manifest",
+                None,
+                None,
+            ));
+        }
+        if let Err(error) = schema.validate() {
+            return Err(self.fail_with(
+                run,
+                TurnFailureReason::ArtifactReadSchemaMismatch,
+                error.to_string(),
+                None,
+                None,
+            ));
+        }
+        InvocableContract::new(
+            &manifest,
+            &schema,
+            ArtifactReadDeriver::default().revision().clone(),
+        )
+        .map_err(|error| {
+            self.fail_with(
+                run,
+                TurnFailureReason::ArtifactReadSelectionFailed,
+                error.to_string(),
+                None,
+                None,
+            )
         })
     }
 
@@ -1574,6 +1571,33 @@ impl DittoKernel {
         Ok(event)
     }
 
+    /// Stage a prelude transition caused by the previous one; the turn's next
+    /// append, its first model request or its failure, commits it.
+    fn stage_turn_event<T: Serialize>(
+        &self,
+        run: &mut TurnRun<'_>,
+        actor: EventActor,
+        kind: &str,
+        payload: &T,
+        span_id: Option<String>,
+    ) -> Result<(), TurnRunError> {
+        let event_id = Ulid::new().to_string();
+        let event = turn_event(
+            &run.scope,
+            actor,
+            kind,
+            payload,
+            Some(run.cause.clone()),
+            span_id,
+        )?;
+        run.scope
+            .staged
+            .borrow_mut()
+            .push((event_id.clone(), event));
+        run.cause = event_id;
+        Ok(())
+    }
+
     fn append_turn_payload<T: Serialize>(
         &self,
         scope: &TurnScope,
@@ -1583,16 +1607,16 @@ impl DittoKernel {
         causation_id: Option<String>,
         span_id: Option<String>,
     ) -> Result<EventRecord, TurnRunError> {
-        Ok(self.append_and_publish(NewEvent {
-            session_id: Some(scope.session_id.clone()),
-            task_id: Some(scope.task_id.clone()),
-            actor,
-            kind: kind.into(),
-            payload: serde_json::to_value(payload)?,
-            causation_id,
-            correlation_id: Some(scope.turn_id.clone()),
-            span_id,
-        })?)
+        let event = turn_event(scope, actor, kind, payload, causation_id, span_id)?;
+        let mut batch = scope.staged.take();
+        if batch.is_empty() {
+            return Ok(self.append_and_publish(event)?);
+        }
+        batch.push((Ulid::new().to_string(), event));
+        Ok(self
+            .append_and_publish_batch(batch)?
+            .pop()
+            .expect("a committed batch returns its last event"))
     }
 
     fn persist_turn_failure(
@@ -1764,6 +1788,26 @@ impl DittoKernel {
             ),
         ))
     }
+}
+
+fn turn_event<T: Serialize>(
+    scope: &TurnScope,
+    actor: EventActor,
+    kind: &str,
+    payload: &T,
+    causation_id: Option<String>,
+    span_id: Option<String>,
+) -> Result<NewEvent, TurnRunError> {
+    Ok(NewEvent {
+        session_id: Some(scope.session_id.clone()),
+        task_id: Some(scope.task_id.clone()),
+        actor,
+        kind: kind.into(),
+        payload: serde_json::to_value(payload)?,
+        causation_id,
+        correlation_id: Some(scope.turn_id.clone()),
+        span_id,
+    })
 }
 
 /// The version-2 retrieval signature of a turn: the request alone. Version 1

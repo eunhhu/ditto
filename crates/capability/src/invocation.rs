@@ -420,34 +420,37 @@ impl LiveExecutionEpoch {
         deriver_revision: DeriverRevision,
     ) -> Result<usize, CapabilityRevisionError> {
         self.ensure_paging()?;
-        validate_invocation_schema_profile(&schema.input_schema).map_err(|error| {
-            CapabilityRevisionError::InvocationSchemaProfile {
-                reason: error.to_string(),
-            }
-        })?;
-        let revision = CapabilityRevision::from_contract(manifest, schema, deriver_revision)?;
-        if let Some(existing) = self.bindings.get(&manifest.id) {
-            return if existing.revision == revision {
+        self.page_in_contract(&InvocableContract::new(manifest, schema, deriver_revision)?)
+    }
+
+    /// Bind a contract already validated by [`InvocableContract::new`], so an
+    /// unchanged contract is not revalidated for every epoch.
+    pub fn page_in_contract(
+        &mut self,
+        contract: &InvocableContract,
+    ) -> Result<usize, CapabilityRevisionError> {
+        self.ensure_paging()?;
+        if let Some(existing) = self.bindings.get(&contract.manifest.id) {
+            return if existing.revision == contract.revision {
                 Ok(0)
             } else {
                 Err(CapabilityRevisionError::EpochRevisionConflict {
-                    capability_id: manifest.id.clone(),
+                    capability_id: contract.manifest.id.clone(),
                 })
             };
         }
-        let card = CapabilityCard::from(manifest);
         let inserted = self
             .evidence
-            .page_in_bound(card.clone(), revision.clone())?;
+            .page_in_bound(contract.card.clone(), contract.revision.clone())?;
         if inserted == 1 {
             self.bindings.insert(
-                manifest.id.clone(),
+                contract.manifest.id.clone(),
                 InvocableCapabilityBinding {
                     epoch_id: self.evidence.id().to_owned(),
-                    card,
-                    manifest: manifest.clone(),
-                    schema: schema.clone(),
-                    revision,
+                    card: contract.card.clone(),
+                    manifest: contract.manifest.clone(),
+                    schema: contract.schema.clone(),
+                    revision: contract.revision.clone(),
                 },
             );
         }
@@ -478,6 +481,52 @@ impl LiveExecutionEpoch {
             return Err(CapabilityRevisionError::EpochAlreadySealed);
         }
         Ok(())
+    }
+}
+
+/// A live capability contract whose invocation schema profile and revision
+/// were validated once; any epoch may bind it with
+/// [`LiveExecutionEpoch::page_in_contract`]. It carries no authority itself.
+///
+/// ```compile_fail
+/// use ditto_capability::InvocableContract;
+/// fn requires_deserialize<T: serde::de::DeserializeOwned>() {}
+/// requires_deserialize::<InvocableContract>();
+/// ```
+#[derive(Debug, Clone)]
+pub struct InvocableContract {
+    card: CapabilityCard,
+    manifest: CapabilityManifest,
+    schema: CapabilitySchema,
+    revision: CapabilityRevision,
+}
+
+impl InvocableContract {
+    pub fn new(
+        manifest: &CapabilityManifest,
+        schema: &CapabilitySchema,
+        deriver_revision: DeriverRevision,
+    ) -> Result<Self, CapabilityRevisionError> {
+        validate_invocation_schema_profile(&schema.input_schema).map_err(|error| {
+            CapabilityRevisionError::InvocationSchemaProfile {
+                reason: error.to_string(),
+            }
+        })?;
+        let revision = CapabilityRevision::from_contract(manifest, schema, deriver_revision)?;
+        Ok(Self {
+            card: CapabilityCard::from(manifest),
+            manifest: manifest.clone(),
+            schema: schema.clone(),
+            revision,
+        })
+    }
+
+    pub fn manifest(&self) -> &CapabilityManifest {
+        &self.manifest
+    }
+
+    pub fn schema(&self) -> &CapabilitySchema {
+        &self.schema
     }
 }
 

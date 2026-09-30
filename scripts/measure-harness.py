@@ -105,7 +105,9 @@ class Daemon:
         self.post("/v1/commands/memory", {"session_id": session, "input_event_id": event["event"]["event_id"]})
 
     def run(self, request_id, text, session="personal"):
+        started = time.perf_counter()
         self.post("/v1/commands/run", {"request_id": request_id, "session_id": session, "text": text})
+        self.accepted_ms = (time.perf_counter() - started) * 1e3
         for _ in range(20_000):
             status = self.get(f"/v1/runs?session_id={session}&request_id={request_id}")
             if status["status"] != "running":
@@ -164,6 +166,7 @@ def turn_costs(args):
             text = sum(len(e["payload"]["stream_event"]["event"].get("text", "")) for e in outputs)
             payload = sum(len(json.dumps(e["payload"])) for e in events)
             rows.append({
+                "client_to_accepted_ms": daemon.accepted_ms,
                 "client_to_provider_ms": (Mock.marks[question]["arrived"] - started) * 1e3,
                 "harness_before_dispatch_ms": millis(first["model.requested"]) - millis(first["input.received"]),
                 "per_delta_us": (millis(outputs[-1]) - millis(outputs[0])) * 1e3 / max(1, len(outputs) - 1),
@@ -172,6 +175,10 @@ def turn_costs(args):
             })
         warm = rows[2:] or rows
         summary = {key: median(row[key] for row in warm) for key in warm[0]}
+        # Durable timestamps are whole milliseconds: the mean of the quantized
+        # differences is unbiased where the median is not.
+        summary["harness_before_dispatch_ms_mean"] = round(
+            sum(row["harness_before_dispatch_ms"] for row in warm) / len(warm), 2)
         summary.update(deltas=args.deltas, memories=args.memories, files_kb=daemon.files_kb())
         return summary
     finally:

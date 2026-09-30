@@ -15,7 +15,7 @@ use ditto_model_openai::{
 };
 use ditto_protocol::{AgentRunQuery, AgentRunResponse, AgentRunStatus, StartAgentRunCommand};
 
-use super::AppState;
+use super::{AppState, blocking};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub(super) enum Provider {
@@ -110,7 +110,10 @@ async fn start(
     // Inspection and cancellation remain available with the provider disabled.
     // An existing ID can be read, but POST never enables a provider implicitly.
     let driver = state.driver.ok_or(RunApiError::Disabled)?;
-    let response = state.kernel.start_agent_run(command, driver)?;
+    let response = blocking(&state.kernel, move |kernel| {
+        kernel.start_agent_run(command, driver)
+    })
+    .await?;
     let status = if response.status == AgentRunStatus::Running {
         StatusCode::ACCEPTED
     } else {
@@ -123,14 +126,18 @@ async fn inspect(
     State(state): State<AppState>,
     Query(query): Query<AgentRunQuery>,
 ) -> Result<Json<AgentRunResponse>, RunApiError> {
-    Ok(Json(state.kernel.inspect_agent_run(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.inspect_agent_run(query)).await?,
+    ))
 }
 
 async fn cancel(
     State(state): State<AppState>,
     Json(query): Json<AgentRunQuery>,
 ) -> Result<Json<AgentRunResponse>, RunApiError> {
-    Ok(Json(state.kernel.cancel_agent_run(query)?))
+    Ok(Json(
+        blocking(&state.kernel, move |kernel| kernel.cancel_agent_run(query)).await?,
+    ))
 }
 
 pub(super) enum RunApiError {
