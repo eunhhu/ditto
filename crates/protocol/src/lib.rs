@@ -97,6 +97,8 @@ pub enum AgentRunStatus {
     Unverified,
     Failed,
     Interrupted,
+    /// A message that only acknowledged an answer; no turn ran (ADR 0035).
+    Acknowledged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

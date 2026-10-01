@@ -55,6 +55,10 @@ The executable foundation includes:
   cancellation, and restart inspection;
 - conversation threads: runs replay the session's recent exchanges until a new
   thread is started, plus an interactive `ditto chat`;
+- a chat that never makes you wait: up to four answers run at once, also in
+  one conversation, each knowing what the others are still working on; a line
+  Ditto writes before a tool call arrives as its own message, and a plain
+  "ㅇㅋ" or "thanks" gets a 👍 reaction instead of a model call;
 - a local web app served by the daemon: streamed chat, thread history,
   memories, schedules and a per-answer view of which memories were sent and
   why, behind a strict content security policy and a loopback host guard;
@@ -146,7 +150,8 @@ closed `gpt-5.6` Responses adapter and may incur provider charges.
 Open `http://127.0.0.1:8787/` for the web app. It chats in the `personal`
 session (`?session=NAME` picks another), streams answers, keeps the thread
 across reloads, and shows runs started from the CLI or schedules as they
-happen. **Why?** under an answer lists the memories sent to the model and why,
+happen. You can keep writing while Ditto works: each answer appears under its
+own message with its own stop link. **Why?** under an answer lists the memories sent to the model and why,
 memories left out, earlier exchanges included and tools used. The page uses
 the same HTTP API as the CLI. While bound to loopback, the daemon answers only
 requests addressed to `localhost` or a loopback IP, which stops DNS-rebinding
@@ -162,9 +167,10 @@ DITTO_TELEGRAM_BOT_TOKEN=... cargo run -p ditto-cli -- telegram --allow-user 123
 
 It long-polls Telegram, so no port or webhook is exposed. Only private chats
 from allowed users are answered; others are ignored. Answers stream into a
-draft with a stop button. `/new`, `/remember <fact>`, `/memories`,
-`/forget <words>` (forgets the one memory that holds the words) and `/stop`
-work as in the CLI, and chats share the `personal` session with the CLI and
+draft with a stop button, and the next message is handled while one is in
+progress; each answer replies to its own message. `/new`, `/remember <fact>`,
+`/memories`, `/forget <words>` (forgets the one memory that holds the words)
+and `/stop` (stops the answers in progress) work as in the CLI, and chats share the `personal` session with the CLI and
 web app. Results of scheduled requests are sent to the allowed users, also
 after a gateway restart (`--state-file`, default `.ditto-telegram.json`). The
 token stays in the gateway process.
@@ -234,8 +240,10 @@ them in the same answer. Without `--search-url` there is no web search.
 
 Ditto works on its own in general: it uses its tools without asking, and
 when something truly needs you (a decision, information only you have, or
-consent to something irreversible) it says exactly what in its answer and
-stops; your next message continues.
+consent to something irreversible) it ends its answer with exactly that
+question and stops; your next message continues. A short acknowledgment such
+as "ㅇㅋ", "ok", "고마워" or "thanks" after an answer that asked nothing is
+recorded with a 👍 and costs no model call; after a question it is an answer.
 
 Runs default to the `personal` session. Current session memory is compiled
 into context: while the whole set fits the context budget (about a dozen short
@@ -315,8 +323,8 @@ acceptance. Identical `--request-id` retries retain the original attempt. Up to
 100 pending one-shot requests and active repeats can wait in total without
 loading a prompt pool or calling a model. The
 default disabled provider retains them until expiry; status explains what they
-are waiting for. An enabled provider dispatches due work when the shared run slot
-is free. A missed window becomes `missed`, and an uncertain claimed attempt after
+are waiting for. An enabled provider dispatches due work when fewer than four runs
+are active. A missed window becomes `missed`, and an uncertain claimed attempt after
 restart becomes `interrupted`; neither retries automatically. Completed answers
 remain `unverified`, with the original run result available through status.
 

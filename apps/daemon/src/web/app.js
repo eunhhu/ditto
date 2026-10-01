@@ -1,7 +1,8 @@
 'use strict';
 // Ditto local web app. Every authority stays in the daemon: this page only
 // calls the typed HTTP API and renders durable events. Model text is always
-// escaped before a small, closed markdown subset is applied.
+// escaped before a small, closed markdown subset is applied. The composer is
+// never blocked: answers run at once, each under its own message (ADR 0035).
 
 const SESSION = new URLSearchParams(location.search).get('session') || 'personal';
 const $ = (id) => document.getElementById(id);
@@ -20,7 +21,7 @@ const STRINGS = {
     why: 'Why?', correct: 'Correct', forget: 'Forget', forgetConfirm: 'Forget it?', newDivider: 'new conversation',
     noMemories: 'No memories yet.', noSchedules: 'Nothing scheduled.',
     disabled: 'No model is configured. Start the daemon with --provider openai-compatible (for example a local Ollama model) or --provider openai.',
-    busy: 'Ditto is still answering another request; try again in a moment.',
+    busy: 'Ditto is already working on four requests; try again in a moment.', stop: 'Stop',
     failed: 'No answer', interrupted: 'Stopped', usedMemories: 'Memories sent to the model',
     history: 'Earlier exchanges included', tools: 'Tools used', none: 'None', excluded: 'Memories left out',
     status: 'Status', reasonRelevance: 'matched your words', reasonComplete: 'all memories fit, so all were sent',
@@ -54,7 +55,7 @@ const STRINGS = {
     why: '근거', correct: '수정', forget: '지우기', forgetConfirm: '정말 지울까요?', newDivider: '새 대화',
     noMemories: '아직 기억이 없습니다.', noSchedules: '예약된 일이 없습니다.',
     disabled: '모델이 설정되지 않았습니다. 데몬을 --provider openai-compatible(예: 로컬 Ollama 모델) 또는 --provider openai로 시작하세요.',
-    busy: '다른 요청에 답하는 중입니다. 잠시 후 다시 시도하세요.',
+    busy: '이미 요청 네 개를 처리하고 있습니다. 잠시 후 다시 시도하세요.', stop: '중단',
     failed: '답변 없음', interrupted: '중단됨', usedMemories: '모델에 보낸 기억',
     history: '포함된 이전 대화', tools: '사용한 도구', none: '없음', excluded: '제외된 기억',
     status: '상태', reasonRelevance: '질문 단어와 일치', reasonComplete: '기억 전체가 예산에 들어가 모두 전송',
@@ -180,6 +181,7 @@ function addUser(text) {
   node.textContent = text;
   messages.appendChild(node);
   scrollToEnd();
+  return node;
 }
 function addAssistant(state) {
   const node = document.createElement('div');
@@ -187,14 +189,45 @@ function addAssistant(state) {
   node.innerHTML = '<div class="body typing"></div><div class="foot"></div>';
   messages.appendChild(node);
   const bubble = { node, body: node.querySelector('.body'), foot: node.querySelector('.foot'), text: '', request: -1, done: false, ...state };
+  // A running answer can be stopped on its own; the others keep going.
+  if (bubble.requestId) {
+    const stop = document.createElement('button');
+    stop.className = 'link stop';
+    stop.textContent = t('stop');
+    stop.addEventListener('click', () => cancel(bubble));
+    bubble.foot.appendChild(stop);
+  }
   scrollToEnd();
   return bubble;
 }
 function addExchange(user, state) {
-  addUser(user);
-  const bubble = addAssistant({ ...state, user });
+  const asked = addUser(user);
+  const bubble = addAssistant({ ...state, user, asked });
   if (state.turnId) bind(bubble, state.turnId);
   return bubble;
+}
+// What a model request wrote before its tool call stays as a message of its
+// own; the bubble goes on with the next step (ADR 0035).
+function settleSaid(bubble) {
+  if (bubble.text.trim()) {
+    const node = document.createElement('div');
+    node.className = 'msg assistant said';
+    node.innerHTML = `<div class="body">${markdown(bubble.text)}</div>`;
+    messages.insertBefore(node, bubble.node);
+    bubble.body.innerHTML = '';
+    bubble.body.classList.add('typing');
+  }
+  bubble.text = '';
+}
+// An acknowledgment starts no answer: a reaction on it says it was read.
+function acknowledge(bubble) {
+  if (bubble.done) return;
+  bubble.done = true;
+  bubble.node.remove();
+  const reaction = document.createElement('span');
+  reaction.className = 'reaction';
+  reaction.textContent = '👍';
+  bubble.asked.appendChild(reaction);
 }
 function failureText(failure) {
   const code = failure.code || '';
@@ -233,7 +266,6 @@ function finishBubble(bubble, text, failure) {
     why.addEventListener('click', () => inspect(bubble.taskId).catch((error) => banner(error.message)));
     bubble.foot.appendChild(why);
   }
-  updateComposer();
   scrollToEnd();
 }
 // What Ditto remembered or forgot during the answer (ADR 0031), kept apart
@@ -261,7 +293,6 @@ function banner(text) {
 
 // ---- conversation -----------------------------------------------------------
 let latestSeq = 0;
-let activeRequest = null;
 
 // Render finished exchanges of the current thread that are not on screen yet.
 async function syncThread() {
@@ -274,12 +305,6 @@ async function syncThread() {
   return thread.through_seq;
 }
 
-function updateComposer() {
-  const busy = activeRequest !== null && !activeRequest.done;
-  $('send').classList.toggle('hidden', busy);
-  $('stop').classList.toggle('hidden', !busy);
-}
-
 async function send(text) {
   if (text === '/new') return newThread();
   if (text.startsWith('/remember ')) return remember(text.slice('/remember '.length).trim());
@@ -287,8 +312,6 @@ async function send(text) {
   const requestId = ulid();
   const bubble = addExchange(text, { requestId, taskId: `run_${requestId}` });
   pendingByRequest.set(requestId, bubble);
-  activeRequest = bubble;
-  updateComposer();
   try {
     const accepted = await api('POST', '/v1/commands/run', { request_id: requestId, session_id: SESSION, text });
     bind(bubble, accepted.turn_id);
@@ -311,14 +334,14 @@ function bind(bubble, turnId) {
 
 function settleFromStatus(bubble, status) {
   if (bubble.done || status.status === 'running') return;
-  if (status.status === 'unverified') finishBubble(bubble, status.response || '');
+  if (status.status === 'acknowledged') acknowledge(bubble);
+  else if (status.status === 'unverified') finishBubble(bubble, status.response || '');
   else finishBubble(bubble, '', { code: status.failure_code || status.status, message: status.failure_code || status.status });
 }
 
-async function cancelActive() {
-  if (!activeRequest || !activeRequest.requestId) return;
+async function cancel(bubble) {
   try {
-    await api('POST', '/v1/commands/run/cancel', { request_id: activeRequest.requestId, session_id: SESSION });
+    await api('POST', '/v1/commands/run/cancel', { request_id: bubble.requestId, session_id: SESSION });
   } catch (error) {
     banner(error.message);
   }
@@ -337,22 +360,23 @@ function onEvent(event) {
     case 'input.received': {
       const run = payload.agent_run;
       if (!run || !event.correlation_id) return;
-      const pending = pendingByRequest.get(run.request_id);
-      if (pending) {
-        bind(pending, event.correlation_id);
+      let bubble = pendingByRequest.get(run.request_id);
+      if (bubble) {
+        bind(bubble, event.correlation_id);
       } else if (!bubbles.has(event.correlation_id)) {
         // A run started elsewhere (CLI, schedule, messaging) appears live.
-        addExchange(payload.text, { requestId: run.request_id, taskId: event.task_id, turnId: event.correlation_id });
+        bubble = addExchange(payload.text, { requestId: run.request_id, taskId: event.task_id, turnId: event.correlation_id });
       }
+      if (bubble && run.acknowledged) acknowledge(bubble);
       return;
     }
     case 'model.output': {
       const bubble = bubbles.get(payload.turn_id);
       const model = payload.stream_event && payload.stream_event.event;
       if (!bubble || bubble.done || !model) return;
-      if (payload.request_index !== bubble.request) {
+      if (payload.request_index !== bubble.request || model.type === 'tool_call_started') {
         bubble.request = payload.request_index;
-        bubble.text = '';
+        settleSaid(bubble);
       }
       if (model.type === 'text_delta') {
         bubble.text += model.text;
@@ -662,12 +686,11 @@ function wire() {
   $('composer').addEventListener('submit', (event) => {
     event.preventDefault();
     const text = input.value.trim();
-    if (!text || (activeRequest && !activeRequest.done)) return;
+    if (!text) return;
     input.value = '';
     autosize();
     send(text).catch((error) => banner(error.message));
   });
-  $('stop').addEventListener('click', cancelActive);
   $('new-thread').addEventListener('click', () => newThread().catch((error) => banner(error.message)));
   $('memory-form').addEventListener('submit', (event) => {
     event.preventDefault();

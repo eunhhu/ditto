@@ -282,7 +282,7 @@ impl ModelDriver for GatedDriver {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_retries_share_one_run_busy_is_not_queued_and_cancel_is_scoped() {
+async fn concurrent_retries_share_one_run_and_cancel_is_scoped() {
     let fixture = Fixture::new();
     let driver = Arc::new(GatedDriver::new());
     let command = start_command("cedar timezone");
@@ -314,21 +314,6 @@ async fn concurrent_retries_share_one_run_busy_is_not_queued_and_cancel_is_scope
         1
     );
     let count = fixture.kernel.event_count().unwrap();
-    assert!(matches!(
-        fixture
-            .kernel
-            .start_agent_run(start_command("other"), driver.clone()),
-        Err(AgentRunError::Busy)
-    ));
-    assert!(matches!(
-        fixture.kernel.start_sort(ditto_protocol::StartSortCommand {
-            request_id: ulid::Ulid::new().to_string(),
-            session_id: "personal".into(),
-            text: "b\na".into(),
-            unique: false,
-        }),
-        Err(AgentRunError::Busy)
-    ));
     let mut altered = command.clone();
     altered.text.push('!');
     assert!(matches!(
@@ -567,8 +552,8 @@ async fn invalid_context_source_fails_before_model_io_and_is_replayable() {
     replay_artifact_read_turn(&fixture.events_for_session("personal"), &accepted.turn_id).unwrap();
 }
 
-/// Start a run once the previous run's task has released the single slot. A
-/// terminal status is durable slightly before the finished task drops its guard.
+/// Start a run once a slot is free. A terminal status is durable slightly
+/// before the finished task drops its guard.
 pub(super) async fn start_when_idle(
     kernel: &DittoKernel,
     command: &StartAgentRunCommand,

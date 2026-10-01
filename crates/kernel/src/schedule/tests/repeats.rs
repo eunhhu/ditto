@@ -608,15 +608,7 @@ async fn coherent_repeat_cache_rewind_fails_before_reexecution_and_reopen_recove
 async fn existing_owner_timer_and_slot_release_drive_repeats_without_a_second_loop() {
     let root = tempfile::tempdir().unwrap();
     let kernel = DittoKernel::open(config(root.path())).unwrap();
-    let manual = StartAgentRunCommand {
-        request_id: ulid::Ulid::new().to_string(),
-        session_id: "personal".into(),
-        text: "wait".into(),
-        sort: None,
-    };
-    kernel
-        .start_agent_run(manual.clone(), Driver::new(true))
-        .unwrap();
+    let manual = fill_slots(&kernel);
     let mut repeat = repeated(2);
     repeat.due_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis() + 150).unwrap();
     repeat.expires_at = repeat.due_at + chrono::Duration::seconds(10);
@@ -635,8 +627,8 @@ async fn existing_owner_timer_and_slot_release_drive_repeats_without_a_second_lo
     assert_eq!(driver.calls.load(Ordering::SeqCst), 0);
     kernel
         .cancel_agent_run(AgentRunQuery {
-            request_id: manual.request_id,
-            session_id: manual.session_id,
+            request_id: manual[0].request_id.clone(),
+            session_id: manual[0].session_id.clone(),
         })
         .unwrap();
     assert_eq!(
@@ -650,4 +642,5 @@ async fn existing_owner_timer_and_slot_release_drive_repeats_without_a_second_lo
     kernel.cancel_repeat(query(&repeat)).unwrap();
     stop.cancel();
     task.await.unwrap().unwrap();
+    kernel.shutdown_agent_runs().await.unwrap();
 }

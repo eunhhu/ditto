@@ -1,7 +1,10 @@
 //! Telegram gateway (`ditto telegram`). A long-polling Bot API client relays
 //! allowed private chats to the daemon's HTTP API, streams answers as message
-//! drafts, and delivers the results of scheduled runs. The bot token never
-//! leaves this process; the daemon sees only message text (ADR 0025).
+//! drafts, and delivers the results of scheduled runs. Each message is
+//! answered on its own while later ones are handled; text the model writes
+//! before a tool call is sent as its own message, and an acknowledgment gets
+//! a reaction (ADR 0035). The bot token never leaves this process; the daemon
+//! sees only message text (ADR 0025).
 mod bot;
 mod events;
 #[cfg(test)]
@@ -37,7 +40,7 @@ const QUEUE: usize = 32;
 const RECENT_INPUTS: usize = 64;
 /// Longer than the daemon's five-minute turn ceiling.
 const ANSWER_WAIT: Duration = Duration::from_secs(6 * 60);
-/// How long a message waits for another client's run to finish.
+/// How long a message waits while four runs are active.
 const BUSY_RETRIES: u32 = 90;
 
 #[derive(Debug, clap::Args)]
@@ -204,8 +207,8 @@ fn request_id(chat: i64, message: i64, date: i64) -> String {
 }
 
 impl Gateway {
-    /// Long-poll updates. Messages queue in order for one worker; stop
-    /// requests act at once on the answer in progress.
+    /// Long-poll updates. Messages queue in order for one worker, which
+    /// starts each answer in turn; stop requests act at once.
     async fn poll(self: Arc<Self>, queue: mpsc::Sender<Incoming>) -> anyhow::Result<()> {
         let mut offset: Option<i64> = None;
         let mut backoff = Duration::from_secs(1);
@@ -276,7 +279,7 @@ impl Gateway {
         Ok(())
     }
 
-    async fn handle(&self, incoming: &Incoming) -> anyhow::Result<()> {
+    async fn handle(self: &Arc<Self>, incoming: &Incoming) -> anyhow::Result<()> {
         let say = Say(incoming.korean);
         let reply = match incoming.text.as_deref().map(str::trim) {
             None => say.text_only().to_owned(),
@@ -341,7 +344,9 @@ impl Gateway {
         Ok(())
     }
 
-    async fn ask(&self, incoming: &Incoming, text: &str) -> anyhow::Result<()> {
+    /// Start an answer and return; the event stream delivers it while the
+    /// next message is handled.
+    async fn ask(self: &Arc<Self>, incoming: &Incoming, text: &str) -> anyhow::Result<()> {
         let say = Say(incoming.korean);
         let request_id = request_id(incoming.chat, incoming.message, incoming.date);
         let (done, finished) = oneshot::channel();
@@ -357,8 +362,6 @@ impl Gateway {
                 done: Some(done),
             },
         );
-        // An empty draft shows "Thinking…" with a stop button.
-        self.draft(incoming.chat, incoming.message, "").await;
         let command = StartAgentRunCommand {
             request_id: request_id.clone(),
             session_id: self.session.clone(),
@@ -375,8 +378,11 @@ impl Gateway {
                 .send()
                 .await;
             let refusal = match response {
-                // Another client's run holds the single run slot; wait for it.
+                // Four runs are active; wait for one to end.
                 Ok(response) if response.status() == 429 && attempts < BUSY_RETRIES => {
+                    if attempts == 0 {
+                        self.draft(incoming.chat, incoming.message, "").await;
+                    }
                     attempts += 1;
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
@@ -397,41 +403,55 @@ impl Gateway {
                 .await;
             return Ok(());
         };
-        if accepted.status == AgentRunStatus::Running {
-            {
-                // The stream may already have mapped, or even answered, it.
-                let mut shared = self.shared.lock().await;
-                if shared.replies.contains_key(&request_id) {
-                    shared
-                        .turns
-                        .insert(accepted.turn_id.clone(), request_id.clone());
-                }
-            }
-            if tokio::time::timeout(ANSWER_WAIT, finished).await.is_ok() {
-                return Ok(());
+        if accepted.status != AgentRunStatus::Running {
+            // Already terminal (a redelivered update) or an acknowledgment.
+            let reply = self.shared.lock().await.replies.remove(&request_id);
+            self.finish(reply, &accepted).await;
+            return Ok(());
+        }
+        {
+            // The stream may already have mapped, or even answered, it.
+            let mut shared = self.shared.lock().await;
+            if shared.replies.contains_key(&request_id) {
+                shared.turns.insert(accepted.turn_id, request_id.clone());
             }
         }
-        // Already terminal (a redelivered update) or the stream missed it.
-        let status = self.status(&request_id).await?;
-        let reply = self.shared.lock().await.replies.remove(&request_id);
-        self.finish(reply, &status).await;
+        let gateway = self.clone();
+        tokio::spawn(async move {
+            if tokio::time::timeout(ANSWER_WAIT, finished).await.is_ok() {
+                return;
+            }
+            // The stream missed it: finish from the run's status.
+            let settled = match gateway.status(&request_id).await {
+                Ok(status) => {
+                    let reply = gateway.shared.lock().await.replies.remove(&request_id);
+                    gateway.finish(reply, &status).await;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = settled {
+                eprintln!("Ditto run status: {}", safe(&format!("{error:#}")));
+            }
+        });
         Ok(())
     }
 
-    /// Cancel the answer in progress in `chat` (a specific draft if given).
+    /// Cancel the answers in progress in `chat` (a specific draft if given).
     async fn stop(&self, chat: Option<i64>, draft: Option<i64>) {
         let Some(chat) = chat else { return };
-        let target = self
+        let targets = self
             .shared
             .lock()
             .await
             .replies
             .iter()
-            .find(|(_, reply)| {
+            .filter(|(_, reply)| {
                 reply.chat == chat && draft.is_none_or(|draft| draft == reply.message)
             })
-            .map(|(request, _)| request.clone());
-        if let Some(request_id) = target {
+            .map(|(request, _)| request.clone())
+            .collect::<Vec<_>>();
+        for request_id in targets {
             let query = AgentRunQuery {
                 request_id,
                 session_id: self.session.clone(),
@@ -491,17 +511,30 @@ impl Gateway {
                 ) else {
                     return false;
                 };
-                let mut shared = self.shared.lock().await;
-                if shared.replies.contains_key(request) {
-                    shared.turns.insert(turn.to_owned(), request.to_owned());
-                }
-                if let Some(text) = payload["text"].as_str() {
-                    shared
-                        .inputs
-                        .push_back((request.to_owned(), text.to_owned()));
-                    if shared.inputs.len() > RECENT_INPUTS {
-                        shared.inputs.pop_front();
+                let thinking = {
+                    let mut shared = self.shared.lock().await;
+                    let thinking = shared
+                        .replies
+                        .get(request)
+                        .filter(|_| payload["agent_run"]["acknowledged"] != true)
+                        .map(|reply| (reply.chat, reply.message));
+                    if thinking.is_some() {
+                        shared.turns.insert(turn.to_owned(), request.to_owned());
                     }
+                    if let Some(text) = payload["text"].as_str() {
+                        shared
+                            .inputs
+                            .push_back((request.to_owned(), text.to_owned()));
+                        if shared.inputs.len() > RECENT_INPUTS {
+                            shared.inputs.pop_front();
+                        }
+                    }
+                    thinking
+                };
+                // An empty draft shows "Thinking…" with a stop button. The
+                // stream orders it before the answer.
+                if let Some((chat, message)) = thinking {
+                    self.draft(chat, message, "").await;
                 }
                 false
             }
@@ -518,11 +551,8 @@ impl Gateway {
     }
 
     async fn stream_text(&self, payload: &Value) {
-        let delta = &payload["stream_event"]["event"];
-        if delta["type"] != "text_delta" {
-            return;
-        }
-        let preview = {
+        let event = &payload["stream_event"]["event"];
+        let (said, preview) = {
             let mut shared = self.shared.lock().await;
             let Some(request) = payload["turn_id"]
                 .as_str()
@@ -534,24 +564,41 @@ impl Gateway {
             let Some(reply) = shared.replies.get_mut(&request) else {
                 return;
             };
+            // What a request wrote before its tool call is a message of its
+            // own (ADR 0035); the final request's text is the answer.
             let index = payload["request_index"].as_i64();
-            if reply.request_index != index {
+            let mut said = None;
+            if reply.request_index != index || event["type"] == "tool_call_started" {
                 reply.request_index = index;
-                reply.text.clear();
+                let text = std::mem::take(&mut reply.text);
+                if !text.trim().is_empty() {
+                    said = Some(text);
+                }
             }
-            reply
-                .text
-                .push_str(delta["text"].as_str().unwrap_or_default());
-            if reply
-                .last_draft
-                .is_some_and(|sent| sent.elapsed() < DRAFT_INTERVAL)
-            {
-                return;
+            let mut preview = said.as_ref().map(|_| String::new());
+            if event["type"] == "text_delta" {
+                reply
+                    .text
+                    .push_str(event["text"].as_str().unwrap_or_default());
+                if reply
+                    .last_draft
+                    .is_none_or(|sent| sent.elapsed() >= DRAFT_INTERVAL)
+                {
+                    reply.last_draft = Some(Instant::now());
+                    preview = Some(tail(&reply.text, MESSAGE_UNITS));
+                }
             }
-            reply.last_draft = Some(Instant::now());
-            (reply.chat, reply.message, tail(&reply.text, MESSAGE_UNITS))
+            (
+                said.map(|text| (reply.chat, text)),
+                preview.map(|text| (reply.chat, reply.message, text)),
+            )
         };
-        self.draft(preview.0, preview.1, &preview.2).await;
+        if let Some((chat, text)) = said {
+            self.send(chat, &text, None).await;
+        }
+        if let Some((chat, message, text)) = preview {
+            self.draft(chat, message, &text).await;
+        }
     }
 
     async fn on_terminal(&self, data: &Value) {
@@ -615,16 +662,35 @@ impl Gateway {
             (AgentRunStatus::Failed, Some("cancelled")) => say.stopped().to_owned(),
             (AgentRunStatus::Failed, code) => say.failed(code.unwrap_or("unknown")),
             (AgentRunStatus::Interrupted, _) => say.interrupted().to_owned(),
+            (AgentRunStatus::Acknowledged, _) => String::new(),
             (AgentRunStatus::Running, _) => return,
         };
-        let text = if text.trim().is_empty() {
-            say.empty().to_owned()
+        if status.status == AgentRunStatus::Acknowledged {
+            self.react(reply.chat, reply.message).await;
+        } else if text.trim().is_empty() {
+            self.send(reply.chat, say.empty(), Some(reply.message))
+                .await;
         } else {
-            text
-        };
-        self.send(reply.chat, &text, Some(reply.message)).await;
+            self.send(reply.chat, &text, Some(reply.message)).await;
+        }
         if let Some(done) = reply.done.take() {
             let _ = done.send(());
+        }
+    }
+
+    /// An acknowledgment needs no answer: a 👍 on it says it was read.
+    async fn react(&self, chat: i64, message: i64) {
+        let body = json!({
+            "chat_id": chat,
+            "message_id": message,
+            "reaction": [{"type": "emoji", "emoji": "👍"}],
+        });
+        if let Err(error) = self
+            .bot
+            .call("setMessageReaction", &body, Duration::from_secs(10))
+            .await
+        {
+            eprintln!("Telegram reaction failed: {}", safe(&error.to_string()));
         }
     }
 
@@ -824,8 +890,8 @@ impl Say {
     }
     fn help(self) -> &'static str {
         self.pick(
-            "Hi, I'm Ditto. Send a message to ask.\n/new starts a new conversation\n/remember <fact> saves a memory\n/memories lists memories\n/forget <words> forgets the memory that holds them\n/stop cancels the current answer",
-            "안녕하세요, Ditto입니다. 메시지를 보내 질문하세요.\n/new 새 대화 시작\n/remember <내용> 기억 저장\n/memories 기억 목록\n/forget <단어> 그 단어가 든 기억 지우기\n/stop 현재 답변 중단",
+            "Hi, I'm Ditto. Send a message to ask; you can keep writing while I work.\n/new starts a new conversation\n/remember <fact> saves a memory\n/memories lists memories\n/forget <words> forgets the memory that holds them\n/stop cancels the answers in progress",
+            "안녕하세요, Ditto입니다. 메시지를 보내 질문하세요. 제가 일하는 동안에도 계속 보내셔도 됩니다.\n/new 새 대화 시작\n/remember <내용> 기억 저장\n/memories 기억 목록\n/forget <단어> 그 단어가 든 기억 지우기\n/stop 진행 중인 답변 중단",
         )
     }
     fn new_thread(self) -> &'static str {
@@ -888,8 +954,8 @@ impl Say {
     }
     fn busy(self) -> &'static str {
         self.pick(
-            "Ditto is busy with another request; try again soon.",
-            "다른 요청을 처리 중입니다. 잠시 후 다시 시도하세요.",
+            "Ditto is already working on four requests; try again soon.",
+            "이미 요청 네 개를 처리하고 있습니다. 잠시 후 다시 시도하세요.",
         )
     }
     fn queue_full(self) -> &'static str {

@@ -6,7 +6,8 @@ Accepted for Task 009. Context selection amended by
 [ADR 0021](0021-complete-personal-context-and-typed-turn-failures.md): runs now
 use the complete-set contract instead of V1 positive overlap. Admission amended
 by [ADR 0028](0028-thin-realtime-harness.md) Phase D: one live run per session, and up to four sessions at
-once, still without a queue.
+once, still without a queue; and by [ADR 0035](0035-chat-as-a-bridge.md):
+four runs at once from any sessions, and an acknowledgment starts no turn.
 
 ## Context
 

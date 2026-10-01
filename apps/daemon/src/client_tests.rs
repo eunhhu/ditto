@@ -20,7 +20,7 @@ use ditto_kernel::{DittoKernel, KernelConfig};
 use ditto_model::{
     CancellationToken, ContentPart, ConversationItem, DriverDescriptor, DriverId, FinishReason,
     ModelDriver, ModelEvent, ModelEventStream, ModelFeature, ModelRequest, ParallelToolCalls,
-    RequestCapabilities, ToolChoiceKind,
+    ProviderCallId, RequestCapabilities, ToolChoiceKind,
 };
 use ditto_protocol::{EventQuery, MemoryQuery, ScheduleRunCommand};
 use serde_json::{Value, json};
@@ -31,7 +31,9 @@ const TOKEN: &str = "123456:TEST_ONLY_not_a_real_token";
 const SECRET: &str = "TEST_ONLY_not_a_real_token";
 
 /// Answers `Echo: <question>` in two deltas; a question containing "wait"
-/// never finishes, so only cancellation ends it. Requests are recorded.
+/// never finishes, so only cancellation ends it, and one containing "look
+/// up" says so before it searches memory, then answers "Found it.".
+/// Requests are recorded.
 struct EchoDriver {
     descriptor: DriverDescriptor,
     calls: AtomicUsize,
@@ -66,6 +68,10 @@ impl ModelDriver for EchoDriver {
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> ModelEventStream {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.requests.lock().unwrap().push(request.clone());
+        let searched = matches!(
+            request.turn.conversation.last(),
+            Some(ConversationItem::ToolResult { .. })
+        );
         let question = request
             .turn
             .conversation
@@ -87,6 +93,21 @@ impl ModelDriver for EchoDriver {
             _ => question,
         };
         ModelEventStream::new(async_stream::stream! {
+            if searched {
+                yield ModelEvent::TextDelta { text: "Found it.".into() };
+                yield ModelEvent::Completed { finish_reason: FinishReason::EndTurn, continuation: None };
+                return;
+            }
+            if question.contains("look up") {
+                let call_id = ProviderCallId::new("call-lookup").unwrap();
+                let arguments = json!({"query": "tea"});
+                yield ModelEvent::TextDelta { text: "Looking it up.".into() };
+                yield ModelEvent::ToolCallStarted { call_id: call_id.clone(), capability_id: "memory.search".into() };
+                yield ModelEvent::ToolCallArgumentDelta { call_id: call_id.clone(), delta: arguments.to_string() };
+                yield ModelEvent::ToolCallReady { call_id, capability_id: "memory.search".into(), arguments };
+                yield ModelEvent::Completed { finish_reason: FinishReason::ToolCalls, continuation: None };
+                return;
+            }
             if question.contains("wait") {
                 std::future::pending::<()>().await;
             }
@@ -332,7 +353,8 @@ async fn built_cli_telegram_gateway_relays_allowed_chats_and_scheduled_results()
             .any(|memory| memory.text == "I like green tea")
     );
 
-    // The draft's stop button cancels the answer in progress.
+    // While an answer is in progress the chat goes on (ADR 0035): the next
+    // message is answered at once, and its run knows what is still running.
     push(private(6, 13, 42, "en", "please wait for me"));
     wait_for("the waiting draft", || {
         telegram
@@ -343,7 +365,39 @@ async fn built_cli_telegram_gateway_relays_allowed_chats_and_scheduled_results()
             .any(|(method, body)| method == "sendMessageDraft" && body["draft_id"] == 13)
     })
     .await;
-    push(json!({"update_id": 7, "stopped_message_generation": {
+    push(private(7, 14, 42, "en", "what about now"));
+    wait_for("an answer while the first runs", || {
+        sent(&telegram, 42).iter().any(|body| {
+            body["text"] == "Echo: what about now" && body["reply_parameters"]["message_id"] == 14
+        })
+    })
+    .await;
+    let latest = echo.requests.lock().unwrap().last().unwrap().clone();
+    let Some(ConversationItem::Message { content, .. }) = latest.turn.conversation.last() else {
+        panic!("the latest item is the user's message")
+    };
+    assert!(
+        matches!(&content[0], ContentPart::Text { text } if text.contains(
+            "\n[Ditto: still working on \"please wait for me\" (started just now)]\n\nwhat about now"
+        )),
+        "{content:?}"
+    );
+
+    // An acknowledgment gets a reaction, not a model call.
+    let model_calls = echo.calls.load(Ordering::SeqCst);
+    push(private(8, 15, 42, "en", "ok thanks"));
+    wait_for("the reaction", || {
+        telegram.calls.lock().unwrap().iter().any(|(method, body)| {
+            method == "setMessageReaction"
+                && body["message_id"] == 15
+                && body["reaction"][0]["emoji"] == "👍"
+        })
+    })
+    .await;
+    assert_eq!(echo.calls.load(Ordering::SeqCst), model_calls);
+
+    // The draft's stop button cancels that answer alone.
+    push(json!({"update_id": 9, "stopped_message_generation": {
         "chat": {"id": 42, "type": "private"}, "draft_id": 13,
     }}));
     wait_for("the stop reply", || {
@@ -352,6 +406,26 @@ async fn built_cli_telegram_gateway_relays_allowed_chats_and_scheduled_results()
             .any(|body| body["text"] == "Stopped." && body["reply_parameters"]["message_id"] == 13)
     })
     .await;
+
+    // What the model writes before a tool call is a message of its own; the
+    // answer follows as the reply.
+    push(private(10, 16, 42, "en", "look up my tea"));
+    wait_for("the answer after the search", || {
+        sent(&telegram, 42)
+            .iter()
+            .any(|body| body["text"] == "Found it." && body["reply_parameters"]["message_id"] == 16)
+    })
+    .await;
+    let texts = sent(&telegram, 42)
+        .iter()
+        .map(|body| body["text"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let said = texts
+        .iter()
+        .position(|text| text == "Looking it up.")
+        .unwrap();
+    assert_eq!(texts[said + 1], "Found it.");
+    assert!(sent(&telegram, 42)[said].get("reply_parameters").is_none());
 
     // A scheduled run's result is delivered with its request.
     let due = DateTime::from_timestamp_millis(Utc::now().timestamp_millis() + 2_000).unwrap();
@@ -418,7 +492,7 @@ async fn built_cli_telegram_gateway_relays_allowed_chats_and_scheduled_results()
     let model_calls = echo.calls.load(Ordering::SeqCst);
     let answers = sent(&telegram, 42).len();
     let mut child = gateway(&api, &telegram_api, root.path());
-    push(private(8, 10, 42, "en", "hello there"));
+    push(private(11, 10, 42, "en", "hello there"));
     wait_for("the repeated answer", || {
         sent(&telegram, 42).len() > answers
     })
@@ -439,7 +513,7 @@ async fn built_cli_telegram_gateway_relays_allowed_chats_and_scheduled_results()
 
     // `/forget` forgets the one memory that holds the words, ignoring case.
     let replies = sent(&telegram, 42).len();
-    push(private(9, 15, 42, "en", "/forget GREEN tea"));
+    push(private(12, 17, 42, "en", "/forget GREEN tea"));
     wait_for("the forget reply", || sent(&telegram, 42).len() > replies).await;
     assert_eq!(
         sent(&telegram, 42).last().unwrap()["text"],

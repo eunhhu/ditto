@@ -68,6 +68,8 @@ pub(super) async fn chat(
                         );
                     }
                 }
+                // An acknowledgment starts no answer (ADR 0035).
+                (AgentRunStatus::Acknowledged, _) => println!("ditto> 👍"),
                 (status, _) => eprintln!(
                     "(no answer: {} {})",
                     safe(&format!("{status:?}").to_lowercase()),

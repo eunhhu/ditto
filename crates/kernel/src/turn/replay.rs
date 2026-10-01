@@ -41,10 +41,10 @@ use super::search::ReplayedSearchCall;
 
 use super::run::turn_signature;
 use super::shared::{
-    Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, RequestInputs, agent_run_text,
-    append_assistant_text, bounded_turn_failure_message, history_messages, latest_user_text,
-    model_request, presented_context, request_sha256, select_history_stepped, system_prefix,
-    turn_failure_code_for_model,
+    Checkpoint, HistoryExchange, InFlight, MAX_HISTORY_CANDIDATES, ReadyCall, RequestInputs,
+    agent_run_text, append_assistant_text, bounded_turn_failure_message, history_messages,
+    is_terminal, latest_user_text, listed_run, model_request, presented_context, request_sha256,
+    select_history_stepped, system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
@@ -206,6 +206,8 @@ struct ReplayProjector<'turn, 'snapshot> {
     version: Option<u16>,
     agent_run: bool,
     sort: Option<SortGrant>,
+    /// The session's runs active at admission, by input event ID (ADR 0035).
+    in_flight: Vec<String>,
     sort_claimed: bool,
     sort_calls: Vec<ReplayedSortCall>,
     /// URLs the user's message grants to `web.fetch`, recomputed from it.
@@ -342,12 +344,20 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 },
             )
             .map_err(|_| replay_invalid("agent-run input metadata is invalid"))?;
+            if metadata.acknowledged {
+                return Err(replay_invalid("an acknowledgment starts no turn"));
+            }
         }
         let normalized_input =
             normalize_input_text(&input.text).map_err(|error| replay_invalid(error.to_string()))?;
         if normalized_input != input.text {
             return Err(replay_invalid("recorded input text is not normalized"));
         }
+        let in_flight = input
+            .agent_run
+            .as_ref()
+            .map(|metadata| metadata.in_flight.clone())
+            .unwrap_or_default();
         let sort = input.agent_run.and_then(|metadata| metadata.sort);
         let input_text = input.text;
         let conversation = super::sort::initial_conversation(input_text.clone(), sort.as_ref());
@@ -360,6 +370,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             version: None,
             agent_run,
             sort,
+            in_flight,
             sort_claimed: false,
             sort_calls: Vec::new(),
             fetch_grant,
@@ -427,6 +438,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             &self.input_text,
             self.input_recorded_at,
             context.utc_offset_minutes,
+            &self.in_flight_runs()?,
         )
         .ok_or_else(|| replay_invalid("context.compiled time offset is out of range"))?;
         let mut conversation = history_messages(&history);
@@ -1366,6 +1378,34 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             ));
         }
         Ok(history)
+    }
+
+    /// The in-flight note's runs, rebuilt from the snapshot with the
+    /// runtime's rule: each listed run must be an earlier agent run of the
+    /// session, and one that ended before this input is left out (ADR 0035).
+    fn in_flight_runs(&self) -> Result<Vec<InFlight>, ReplayError> {
+        let input = &self.events[0];
+        let mut runs = Vec::with_capacity(self.in_flight.len());
+        for id in &self.in_flight {
+            let listed = self
+                .snapshot
+                .iter()
+                .find(|event| &event.event_id == id)
+                .ok_or_else(|| replay_invalid("an in-flight run is not in the snapshot"))?;
+            let run = listed_run(listed, input).ok_or_else(|| {
+                replay_invalid("an in-flight run is not an earlier agent run of the session")
+            })?;
+            let ended = self.snapshot.iter().any(|event| {
+                event.seq < input.seq
+                    && event.correlation_id == listed.correlation_id
+                    && is_terminal(event)
+            });
+            if !ended {
+                runs.push((listed.seq, run));
+            }
+        }
+        runs.sort_by_key(|(seq, _)| *seq);
+        Ok(runs.into_iter().map(|(_, run)| run).collect())
     }
 
     /// The thread before this turn, recomputed from the snapshot: its length

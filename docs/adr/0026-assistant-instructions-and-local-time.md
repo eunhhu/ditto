@@ -2,7 +2,9 @@
 
 Status: accepted for Task 022. Adds turn payload version 4 after ADR 0022.
 Amended by [ADR 0031](0031-model-managed-memory.md): from version 10 the second
-and third segments describe memories Ditto keeps on its own.
+and third segments describe memories Ditto keeps on its own; and by
+[ADR 0035](0035-chat-as-a-bridge.md): a second note after the time lists the
+session's runs still in flight.
 
 ## Context
 

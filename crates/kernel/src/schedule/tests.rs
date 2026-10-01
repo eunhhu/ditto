@@ -55,6 +55,25 @@ fn config(root: &std::path::Path) -> KernelConfig {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
     )
 }
+/// Four blocked manual runs: every slot is taken (ADR 0035).
+fn fill_slots(kernel: &DittoKernel) -> Vec<StartAgentRunCommand> {
+    let blocking: Arc<dyn ModelDriver> = Driver::new(true);
+    (0..4)
+        .map(|_| {
+            let command = StartAgentRunCommand {
+                request_id: ulid::Ulid::new().to_string(),
+                session_id: "personal".into(),
+                text: "wait".into(),
+                sort: None,
+            };
+            kernel
+                .start_agent_run(command.clone(), blocking.clone())
+                .unwrap();
+            command
+        })
+        .collect()
+}
+
 fn command() -> ScheduleRunCommand {
     let due_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis() + 60_000).unwrap();
     ScheduleRunCommand {
@@ -293,17 +312,7 @@ async fn busy_slot_defers_work_and_expiry_is_exclusive_even_without_provider() {
     let root = tempfile::tempdir().unwrap();
     let kernel = DittoKernel::open(config(root.path())).unwrap();
     let driver: Arc<dyn ModelDriver> = Driver::new(true);
-    kernel
-        .start_agent_run(
-            StartAgentRunCommand {
-                request_id: ulid::Ulid::new().to_string(),
-                session_id: "personal".into(),
-                text: "wait".into(),
-                sort: None,
-            },
-            driver.clone(),
-        )
-        .unwrap();
+    fill_slots(&kernel);
     let first = command();
     kernel.schedule_run(first.clone()).unwrap();
     assert!(
@@ -322,63 +331,71 @@ async fn busy_slot_defers_work_and_expiry_is_exclusive_even_without_provider() {
 }
 
 #[tokio::test]
-async fn a_busy_session_holds_back_only_its_own_scheduled_work() {
+async fn only_four_active_runs_hold_back_scheduled_work() {
     let root = tempfile::tempdir().unwrap();
     let kernel = DittoKernel::open(config(root.path())).unwrap();
     let driver: Arc<dyn ModelDriver> = Driver::new(true);
+    let wait = |session: &str| StartAgentRunCommand {
+        request_id: ulid::Ulid::new().to_string(),
+        session_id: session.into(),
+        text: "wait".into(),
+        sort: None,
+    };
     kernel
-        .start_agent_run(
-            StartAgentRunCommand {
-                request_id: ulid::Ulid::new().to_string(),
-                session_id: "elsewhere".into(),
-                text: "wait".into(),
-                sort: None,
-            },
-            driver.clone(),
-        )
+        .start_agent_run(wait("elsewhere"), driver.clone())
         .unwrap();
-    // Due in the busy session: it waits for that session, not for its due time.
-    let mut blocked = command();
-    blocked.session_id = "elsewhere".into();
-    blocked.due_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis() + 100).unwrap();
-    blocked.expires_at = blocked.due_at + chrono::Duration::minutes(5);
-    kernel.schedule_run(blocked.clone()).unwrap();
-    // Due in an idle session: it starts although another session is running.
-    let mut free = command();
-    free.due_at = blocked.due_at + chrono::Duration::seconds(1);
-    free.expires_at = free.due_at + chrono::Duration::minutes(5);
-    kernel.schedule_run(free.clone()).unwrap();
+    // Due in a running session: it starts beside the run there (ADR 0035).
+    let mut beside = command();
+    beside.session_id = "elsewhere".into();
+    beside.due_at = DateTime::from_timestamp_millis(Utc::now().timestamp_millis() + 100).unwrap();
+    beside.expires_at = beside.due_at + chrono::Duration::minutes(5);
+    kernel.schedule_run(beside.clone()).unwrap();
     assert!(matches!(
         kernel
-            .scheduler_step(Some(&driver), || free.due_at)
+            .scheduler_step(Some(&driver), || beside.due_at)
             .unwrap(),
         Step::Again
     ));
     assert_eq!(
-        kernel.inspect_schedule(identity(&free)).unwrap().status,
+        kernel.inspect_schedule(identity(&beside)).unwrap().status,
         ScheduleStatus::Running
     );
+    // Four runs are active: due work waits for one of them to end.
+    for session in ["one", "two"] {
+        kernel
+            .start_agent_run(wait(session), driver.clone())
+            .unwrap();
+    }
+    let mut blocked = command();
+    blocked.due_at = beside.due_at + chrono::Duration::milliseconds(1);
+    blocked.expires_at = blocked.due_at + chrono::Duration::minutes(5);
+    kernel.schedule_run(blocked.clone()).unwrap();
     // As reported, once due, while a scheduler with a provider runs.
     tokio::time::sleep(Duration::from_millis(150)).await;
     kernel.inner.scheduler_state.store(2, Ordering::SeqCst);
     let waiting = kernel.inspect_schedule(identity(&blocked)).unwrap();
     assert_eq!(waiting.status, ScheduleStatus::Pending);
     assert_eq!(waiting.waiting_for, Some(ScheduleWaitReason::RuntimeBusy));
-    let mut idle = command();
-    idle.session_id = "third".into();
-    kernel.schedule_run(idle.clone()).unwrap();
+    let mut later = command();
+    later.session_id = "third".into();
+    kernel.schedule_run(later.clone()).unwrap();
     assert_eq!(
         kernel
-            .inspect_schedule(identity(&idle))
+            .inspect_schedule(identity(&later))
             .unwrap()
             .waiting_for,
         Some(ScheduleWaitReason::DueTime)
     );
+    // Nothing starts; the scheduler sleeps until an expiry unless a run ends.
     kernel.inner.scheduler_state.store(0, Ordering::SeqCst);
     assert!(matches!(
-        kernel.scheduler_step(Some(&driver), || free.due_at).unwrap(),
-        Step::Wait(Some(at)) if at == blocked.expires_at.min(idle.due_at)
+        kernel.scheduler_step(Some(&driver), || blocked.due_at).unwrap(),
+        Step::Wait(Some(at)) if at == blocked.expires_at
     ));
+    assert_eq!(
+        kernel.inspect_schedule(identity(&blocked)).unwrap().status,
+        ScheduleStatus::Pending
+    );
     kernel.shutdown_agent_runs().await.unwrap();
 }
 
@@ -524,15 +541,7 @@ fn invalid_time_scope_and_index_source_drift_fail_before_dispatch() {
 async fn releasing_a_manual_slot_wakes_due_work_without_overlap_or_polling() {
     let root = tempfile::tempdir().unwrap();
     let kernel = DittoKernel::open(config(root.path())).unwrap();
-    let manual = StartAgentRunCommand {
-        request_id: ulid::Ulid::new().to_string(),
-        session_id: "personal".into(),
-        text: "wait".into(),
-        sort: None,
-    };
-    kernel
-        .start_agent_run(manual.clone(), Driver::new(true))
-        .unwrap();
+    let manual = fill_slots(&kernel);
     let mut scheduled = command();
     scheduled.due_at =
         DateTime::from_timestamp_millis(Utc::now().timestamp_millis() + 100).unwrap();
@@ -555,8 +564,8 @@ async fn releasing_a_manual_slot_wakes_due_work_without_overlap_or_polling() {
     assert_eq!(driver.calls.load(Ordering::SeqCst), 0);
     kernel
         .cancel_agent_run(AgentRunQuery {
-            request_id: manual.request_id,
-            session_id: manual.session_id,
+            request_id: manual[0].request_id.clone(),
+            session_id: manual[0].session_id.clone(),
         })
         .unwrap();
     assert_eq!(
@@ -564,7 +573,7 @@ async fn releasing_a_manual_slot_wakes_due_work_without_overlap_or_polling() {
         ScheduleStatus::Unverified
     );
     assert_eq!(driver.calls.load(Ordering::SeqCst), 1);
-    // Shutdown of an empty runtime also wakes its scheduler without a timer.
+    // Shutdown also wakes its scheduler without a timer.
     kernel.shutdown_agent_runs().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), task)
         .await

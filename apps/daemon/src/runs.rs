@@ -784,28 +784,24 @@ pub(crate) mod tests {
                 .status(),
             StatusCode::BAD_REQUEST
         );
-        command["request_id"] = json!("01K00000000000000000000001");
-        assert_eq!(
-            client
+        // One session runs four at once (ADR 0035); a fifth is refused.
+        for (request, expected) in [
+            ("01K00000000000000000000001", StatusCode::ACCEPTED),
+            ("01K00000000000000000000002", StatusCode::ACCEPTED),
+            ("01K00000000000000000000003", StatusCode::ACCEPTED),
+            ("01K00000000000000000000004", StatusCode::ACCEPTED),
+            ("01K00000000000000000000005", StatusCode::TOO_MANY_REQUESTS),
+        ] {
+            command["request_id"] = json!(request);
+            let status = client
                 .post(format!("{api}/v1/commands/run"))
                 .json(&command)
                 .send()
                 .await
                 .unwrap()
-                .status(),
-            StatusCode::ACCEPTED
-        );
-        command["request_id"] = json!("01K00000000000000000000002");
-        assert_eq!(
-            client
-                .post(format!("{api}/v1/commands/run"))
-                .json(&command)
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
+                .status();
+            assert_eq!(status, expected, "{request}");
+        }
         let query = AgentRunQuery {
             request_id: "01K00000000000000000000001".into(),
             session_id: "personal".into(),

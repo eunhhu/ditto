@@ -30,8 +30,8 @@ and checks establish a new fact.
   `dev/task-029-memory-search` stack the harness design and Tasks 025–029,
   and `dev/task-030-selection-by-reference`, `dev/task-024-model-memory` and
   `dev/task-031-forget-memory` stack Tasks 030, 024 and 031, and
-  `dev/task-032-web-search` and `dev/task-033-thin-contract` stack Tasks 032
-  and 033. Nothing is pushed.
+  `dev/task-032-web-search`, `dev/task-033-thin-contract` and
+  `dev/task-034-bridge` stack Tasks 032–034. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -69,7 +69,8 @@ and checks establish a new fact.
 - **Ingress.** Typed commands only: record-only input, memory
   save/list/correct/forget,
   run/status/cancel, conversation reset and view, and loopback-only sort,
-  schedule and repeat. The daemon also serves the embedded web app (ADR 0024)
+  schedule and repeat. A run whose text only acknowledges an answer that
+  asked nothing is recorded as `acknowledged` without a turn (ADR 0035). The daemon also serves the embedded web app (ADR 0024)
   under a same-origin-only content security policy. While bound to loopback,
   every route refuses requests addressed to a non-loopback host name, which
   blocks DNS rebinding. `ditto telegram` (ADR 0025) is a CLI client that
@@ -130,12 +131,13 @@ and checks establish a new fact.
   for agent runs while installed), runs at most eight
   model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. There is one turn
-  contract, version 11 (ADR 0034): replay rejects turns recorded under any
+  contract, version 12 (ADR 0034): replay rejects turns recorded under any
   other version, while status and thread history still read their answers.
   The contract carries typed failure reasons (ADR 0021), the thread's recent
   exchanges as native messages in a stepped window (ADRs 0022, 0028), the
-  assistant instructions with the local time as a note in the latest
-  message (ADRs 0026, 0028), each fact recorded once (text in chunks, each
+  assistant instructions with the local time and the session's runs still in
+  flight as notes in the latest message (ADRs 0026, 0028, 0035), each fact
+  recorded once (text in chunks, each
   request as its SHA-256, the selection by contract digests; ADRs 0028,
   0030), and the tools of ADRs 0027, 0029, 0031 and 0033, with the
   instruction to work on its own and hand off only what needs the user.
@@ -158,9 +160,10 @@ and checks establish a new fact.
   completion. One-shot schedules (ADR 0019) and finite repeats (ADR 0020) share
   a bounded index of 100 future intents, one event/timer-driven scheduler,
   at-most-once claims, visible missed/interrupted states and no automatic
-  retry or housekeeping model call. Each session has one execution slot for
-  runs, sorts and scheduled dispatch, and up to four sessions run at once;
-  other immediate requests are rejected as busy.
+  retry or housekeeping model call. Four runs and sorts, including scheduled
+  dispatch, are active at once in total, from one session or several
+  (ADR 0035); other immediate requests are rejected as busy and scheduled
+  work waits for a slot.
 - **Measurement.** Task 014 recorded an offline RAM/latency/accounting
   baseline; Tasks 015–016 recorded five literal synthetic queries at zero and
   1,000 unrelated memories; corpus schema 3 (Task 016.1) derives expected
@@ -169,19 +172,21 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 033
+## Latest verified slice: Task 034
 
-- [Contract and evidence](tasks/033-one-turn-contract.md) (ADR 0034). Replay
-  keeps one turn contract instead of eleven versions; legacy instructions,
-  selection rules, payload forms and failure grammar are gone with their
-  tests.
-- Its gate passed on its final tree (590 Rust tests).
+- [Contract and evidence](tasks/034-chat-as-a-bridge.md) (ADR 0035), turn
+  contract 12. A session runs up to four answers at once; a later run's
+  latest message names the session's runs still in flight; an
+  acknowledgment of an answer that asked nothing costs no model call and
+  gets a 👍; the web app and Telegram never make the user wait, and show
+  what the model says before a tool call as its own message.
+- Its gate passed on its final tree (593 Rust tests).
 
-## Previous slice: Task 032
+## Previous slice: Task 033
 
-- [Contract and evidence](tasks/032-web-search.md): web search on its own,
-  turn payload version 11 (ADR 0033). Its gate passed on its final tree (591
-  Rust tests).
+- [Contract and evidence](tasks/033-one-turn-contract.md) (ADR 0034): one
+  turn contract instead of eleven versions. Its gate passed on its final
+  tree (590 Rust tests).
 
 ## Known gaps
 
@@ -195,17 +200,23 @@ and checks establish a new fact.
   - median prompt prefix reuse between turns of 50.6 % (96.4 % after
     Task 025);
   - one of three simultaneous sessions accepted, the others HTTP 429 (all
-    three after Task 028).
+    three after Task 028, and four runs in one session after Task 034).
 
   ADR 0028's phases target each of these.
 
 - After a reload the web app restores only finished exchanges of the current
-  thread: failed or cancelled turns are not restored, and a run still in
-  flight at load appears when it finishes. Phone access to the web app still
+  thread, in the order they finished: failed or cancelled turns,
+  acknowledgments and the lines said before a tool call are not restored,
+  and a run still in flight at load appears when it finishes. Phone access to the web app still
   needs an authenticated gateway; Telegram is the phone path for now.
 - The Telegram gateway keeps pending replies in memory: a gateway restart
   during an answer loses that reply unless Telegram redelivers the update.
-  Only text messages are handled.
+  Only text messages are handled. A fifth message while four answers run
+  waits up to three minutes for a slot.
+- Acknowledgments are a closed list checked against the last line of the
+  latest answer: an offer phrased without a question mark followed by "ok"
+  is taken as an acknowledgment, which the instructions avoid by asking the
+  model to end hand-offs with a question.
 - `web.fetch` decodes bodies as UTF-8 and runs no JavaScript, so pages in
   legacy charsets or rendered by scripts yield garbled or little text.
 - Web search needs a SearXNG-compatible service the operator runs or trusts;
