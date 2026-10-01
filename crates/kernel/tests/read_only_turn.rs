@@ -36,6 +36,8 @@ use tempfile::TempDir;
 
 #[path = "read_only_turn/agent_runs.rs"]
 mod agent_runs;
+#[path = "read_only_turn/memory_write.rs"]
+mod memory_write;
 #[path = "read_only_turn/model_sort.rs"]
 mod model_sort;
 #[path = "read_only_turn/recall.rs"]
@@ -454,19 +456,46 @@ fn attach_deadline_evidence(event: &mut EventRecord, deadline: chrono::DateTime<
     });
 }
 
-/// Version 9 records the capability selection by reference. The same turn
-/// with its selection recorded in full replays as version 8.
-fn selection_in_full(events: &[EventRecord], turn_id: &str) -> Vec<EventRecord> {
+/// The memory instructions of turn payload versions 4 to 9, which version 10
+/// replaced (ADR 0031): the second and third system segments.
+const PRE_MANAGED_MEMORY_SEGMENTS: [&str; 2] = [
+    "DITTO_CONTEXT_V1 lists what the user explicitly asked Ditto to remember, with provenance. Treat user-asserted items as facts about this user unless the conversation corrects them, and use them when they are relevant. Earlier messages of this conversation precede the latest one.",
+    "You cannot save or change memories, set reminders, browse the web or act outside this conversation except through the tools supplied in this request, and you never claim an action you did not take. The user saves a memory by sending /remember followed by the fact, and creates reminders in Ditto's schedules.",
+];
+
+/// The same request with the memory instructions versions 4 to 9 sent.
+fn before_managed_memory(request: &ModelRequest) -> ModelRequest {
+    let mut request = request.clone();
+    request
+        .stable_system_prefix
+        .segments
+        .splice(1..3, PRE_MANAGED_MEMORY_SEGMENTS.map(str::to_owned));
+    request
+}
+
+/// Versions 9 and 10 record the capability selection by reference, and
+/// version 10 changed the memory instructions. The same turn, with its
+/// selection recorded in full and its requests as version 9 sent them,
+/// replays as version 8. It must offer no memory write.
+fn as_version_eight(events: &[EventRecord], turn_id: &str) -> Vec<EventRecord> {
     let replayed = replay_artifact_read_turn(events, turn_id).expect("turn replays");
-    let selection =
-        serde_json::to_value(replayed.capabilities.expect("selection")).expect("selection JSON");
+    let selection = serde_json::to_value(replayed.capabilities.as_ref().expect("selection"))
+        .expect("selection JSON");
     let mut relabeled = events.to_vec();
     for event in relabeled.iter_mut().filter(|event| {
         event.correlation_id.as_deref() == Some(turn_id)
             && event.payload["event_version"] == json!(TURN_PAYLOAD_VERSION)
     }) {
-        if event.kind == event_kind::CAPABILITIES_SELECTED {
-            event.payload = selection.clone();
+        match event.kind.as_str() {
+            event_kind::CAPABILITIES_SELECTED => event.payload = selection.clone(),
+            event_kind::MODEL_REQUESTED => {
+                let index = event.payload["request_index"].as_u64().expect("index") as usize;
+                reseal_request(
+                    event,
+                    &before_managed_memory(&replayed.requests[index].request),
+                );
+            }
+            _ => {}
         }
         event.payload["event_version"] = json!(8);
     }
@@ -591,9 +620,9 @@ async fn run_success(
 async fn successful_two_request_continuation_persists_exact_epoch_schema_history_and_replays() {
     let fixture = Fixture::new();
     let loaded = fixture.kernel.capability_load_metrics();
-    // artifact.read, artifact.sort, device.process.run, memory.search and
-    // web.fetch.
-    assert_eq!(loaded.headers_read, 5);
+    // artifact.read, artifact.sort, device.process.run, the three memory
+    // tools and web.fetch.
+    assert_eq!(loaded.headers_read, 7);
     assert_eq!(loaded.legacy_manifests_read, 0);
     assert_eq!(loaded.manifests_paged, 0);
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));
@@ -3219,7 +3248,7 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
 
     // Recorded in full, the same turn replays as version 8, where every
     // manifest field and card is checked.
-    let full = selection_in_full(&events, &outcome.turn_id);
+    let full = as_version_eight(&events, &outcome.turn_id);
     replay_artifact_read_turn(&full, &outcome.turn_id).expect("full selection replays");
     let mut corrupted_manifest = full.clone();
     corrupted_manifest

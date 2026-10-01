@@ -21,8 +21,9 @@ use crate::KernelError;
 /// coalesced chunks, and requests, capsules and builtin schemas as what replay
 /// rebuilds from the rest of the journal. Version 8 (ADR 0029) offers
 /// `memory.search` to agent runs. Version 9 (ADR 0030) records the capability
-/// selection by reference.
-pub const TURN_PAYLOAD_VERSION: u16 = 9;
+/// selection by reference. Version 10 (ADR 0031) lets Ditto remember, replace
+/// and forget memories on its own.
+pub const TURN_PAYLOAD_VERSION: u16 = 10;
 /// Oldest turn contract that replay and run status still read. Version-1
 /// turns use positive-overlap context selection and message grammar.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -67,6 +68,12 @@ pub struct CapabilitiesSelectedPayload {
     /// Version 8: `memory.search`, offered to every agent run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_manifest: Option<CapabilityManifest>,
+    /// Version 10: `memory.remember` and `memory.forget`, only ever rebuilt
+    /// from a reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remember_manifest: Option<CapabilityManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forget_manifest: Option<CapabilityManifest>,
     pub epoch: ExecutionEpochEvidence,
     /// Versions 1 to 6. Version 7 derives the builtin schemas of the selected
     /// manifests.
@@ -340,6 +347,8 @@ pub struct ReplayedReadOnlyTurn {
     pub fetch_calls: Vec<super::fetch::ReplayedFetchCall>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recall_calls: Vec<super::recall::ReplayedRecallCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_writes: Vec<super::memory_write::ReplayedMemoryWrite>,
     pub terminal: ArtifactReadTurnReplay,
     pub sequence_span: TurnSequenceSpan,
 }

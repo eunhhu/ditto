@@ -1,4 +1,5 @@
 pub(crate) mod fetch;
+pub(crate) mod memory_write;
 pub(crate) mod recall;
 mod replay;
 mod run;
@@ -10,6 +11,10 @@ mod types;
 pub use fetch::{
     FetchToolError, FetchToolOutput, FetchToolRequested, FetchToolResult, FetchToolStarted,
     ReplayedFetchCall,
+};
+pub use memory_write::{
+    MemoryWrite, MemoryWriteOutput, MemoryWriteRefusal, MemoryWriteRequested, MemoryWriteResult,
+    MemoryWrittenPayload, ReplayedMemoryWrite,
 };
 pub use recall::{
     RecallToolOutput, RecallToolRequested, RecallToolResult, RecalledMemory, ReplayedRecallCall,

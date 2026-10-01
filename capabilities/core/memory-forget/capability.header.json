@@ -1,0 +1,49 @@
+{
+  "header_version": 1,
+  "manifest_sha256": "b5e7939b8863c3aba08c585a5408c0ab922ed5a45e7a7e999edb66cde3acdffc",
+  "id": "memory.forget",
+  "version": "0.1.0",
+  "namespace": "memory",
+  "kind": "tool",
+  "lifecycle": "active",
+  "summary": "Forget one memory by its ID when the user asks you to, or when it is plainly wrong; it stops being used and listed.",
+  "placement": {
+    "modes": [
+      "local"
+    ],
+    "requires": []
+  },
+  "retrieval": {
+    "intents": [
+      "forget something the user asked Ditto to forget",
+      "remove a wrong memory"
+    ],
+    "negative_examples": [
+      "forget the conversation",
+      "delete a file"
+    ],
+    "complements": [
+      "memory.search",
+      "memory.remember"
+    ],
+    "aliases": [
+      "forget",
+      "delete memory"
+    ]
+  },
+  "effects": {
+    "minimum": {
+      "access": "none",
+      "mutation": "reversible",
+      "externality": "local",
+      "privilege": "user"
+    },
+    "maximum": {
+      "access": "none",
+      "mutation": "reversible",
+      "externality": "local",
+      "privilege": "user"
+    }
+  },
+  "candidate_bytes": 300
+}

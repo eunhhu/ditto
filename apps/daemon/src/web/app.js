@@ -37,6 +37,9 @@ const STRINGS = {
     capability_unavailable: 'a tool is unavailable', capability_contract: 'a tool call was invalid', invalid_input: 'invalid request',
     'memory.search': 'Searching memories…', 'web.fetch': 'Reading the linked page…',
     'artifact.read': 'Reading the attachment…', 'artifact.sort': 'Sorting the attachment…',
+    'memory.remember': 'Saving to memory…', 'memory.forget': 'Forgetting a memory…',
+    remembered: 'Remembered', updatedMemory: 'Updated a memory', forgotMemory: 'Forgot a memory',
+    byDitto: 'by Ditto', byDittoHint: 'Ditto inferred this from your conversation',
   },
   ko: {
     newThread: '새 대화', memories: '기억', schedules: '예약',
@@ -68,6 +71,9 @@ const STRINGS = {
     capability_unavailable: '도구를 사용할 수 없음', capability_contract: '잘못된 도구 호출', invalid_input: '잘못된 요청',
     'memory.search': '기억을 찾는 중…', 'web.fetch': '링크한 페이지를 읽는 중…',
     'artifact.read': '첨부를 읽는 중…', 'artifact.sort': '첨부를 정렬하는 중…',
+    'memory.remember': '기억하는 중…', 'memory.forget': '기억을 지우는 중…',
+    remembered: '기억함', updatedMemory: '기억을 고침', forgotMemory: '기억을 지움',
+    byDitto: 'Ditto', byDittoHint: '대화에서 Ditto가 추론한 기억',
   },
 };
 const LANG = (navigator.language || 'en').toLowerCase().startsWith('ko') ? 'ko' : 'en';
@@ -230,6 +236,16 @@ function finishBubble(bubble, text, failure) {
   updateComposer();
   scrollToEnd();
 }
+// What Ditto remembered or forgot during the answer (ADR 0031), kept apart
+// from the answer text so finishing the answer leaves it in place.
+function noticesFor(bubble) {
+  if (!bubble.notices) {
+    bubble.notices = document.createElement('div');
+    bubble.notices.className = 'notices';
+    bubble.node.insertBefore(bubble.notices, bubble.foot);
+  }
+  return bubble.notices;
+}
 function divider() {
   const node = document.createElement('div');
   node.className = 'divider';
@@ -365,6 +381,23 @@ function onEvent(event) {
       if (bubble && !bubble.done) finishBubble(bubble, '', payload.failure);
       return;
     }
+    case 'agent.memory_write.requested': {
+      const bubble = bubbles.get(payload.turn_id);
+      if (bubble && payload.write) (bubble.writes = bubble.writes || new Map()).set(payload.call_id, payload.write);
+      return;
+    }
+    case 'agent.memory_write.output': {
+      const bubble = bubbles.get(payload.turn_id);
+      const write = bubble && bubble.writes && bubble.writes.get(payload.call_id);
+      if (!write || payload.result.outcome === 'refused') return;
+      const line = document.createElement('div');
+      line.textContent = payload.result.outcome === 'forgotten'
+        ? t('forgotMemory')
+        : `${t(write.replaces ? 'updatedMemory' : 'remembered')}: ${write.text}`;
+      noticesFor(bubble).appendChild(line);
+      scrollToEnd();
+      return;
+    }
     case 'conversation.reset':
       divider();
       return;
@@ -377,7 +410,7 @@ function onEvent(event) {
 }
 
 const STREAM_KINDS = ['input.received', 'model.output', 'turn.finished', 'turn.failed', 'conversation.reset',
-  'context.node.recorded', 'schedule.requested', 'schedule.claimed', 'schedule.cancelled', 'schedule.expired',
+  'context.node.recorded', 'agent.memory_write.requested', 'agent.memory_write.output', 'schedule.requested', 'schedule.claimed', 'schedule.cancelled', 'schedule.expired',
   'schedule.repeat.requested', 'schedule.repeat.cancelled', 'schedule.repeat.claimed', 'schedule.repeat.skipped'];
 
 function connect() {
@@ -410,6 +443,13 @@ async function refreshMemories(append = false) {
     item.textContent = memory.text;
     const meta = document.createElement('div');
     meta.className = 'meta';
+    if (memory.inferred) {
+      const tag = document.createElement('span');
+      tag.className = 'tag tool';
+      tag.textContent = t('byDitto');
+      tag.title = t('byDittoHint');
+      meta.appendChild(tag);
+    }
     const fix = document.createElement('button');
     fix.className = 'link';
     fix.textContent = t('correct');
@@ -563,7 +603,7 @@ async function inspect(taskId) {
     section(t('excluded'), [...excluded].map(([reason, count]) => [`${t(reason)}: ${count}`]));
     section(t('history'), (context.payload.history_turn_ids || []).map((turn) => [userTextByTurn.get(turn) || t('earlier')]));
   }
-  const toolKinds = { 'capability.requested': null, 'agent.fetch.requested': 'web.fetch', 'agent.sort.requested': 'artifact.sort', 'agent.memory.requested': 'memory.search' };
+  const toolKinds = { 'capability.requested': null, 'agent.fetch.requested': 'web.fetch', 'agent.sort.requested': 'artifact.sort', 'agent.memory.requested': 'memory.search', 'agent.memory_write.requested': null };
   const tools = events
     .filter((event) => event.kind in toolKinds)
     .map((event) => [toolKinds[event.kind] || event.payload.capability_id, JSON.stringify(event.payload.arguments)]);

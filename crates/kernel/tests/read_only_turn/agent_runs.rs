@@ -783,6 +783,11 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
                 event.payload = selection.clone();
             }
             event.payload["event_version"] = json!(version);
+            // Versions before 10 sent the earlier memory instructions.
+            if (7..10).contains(&version) && event.kind == event_kind::MODEL_REQUESTED {
+                let index = event.payload["request_index"].as_u64().unwrap() as usize;
+                super::reseal_request(event, &super::before_managed_memory(&requests[index]));
+            }
             if version < 7 {
                 match event.kind.as_str() {
                     event_kind::CONTEXT_COMPILED => event.payload["capsule"] = json!({"nodes": []}),
@@ -795,7 +800,7 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
                             "event_version": version,
                             "turn_id": event.payload["turn_id"],
                             "request_index": index,
-                            "request": requests[index],
+                            "request": super::before_managed_memory(&requests[index]),
                         });
                     }
                     _ => {}
@@ -861,9 +866,18 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
     assert!(replay_artifact_read_turn(&full_forms_as_seven, &status.turn_id).is_err());
     // Version 9 records the selection by reference: recorded in full, the
     // same turn replays as versions 7 and 8, and each version accepts only its
-    // own selection form.
+    // own selection form. Version 10 changed only the memory instructions.
     replay_artifact_read_turn(&relabel(7, false, false), &status.turn_id).unwrap();
     replay_artifact_read_turn(&relabel(8, false, false), &status.turn_id).unwrap();
+    replay_artifact_read_turn(&relabel(9, false, false), &status.turn_id).unwrap();
+    let mut instructions_of_ten_as_nine = events.clone();
+    for event in instructions_of_ten_as_nine
+        .iter_mut()
+        .filter(|event| versioned(event))
+    {
+        event.payload["event_version"] = json!(9);
+    }
+    assert!(replay_artifact_read_turn(&instructions_of_ten_as_nine, &status.turn_id).is_err());
     let mut reference_as_eight = events.clone();
     for event in reference_as_eight
         .iter_mut()

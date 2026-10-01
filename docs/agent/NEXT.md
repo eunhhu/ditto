@@ -13,10 +13,13 @@ of model tool invocation for memory writes. In this order:
    by reference, turn payload version 9 - complete (`capabilities.selected`
    4,910 → 952 bytes; a short agent turn journals 4,879 bytes instead of
    8,837).
-2. 024 Model-managed memory: during a turn Ditto saves new lasting facts and
-   replaces outdated memories on its own, labeled as its inference, with
-   provenance, bounds and protection against injected instructions; turn
-   payload version 10.
+2. [024](tasks/024-model-managed-memory.md) Model-managed memory, turn
+   payload version 10 - complete (Ditto remembers, replaces and forgets
+   memories on its own, labeled as its inference, refused after reading a
+   page or file; ADR 0031).
+
+Both slices are done; the next waits for the user's choice among the open
+items below.
 
 The thin-harness phases of ADR 0028 (Tasks 025–029) are complete except the
 parts deferred there: one builtin tool lifecycle, parallel read-only calls,
@@ -24,6 +27,8 @@ and the journal target of three bytes per answer byte.
 
 Still open from the earlier frontier:
 
+- Forgetting a memory directly from the memory list, CLI or Telegram (today
+  the user asks Ditto or replaces it).
 - Web search waits for per-call approval.
 - The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
   the measurement gate before any claim of parity with other assistants.
@@ -32,6 +37,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [024](tasks/024-model-managed-memory.md) Memory that Ditto manages, turn
+  payload version 10 (ADR 0031).
 - [030](tasks/030-selection-by-reference.md) Capability selection recorded
   by reference, turn payload version 9 (ADR 0030).
 - [029](tasks/029-memory-search.md) Read-only memory search and tool

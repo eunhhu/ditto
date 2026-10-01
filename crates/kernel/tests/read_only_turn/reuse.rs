@@ -224,9 +224,9 @@ async fn tool_contracts_are_paged_once_per_process() {
     for question in ["one", "two", "three"] {
         ask_ids(&fixture.kernel, question).await;
     }
-    // artifact.read, web.fetch and memory.search, each paged by the first
-    // turn only.
-    assert_eq!(fixture.kernel.capability_load_metrics().manifests_paged, 3);
+    // artifact.read, web.fetch and the three memory tools, each paged by the
+    // first turn only.
+    assert_eq!(fixture.kernel.capability_load_metrics().manifests_paged, 5);
     fixture.kernel.shutdown_agent_runs().await.unwrap();
 }
 

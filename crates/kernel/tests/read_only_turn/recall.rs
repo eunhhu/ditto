@@ -95,7 +95,9 @@ async fn a_search_finds_a_memory_the_context_budget_left_out() {
     assert_eq!(found["searched"], json!(42));
     assert_eq!(
         found["content_origin"],
-        json!("what the user asked Ditto to remember")
+        json!(
+            "memories Ditto keeps for the user: what they asked Ditto to remember, and what Ditto inferred (marked inferred)"
+        )
     );
     kernel.shutdown_agent_runs().await.unwrap();
 
