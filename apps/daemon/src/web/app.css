@@ -80,6 +80,8 @@ textarea { resize: vertical; }
 .msg.user { align-self: flex-end; background: var(--user); white-space: pre-wrap; }
 .msg.assistant { align-self: flex-start; background: var(--assistant); border: 1px solid var(--line); }
 .msg.failed { border-color: var(--danger); }
+.msg.user { position: relative; }
+.reaction { position: absolute; left: -8px; bottom: -12px; padding: 0 5px; font-size: 13px; line-height: 20px; background: var(--assistant); border: 1px solid var(--line); border-radius: 999px; box-shadow: var(--shadow); }
 .msg .body p, .msg .body ul, .msg .body ol, .msg .body pre { margin: 0 0 8px; }
 .msg .body > :last-child { margin-bottom: 0; }
 .msg .body ul, .msg .body ol { padding-left: 22px; }

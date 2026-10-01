@@ -36,9 +36,10 @@ assistant to message by state and spend nothing on acknowledgments:
 
 5. [033](tasks/033-one-turn-contract.md) One turn contract until the first
    release - complete (ADR 0034).
-6. 034 The chat as a bridge: runs in one session at once, each run aware of
-   the session's work in flight, a message per model request, and a reaction
-   instead of a model call for an acknowledgment.
+6. [034](tasks/034-chat-as-a-bridge.md) The chat as a bridge, turn contract
+   12 - complete (ADR 0035; four answers at once even in one session, each
+   run aware of the session's work in flight, the line before a tool call as
+   its own message, and a 👍 instead of a model call for an acknowledgment).
 7. 035 One builtin tool lifecycle, with the memory and web tools merged.
 
 The thin-harness phases of ADR 0028 (Tasks 025–029) are complete except the
@@ -56,6 +57,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [034](tasks/034-chat-as-a-bridge.md) The chat as a bridge, turn contract
+  12 (ADR 0035).
 - [033](tasks/033-one-turn-contract.md) One turn contract until the first
   release (ADR 0034).
 - [032](tasks/032-web-search.md) Web search on its own, turn payload

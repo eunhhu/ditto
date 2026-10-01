@@ -184,15 +184,27 @@ text is at most 16 KiB UTF-8 before existing whitespace normalization. The
 kernel derives task ID `run_<request_id>` and creates a fresh turn correlation.
 Without a sort attachment the durable input carries additive
 `agent_run: {version: 1, request_id: ...}` metadata fixed by the kernel, never
-copied from client event fields.
+copied from client event fields. When other agent runs of the session are
+active at admission, `in_flight` lists their input event IDs, sorted, at most
+three; the run's latest message then carries a second Ditto note,
+`[Ditto: still working on "…" (started N min ago), …]`, quoting each request
+that had not ended when this input was recorded, whitespace collapsed and cut
+to 80 characters. Replay requires each listed ID to be an earlier agent-run
+input of the session that was not an acknowledgment, and rebuilds the note
+with the same rule ([ADR 0035](../adr/0035-chat-as-a-bridge.md)).
 
 Acceptance precedes dispatch and returns HTTP 202 with `running`. Identical
 normalized text with the same session/request ID returns the existing run,
 including terminal or interrupted runs; changed text, attachment or permission
-is HTTP 409. One active run is allowed per session and four at once across
-sessions ([ADR 0028](../adr/0028-thin-realtime-harness.md) Phase D); another
-identity in a busy session, or beyond the limit, gets HTTP 429 without
-acceptance or a queue. Disabled execution and shutdown return HTTP 503 for new
+is HTTP 409. Four runs and sorts are active at once in total, from one session
+or several; new work beyond the limit gets HTTP 429 without acceptance or a
+queue ([ADR 0035](../adr/0035-chat-as-a-bridge.md)). A message without an
+attachment that is only an acknowledgment (a closed list such as "ㅇㅋ", "ok",
+"고마워", "thanks" or "👍", compared without case, spaces, emoji variants or
+closing punctuation) is recorded with `acknowledged: true` and starts no turn
+when the last line of the thread's latest answer asks nothing (has no `?` or
+`？`); it returns HTTP 200 with `acknowledged`. Scheduled runs are never
+acknowledgments. Disabled execution and shutdown return HTTP 503 for new
 work. The daemon's default is disabled; input and memory routes remain free of
 model calls. POST is not automatically retried by the CLI.
 
@@ -202,7 +214,8 @@ cancel that exact run. Unknown identities return 404. Cancellation is a live
 signal, not a durable promise of a terminal; `cancellation_requested` is true
 while the matching live token is signalled. A durable cancellation becomes
 `failed` with `failure_code: cancelled`. A finished run is `unverified` with a
-response. If the original input exists without a terminal or live owner, state
+response; an acknowledgment is `acknowledged`, without one, and never joins
+the conversation thread. If the original input exists without a terminal or live owner, state
 is `interrupted`, not success or pending automatic restart. Status inspection
 projects indexed trusted journal boundaries; complete trace verification is the
 separate existing replay API. A run started by a schedule or repeat occurrence
@@ -247,7 +260,7 @@ fields. The provider may remain disabled. No program, environment, path,
 effect, lease, actor or evidence is client-selectable.
 
 The kernel derives `sort_<request_id>` task scope and fresh `turn_*` correlation,
-occupies its session's model-run slot, stores the input artifact, then durably
+occupies one of the four run slots, stores the input artifact, then durably
 accepts `sort.requested` (user, version 1) before dispatch. This event contains
 the request ID, input reference and unique option, not the source text or local
 filename. Exact retries return prior state, changed retries conflict, busy work
@@ -276,7 +289,7 @@ race; cancellation after completion returns that completion.
 
 HTTP statuses are 202 for running admission, 200 for prior/terminal results,
 400 invalid input, 404 absent/wrong scope, 409 changed retry, 422 unknown fields,
-429 busy session or run limit, 503 shutdown and 500 unavailable storage. Non-loopback
+429 run limit, 503 shutdown and 500 unavailable storage. Non-loopback
 listeners do not mount these routes. See [ADR 0017](../adr/0017-bounded-local-sort.md).
 
 ## One-shot scheduled requests

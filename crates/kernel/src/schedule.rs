@@ -136,10 +136,7 @@ impl DittoKernel {
             let result = self.schedule_status(&entry, &slot)?;
             if result.status == ScheduleStatus::Running {
                 self.schedule_transition(&entry, ScheduleState::CancelRequested)?;
-                // Status proves that this run is its session's active run.
-                if let Some(active) = slot.active.get(&entry.session_id) {
-                    active.cancellation.cancel();
-                }
+                self.cancel_active_run(result.run.as_ref(), &slot)?;
             }
         }
         self.inner.scheduler_wake.notify_one();
@@ -239,13 +236,13 @@ impl DittoKernel {
             }
         }
         // Due work starts in order of due time, a one-shot before a repeat at
-        // equal times, as soon as its own session can start: a run in another
-        // session never holds it back (ADR 0028 Phase D).
-        if let Some(driver) = driver {
+        // equal times, whenever fewer than four runs are active: runs in its
+        // own session do not hold it back (ADR 0035).
+        if let Some(driver) = driver.filter(|_| slot.can_start()) {
             let now_ms = now.timestamp_millis();
             let mut due = Vec::new();
             for (position, entry) in entries.iter().enumerate() {
-                if entry.due_at_ms <= now_ms && slot.can_start(&entry.session_id) {
+                if entry.due_at_ms <= now_ms {
                     due.push((entry.due_at_ms, 0, position));
                 }
             }
@@ -255,7 +252,7 @@ impl DittoKernel {
                     .window(entry.next_occurrence)
                     .map_err(storage)?
                     .0;
-                if start <= now_ms && slot.can_start(&entry.session_id) {
+                if start <= now_ms {
                     due.push((start, 1, position));
                 }
             }
@@ -294,19 +291,20 @@ impl DittoKernel {
                         },
                         driver.clone(),
                         &mut slot,
+                        false,
                     )?;
                     return Ok(Step::Again);
                 }
                 None => {}
             }
         }
-        // Work that can start waits for its due time; work whose session is
-        // busy waits for a wake-up when a run ends, or for its expiry.
-        let ready = |session: &str| driver.is_some() && slot.can_start(session);
+        // Work that can start waits for its due time; while four runs are
+        // active it waits for a wake-up when one ends, or for its expiry.
+        let ready = driver.is_some() && slot.can_start();
         let mut next = entries
             .iter()
             .map(|entry| {
-                if ready(&entry.session_id) {
+                if ready {
                     entry.due_at_ms
                 } else {
                     entry.expires_at_ms
@@ -318,11 +316,7 @@ impl DittoKernel {
                 .timing
                 .window(entry.next_occurrence)
                 .map_err(storage)?;
-            let deadline = if ready(&entry.session_id) {
-                due
-            } else {
-                expiry
-            };
+            let deadline = if ready { due } else { expiry };
             next = Some(next.map_or(deadline, |current| current.min(deadline)));
         }
         let next = next
@@ -446,7 +440,6 @@ impl DittoKernel {
 
     pub(crate) fn schedule_wait_reason(
         &self,
-        session: &str,
         due: DateTime<Utc>,
         slot: &RunSlot,
     ) -> ScheduleWaitReason {
@@ -454,7 +447,7 @@ impl DittoKernel {
             0 => ScheduleWaitReason::SchedulerStopped,
             1 => ScheduleWaitReason::ProviderDisabled,
             _ if Utc::now() < due => ScheduleWaitReason::DueTime,
-            _ if !slot.can_start(session) => ScheduleWaitReason::RuntimeBusy,
+            _ if !slot.can_start() => ScheduleWaitReason::RuntimeBusy,
             _ => ScheduleWaitReason::Dispatch,
         }
     }
@@ -490,14 +483,17 @@ impl DittoKernel {
             ScheduleState::Claimed | ScheduleState::CancelRequested => {
                 match run.as_ref().map(|run| run.status) {
                     Some(AgentRunStatus::Running) => ScheduleStatus::Running,
-                    Some(AgentRunStatus::Unverified) => ScheduleStatus::Unverified,
+                    // A scheduled run is never recorded as an acknowledgment.
+                    Some(AgentRunStatus::Unverified | AgentRunStatus::Acknowledged) => {
+                        ScheduleStatus::Unverified
+                    }
                     Some(AgentRunStatus::Failed) => ScheduleStatus::Failed,
                     Some(AgentRunStatus::Interrupted) | None => ScheduleStatus::Interrupted,
                 }
             }
         };
         let waiting_for = (status == ScheduleStatus::Pending)
-            .then(|| self.schedule_wait_reason(&entry.session_id, command.due_at, slot));
+            .then(|| self.schedule_wait_reason(command.due_at, slot));
         Ok(ScheduleResponse {
             request_id: command.request_id,
             session_id: command.session_id,

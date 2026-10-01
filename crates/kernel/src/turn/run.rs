@@ -51,9 +51,10 @@ mod search_tool;
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
-    Checkpoint, HistoryExchange, ReadyCall, RequestInputs, append_assistant_text,
-    bounded_turn_failure_message, history_messages, latest_user_text, local_utc_offset_minutes,
-    model_request, presented_context, request_sha256, system_prefix, turn_failure_code_for_model,
+    Checkpoint, HistoryExchange, InFlight, ReadyCall, RequestInputs, append_assistant_text,
+    bounded_turn_failure_message, history_messages, is_terminal, latest_user_text, listed_run,
+    local_utc_offset_minutes, model_request, presented_context, request_sha256, system_prefix,
+    turn_failure_code_for_model,
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnStatus, CapabilitiesSelectedRefPayload,
@@ -75,6 +76,9 @@ pub(super) struct TurnScope {
     effective_deadline: Cell<Option<DateTime<Utc>>>,
     agent_run: bool,
     sort: Option<super::sort::SortGrant>,
+    /// The session's agent runs active at admission, by input event ID
+    /// (ADR 0035).
+    in_flight: Vec<String>,
     /// Whether `web.fetch` is offered. From version 6 it is part of every
     /// agent run's stable tool surface while enabled.
     fetch_offered: bool,
@@ -337,6 +341,10 @@ impl DittoKernel {
             sort: agent_run
                 .as_ref()
                 .and_then(|metadata| metadata.sort.clone()),
+            in_flight: agent_run
+                .as_ref()
+                .map(|metadata| metadata.in_flight.clone())
+                .unwrap_or_default(),
             fetch_offered: agent_run.is_some() && self.inner.web_fetch.is_some(),
             memory_offered: agent_run.is_some(),
             remember_offered: agent_run.is_some(),
@@ -419,22 +427,25 @@ impl DittoKernel {
         };
 
         self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
-        let (capsule, history) =
+        let (capsule, history, in_flight) =
             self.compile_turn_context(&mut run, &text, context_candidates, &input_event)?;
         let tools = self.select_turn_tools(&mut run, &input_event)?;
+        let text = latest_user_text(&text, run.accepted_at, run.utc_offset_minutes, &in_flight)
+            .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
         self.run_model_requests(&mut run, text, history, capsule, tools)
             .await
     }
 
     /// Compile and journal the turn's source-verified context capsule and, for
-    /// agent runs, the conversation thread's recent exchanges.
+    /// agent runs, the conversation thread's recent exchanges and the runs
+    /// still in flight.
     fn compile_turn_context(
         &self,
         run: &mut TurnRun<'_>,
         text: &str,
         context_candidates: Option<impl IntoIterator<Item = ContextCandidate>>,
         input_event: &EventRecord,
-    ) -> Result<(ContextCapsule, Vec<HistoryExchange>), TurnRunError> {
+    ) -> Result<(ContextCapsule, Vec<HistoryExchange>, Vec<InFlight>), TurnRunError> {
         let (context_candidates, sources_verified, snapshot) = match context_candidates {
             Some(candidates) => (candidates.into_iter().collect(), false, None),
             None => match self.agent_context_candidates(
@@ -491,8 +502,9 @@ impl DittoKernel {
                 return Err(self.fail_with(run, reason, message, None, None));
             }
         }
-        let history = if run.scope.agent_run {
+        let (history, in_flight) = if run.scope.agent_run {
             self.conversation_history(&run.scope.session_id, input_event.seq)
+                .and_then(|history| Ok((history, self.in_flight_runs(&run.scope, input_event)?)))
                 .map_err(|_| {
                     self.fail_with(
                         run,
@@ -503,7 +515,7 @@ impl DittoKernel {
                     )
                 })?
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let utc_offset_minutes = local_utc_offset_minutes(run.accepted_at);
         run.utc_offset_minutes = utc_offset_minutes;
@@ -529,7 +541,33 @@ impl DittoKernel {
         if run.scope.memory_offered {
             run.recall_source = Some((payload.compiled, snapshot.unwrap_or_default()));
         }
-        Ok((capsule, history))
+        Ok((capsule, history, in_flight))
+    }
+
+    /// The runs listed at admission that had not ended when this turn's input
+    /// was recorded, in admission order (ADR 0035).
+    fn in_flight_runs(
+        &self,
+        scope: &TurnScope,
+        input: &EventRecord,
+    ) -> Result<Vec<InFlight>, KernelError> {
+        let invalid = || KernelError::InvalidCommand("an in-flight run is invalid".into());
+        let mut runs = Vec::with_capacity(scope.in_flight.len());
+        for id in &scope.in_flight {
+            let listed = self.inner.events.get_by_event_id(id)?.ok_or_else(invalid)?;
+            let run = listed_run(&listed, input).ok_or_else(invalid)?;
+            let task = listed.task_id.as_deref().ok_or_else(invalid)?;
+            let ended = self
+                .inner
+                .events
+                .task_turn_boundary(&scope.session_id, task)?
+                .is_some_and(|(_, last)| last.seq < input.seq && is_terminal(&last));
+            if !ended {
+                runs.push((listed.seq, run));
+            }
+        }
+        runs.sort_by_key(|(seq, _)| *seq);
+        Ok(runs.into_iter().map(|(_, run)| run).collect())
     }
 
     /// Page the permitted capabilities into one sealed execution epoch,
@@ -963,8 +1001,6 @@ impl DittoKernel {
         tools: TurnTools,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
         let mut conversation = history_messages(&history);
-        let text = latest_user_text(&text, run.accepted_at, run.utc_offset_minutes)
-            .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
         conversation.extend(super::sort::initial_conversation(
             text,
             run.scope.sort.as_ref(),

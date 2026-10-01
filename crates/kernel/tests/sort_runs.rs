@@ -102,7 +102,7 @@ async fn actual_process_verifies_artifacts_and_survives_retry_and_reopen() {
 }
 
 #[tokio::test]
-async fn duplicate_conflict_busy_scope_and_cancel_do_not_dispatch_extra_work() {
+async fn duplicate_conflict_scope_and_cancel_do_not_dispatch_extra_work() {
     let dir = tempfile::tempdir().unwrap();
     let kernel = DittoKernel::open(config(dir.path())).unwrap();
     let first = command("b\na");
@@ -120,10 +120,6 @@ async fn duplicate_conflict_busy_scope_and_cancel_do_not_dispatch_extra_work() {
     assert!(matches!(
         kernel.start_sort(changed),
         Err(AgentRunError::Conflict)
-    ));
-    assert!(matches!(
-        kernel.start_sort(command("other")),
-        Err(AgentRunError::Busy)
     ));
     let mut wrong = query(&first);
     wrong.session_id = "different".into();

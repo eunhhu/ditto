@@ -121,9 +121,9 @@ impl DittoKernel {
             payload: json!({"version":1,"source_event_id":entry.source_event_id,"progress":entry.progress()}),
             causation_id: Some(entry.last_event_id.clone()), correlation_id: None, span_id: None,
         })?;
-        // A running child is its session's active run.
-        if running && let Some(active) = slot.active.get(&entry.session_id) {
-            active.cancellation.cancel();
+        if running {
+            let child = response.last_occurrence.as_ref();
+            self.cancel_active_run(child.and_then(|child| child.run.as_ref()), &slot)?;
         }
         self.inner.scheduler_wake.notify_one();
         self.repeat_status(&self.repeat_entry(&query)?, &slot, true)
@@ -207,6 +207,7 @@ impl DittoKernel {
             },
             driver,
             slot,
+            false,
         )?;
         Ok(None)
     }
@@ -289,8 +290,7 @@ impl DittoKernel {
             missed_occurrences: entry.missed,
             next_occurrence: next_due.map(|_| entry.next_occurrence),
             next_due_at: next_due,
-            waiting_for: next_due
-                .map(|due| self.schedule_wait_reason(&entry.session_id, due, slot)),
+            waiting_for: next_due.map(|due| self.schedule_wait_reason(due, slot)),
             last_occurrence_id: entry.last_child_id.clone(),
             last_occurrence: child,
         })

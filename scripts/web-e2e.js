@@ -30,12 +30,15 @@ function event(delta, finish = null) {
 }
 
 // The mock streams a markdown reply describing what it received, so the page
-// shows which memory and how much history reached the model. Asked to recall,
-// it first calls memory.search and then answers with what the search found;
-// told to remember, it calls memory.remember; asked to search the web, it
+// shows which memory and how much history reached the model, and whether
+// another run was still in flight. Asked to recall, it first calls
+// memory.search and then answers with what the search found; told to
+// remember, it calls memory.remember; asked to search the web, it says so and
 // calls web.search.
+let modelRequests = 0;
 function mockModel() {
   const server = http.createServer((request, response) => {
+    modelRequests += 1;
     let raw = '';
     request.on('data', (chunk) => { raw += chunk; });
     request.on('end', async () => {
@@ -44,9 +47,10 @@ function mockModel() {
       const system = (messages.find((message) => message.role === 'system') || {}).content || '';
       const prior = messages.slice(0, -1).filter((message) => message.role !== 'system').length;
       const memory = system.includes('afternoon meetings') ? 'afternoon' : system.includes('morning meetings') ? 'morning' : 'none';
-      // Answer the user's words, not Ditto's leading time note.
+      // Answer the user's words, not Ditto's leading notes.
       const user = [...messages].reverse().find((message) => message.role === 'user');
-      const question = user.content.replace(/^\[Ditto:[^\]]*\]\n\n/, '');
+      const question = user.content.replace(/^(\[Ditto:[^\]]*\]\n)+\n/, '');
+      const working = user.content.includes('\n[Ditto: still working on "') ? 'yes' : 'no';
       const result = messages[messages.length - 1].role === 'tool' ? JSON.parse(messages[messages.length - 1].content) : null;
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       if (question.includes('recall') && !result) {
@@ -58,6 +62,7 @@ function mockModel() {
       }
       if (question.includes('Search the web') && !result) {
         const call = { index: 0, id: 'call-search', type: 'function', function: { name: 'web_search', arguments: '{"query":"rust 2.0"}' } };
+        response.write(event({ content: 'Looking that up.' }));
         response.write(event({ tool_calls: [call] }));
         response.write(event({}, 'tool_calls'));
         response.end('data: [DONE]\n\n');
@@ -78,7 +83,7 @@ function mockModel() {
         ? `searched: ${result.results.map((hit) => `${hit.title} (${hit.snippet})`).join('; ')}`
         : result
         ? `recalled: ${result.memories.map((found) => found.text).join('; ')}`
-        : `You asked: *${question}*\n\n- memory seen: **${memory}**\n- earlier messages: \`${prior}\`\n\n\`\`\`\nstreamed by a mock model\n\`\`\``;
+        : `You asked: *${question}*\n\n- memory seen: **${memory}**\n- earlier messages: \`${prior}\`\n- still working: **${working}**\n\n\`\`\`\nstreamed by a mock model\n\`\`\``;
       const delay = question.includes('slowly') ? 400 : 60;
       for (let index = 0; index < reply.length; index += 12) {
         if (response.destroyed) return;
@@ -112,20 +117,28 @@ function freePort() {
   });
 }
 
+// Answer bubbles, without the messages a run said before a tool call.
 async function lastAssistant(page) {
-  return page.$$eval('.msg.assistant', (nodes) => {
+  return page.$$eval('.msg.assistant:not(.said)', (nodes) => {
     const node = nodes[nodes.length - 1];
-    return node && { text: node.querySelector('.body').innerText, foot: node.querySelector('.foot').innerText, failed: node.classList.contains('failed') };
+    return node && { text: node.querySelector('.body').innerText, foot: node.querySelector('.foot').innerText, failed: node.classList.contains('failed'), running: Boolean(node.querySelector('.foot .stop')) };
   });
 }
-// A finished bubble, answered or failed, has a footer.
+// A finished bubble, answered or failed, has a footer without a stop control.
 async function waitDone(page, count) {
   await page.waitForFunction((expected) => {
-    const nodes = document.querySelectorAll('.msg.assistant');
-    return nodes.length >= expected && nodes[nodes.length - 1].querySelector('.foot').innerText.length > 0;
+    const nodes = document.querySelectorAll('.msg.assistant:not(.said)');
+    const last = nodes[nodes.length - 1];
+    return nodes.length >= expected && !last.querySelector('.foot .stop') && last.querySelector('.foot').innerText.length > 0;
   }, { timeout: 20000 }, count);
   return lastAssistant(page);
 }
+// The answer bubble under one of the user's messages.
+const answerTo = (page, text) => page.evaluate((asked) => {
+  const user = [...document.querySelectorAll('.msg.user')].find((node) => node.innerText === asked);
+  const node = user && user.nextElementSibling;
+  return node && { text: node.querySelector('.body').innerText, failed: node.classList.contains('failed'), running: Boolean(node.querySelector('.foot .stop')) };
+}, text);
 function statusWithHost(port, host) {
   return new Promise((resolve, reject) => {
     http.get({ host: '127.0.0.1', port, path: '/', headers: { host } }, (response) => {
@@ -198,7 +211,7 @@ async function main() {
     for (let index = 0; index < 60; index += 1) {
       const state = await lastAssistant(page);
       if (state) lengths.add(state.text.length);
-      if (state && state.foot) break;
+      if (state && !state.running && state.foot) break;
       await sleep(50);
     }
     const first = await waitDone(page, 1);
@@ -235,29 +248,49 @@ async function main() {
     check('a CLI run appears live', (await waitDone(page, 3)).text.includes('earlier messages: 4'));
     await terminal;
 
+    // The composer never waits (ADR 0035): a quick question is answered while
+    // a slow answer streams, and its run knows the slow one is in flight.
     await send(page, 'Please answer slowly');
-    await page.waitForSelector('#stop:not(.hidden)', { timeout: 10000 });
     await page.waitForFunction(() => {
       const nodes = document.querySelectorAll('.msg.assistant .body');
       return nodes[nodes.length - 1].innerText.length > 0;
     }, { timeout: 10000 });
-    await page.click('#stop');
+    await send(page, 'Quick question');
+    const quick = await waitDone(page, 5);
+    const slow = await answerTo(page, 'Please answer slowly');
+    check('a second message is answered while the first still runs', quick.text.includes('still working: yes') && slow.running, quick.text);
+    await page.screenshot({ path: path.join(shots, '2b-concurrent.png') });
+    await page.evaluate(() => {
+      const user = [...document.querySelectorAll('.msg.user')].find((node) => node.innerText === 'Please answer slowly');
+      user.nextElementSibling.querySelector('.foot .stop').click();
+    });
     await page.waitForFunction(() => {
-      const nodes = document.querySelectorAll('.msg.assistant');
-      return nodes[nodes.length - 1].classList.contains('failed');
+      const user = [...document.querySelectorAll('.msg.user')].find((node) => node.innerText === 'Please answer slowly');
+      return user.nextElementSibling.classList.contains('failed');
     }, { timeout: 20000 });
-    const stopped = await lastAssistant(page);
-    check('stop cancels the streaming answer', stopped.text.startsWith('Stopped'), stopped.text);
-    check('composer is ready again', await page.$eval('#send', (node) => !node.classList.contains('hidden')));
+    const stopped = await answerTo(page, 'Please answer slowly');
+    check('stop cancels that answer alone', stopped.text.startsWith('Stopped') && !(await answerTo(page, 'Quick question')).failed, stopped.text);
 
     await page.click('#new-thread');
     await page.waitForSelector('.divider', { timeout: 10000 });
     await send(page, 'Fresh start');
-    check('a new conversation has no history', (await waitDone(page, 5)).text.includes('earlier messages: 0'));
+    check('a new conversation has no history', (await waitDone(page, 6)).text.includes('earlier messages: 0'));
 
     await send(page, '<img src=x onerror=alert(1)> **x**');
-    await waitDone(page, 6);
+    await waitDone(page, 7);
     check('echoed markup stays text', (await page.$$eval('.messages img, .messages [onerror]', (nodes) => nodes.length)) === 0);
+
+    // An acknowledgment of an answer that asked nothing costs no model call.
+    const requestsBefore = modelRequests;
+    await send(page, 'ok thanks');
+    await page.waitForFunction(() => {
+      const users = document.querySelectorAll('.msg.user');
+      return users[users.length - 1].querySelector('.reaction');
+    }, { timeout: 10000 });
+    await sleep(300);
+    const answers = await page.$$eval('.msg.assistant:not(.said)', (nodes) => nodes.length);
+    check('an acknowledgment gets a reaction instead of an answer', answers === 7 && modelRequests === requestsBefore, `${answers} answers, ${modelRequests - requestsBefore} model requests`);
+    await page.screenshot({ path: path.join(shots, '2c-acknowledged.png') });
 
     await page.$$eval('#memory-list button.link', (buttons) => buttons[0].click());
     await page.$eval('#memory-text', (node) => { node.value = ''; });
@@ -268,7 +301,7 @@ async function main() {
       return text.includes('morning meetings') && !text.includes('afternoon meetings');
     }, { timeout: 10000 });
     await send(page, 'When should we meet now?');
-    check('a corrected memory replaces the old one', (await waitDone(page, 7)).text.includes('memory seen: morning'));
+    check('a corrected memory replaces the old one', (await waitDone(page, 8)).text.includes('memory seen: morning'));
 
     await send(page, 'Please recall my meetings');
     await page.waitForFunction(() => {
@@ -277,11 +310,11 @@ async function main() {
       return body.classList.contains('progress') && body.innerText === 'Searching memories…';
     }, { timeout: 10000 });
     check('a running memory search shows progress', true);
-    const recalled = await waitDone(page, 8);
+    const recalled = await waitDone(page, 9);
     check('the memory search result reaches the model', recalled.text.includes('recalled: I prefer morning meetings') && recalled.foot.includes('memory.search'), recalled.text);
 
     await send(page, 'Remember that I play tennis on Sundays');
-    const saved = await waitDone(page, 9);
+    const saved = await waitDone(page, 10);
     const notice = await page.evaluate(() => {
       const nodes = document.querySelectorAll('.msg.assistant');
       const notices = nodes[nodes.length - 1].querySelector('.notices');
@@ -307,8 +340,14 @@ async function main() {
       const body = nodes[nodes.length - 1];
       return body.classList.contains('progress') && body.innerText === 'Searching the web…';
     }, { timeout: 10000 });
-    const searched = await waitDone(page, 10);
+    const searched = await waitDone(page, 11);
     check('Ditto searches the web on its own', searched.text.includes('searched: Rust 2.0 (about rust 2.0)') && searched.foot.includes('web.search'), searched.text);
+    const said = await page.evaluate(() => {
+      const nodes = document.querySelectorAll('.msg.assistant');
+      const before = nodes[nodes.length - 1].previousElementSibling;
+      return before && before.classList.contains('said') ? before.innerText : '';
+    });
+    check('what Ditto says before a tool call stays as its own message', said === 'Looking that up.', said);
 
     const inView = () => page.evaluate(() => {
       const header = document.querySelector('.chat-header').getBoundingClientRect();

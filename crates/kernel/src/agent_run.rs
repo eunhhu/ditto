@@ -21,13 +21,20 @@ pub(crate) struct AgentRunMetadata {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<crate::turn::sort::SortGrant>,
+    /// The session's agent runs still active when this one was admitted, by
+    /// input event ID in order (ADR 0035).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_flight: Vec<String>,
+    /// Recorded as an acknowledgment, which starts no turn (ADR 0035).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub acknowledged: bool,
 }
 
-/// Runs and sorts active at once across sessions (ADR 0028 Phase D).
+/// Runs and sorts active at once, from any sessions (ADR 0035).
 pub(crate) const MAX_ACTIVE_RUNS: usize = 4;
 
-/// The active run or sort of each session: runs in one session stay in
-/// order, and different sessions run at once up to [`MAX_ACTIVE_RUNS`].
+/// The active runs and sorts, by input event ID. A session may run several
+/// at once; [`MAX_ACTIVE_RUNS`] bounds them all (ADR 0035).
 #[derive(Default)]
 pub(crate) struct RunSlot {
     pub(crate) active: std::collections::HashMap<String, ActiveRun>,
@@ -35,21 +42,35 @@ pub(crate) struct RunSlot {
 }
 
 impl RunSlot {
-    /// Whether work may start in `session` now.
-    pub(crate) fn can_start(&self, session: &str) -> bool {
-        !self.active.contains_key(session) && self.active.len() < MAX_ACTIVE_RUNS
+    /// Whether more work may start now.
+    pub(crate) fn can_start(&self) -> bool {
+        self.active.len() < MAX_ACTIVE_RUNS
     }
 
-    /// The session's active execution, if `input_event_id` started it.
+    /// The active execution that `input_event_id` started in `session`.
     pub(crate) fn active_for(&self, session: &str, input_event_id: &str) -> Option<&ActiveRun> {
         self.active
-            .get(session)
-            .filter(|active| active.input_event_id == input_event_id)
+            .get(input_event_id)
+            .filter(|active| active.session_id == session)
+    }
+
+    /// The input event IDs of the agent runs active in `session`, in order.
+    fn in_flight(&self, session: &str) -> Vec<String> {
+        let mut ids = self
+            .active
+            .iter()
+            .filter(|(_, active)| active.agent && active.session_id == session)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
     }
 }
 
 pub(crate) struct ActiveRun {
-    pub(crate) input_event_id: String,
+    pub(crate) session_id: String,
+    /// An agent run, which later runs of its session see as in flight.
+    pub(crate) agent: bool,
     pub(crate) cancellation: CancellationToken,
     pub(crate) finished: CancellationToken,
 }
@@ -60,9 +81,7 @@ pub enum AgentRunError {
     Invalid(&'static str),
     #[error("request identity is already used for different input")]
     Conflict,
-    #[error(
-        "another run is active in this session, or four sessions are running; no work was queued"
-    )]
+    #[error("four runs are active; no work was queued")]
     Busy,
     #[error(
         "future schedule limit (100) reached; cancel a pending request or active repeat before adding another"
@@ -230,14 +249,17 @@ impl DittoKernel {
         {
             return Err(AgentRunError::Conflict);
         }
-        self.start_agent_run_locked(command, driver, &mut slot)
+        self.start_agent_run_locked(command, driver, &mut slot, true)
     }
 
+    /// Admit a run. With `acknowledge`, a message that only acknowledges an
+    /// answer that asked nothing is recorded without a turn (ADR 0035).
     pub(crate) fn start_agent_run_locked(
         &self,
         command: StartAgentRunCommand,
         driver: Arc<dyn ModelDriver>,
         slot: &mut RunSlot,
+        acknowledge: bool,
     ) -> Result<AgentRunResponse, AgentRunError> {
         let query = AgentRunQuery {
             request_id: command.request_id,
@@ -280,7 +302,29 @@ impl DittoKernel {
         if slot.stopping {
             return Err(AgentRunError::Stopping);
         }
-        if !slot.can_start(&query.session_id) {
+        if acknowledge
+            && command.sort.is_none()
+            && is_acknowledgment(&text)
+            && !self.latest_answer_asks(&query.session_id)?
+        {
+            let admitted = self.admit_read_only_turn(
+                SubmitInputCommand {
+                    text,
+                    session_id: Some(query.session_id.clone()),
+                    task_id: Some(task_id),
+                },
+                Some(AgentRunMetadata {
+                    version: 1,
+                    request_id: query.request_id.clone(),
+                    sort: None,
+                    in_flight: Vec::new(),
+                    acknowledged: true,
+                }),
+            )?;
+            let input = admitted.input().clone();
+            return self.agent_status_from_boundary(query, input.clone(), input, slot);
+        }
+        if !slot.can_start() {
             return Err(AgentRunError::Busy);
         }
         let sort = command
@@ -313,15 +357,18 @@ impl DittoKernel {
                 version: if sort.is_some() { 2 } else { 1 },
                 request_id: query.request_id.clone(),
                 sort,
+                in_flight: slot.in_flight(&query.session_id),
+                acknowledged: false,
             }),
         )?;
         let input = admitted.input().clone();
         let cancellation = CancellationToken::new();
         let finished = CancellationToken::new();
         slot.active.insert(
-            query.session_id.clone(),
+            input.event_id.clone(),
             ActiveRun {
-                input_event_id: input.event_id.clone(),
+                session_id: query.session_id.clone(),
+                agent: true,
                 cancellation: cancellation.clone(),
                 finished: finished.clone(),
             },
@@ -330,7 +377,6 @@ impl DittoKernel {
         // panic releases the slot. Durable nonterminal state then reads interrupted.
         let guard = ActiveGuard {
             kernel: self.clone(),
-            session_id: query.session_id.clone(),
             input_event_id: input.event_id.clone(),
             finished,
         };
@@ -399,6 +445,41 @@ impl DittoKernel {
         self.agent_status_from_boundary(query, input, last, &slot)
     }
 
+    /// Signal the run that `run` reports, if it is still active.
+    pub(crate) fn cancel_active_run(
+        &self,
+        run: Option<&AgentRunResponse>,
+        slot: &RunSlot,
+    ) -> Result<(), AgentRunError> {
+        let Some(run) = run else { return Ok(()) };
+        let query = AgentRunQuery {
+            request_id: run.request_id.clone(),
+            session_id: run.session_id.clone(),
+        };
+        if let Some((input, _)) = self.run_boundary(&query, &run.task_id)?
+            && let Some(active) = slot.active_for(&query.session_id, &input.event_id)
+        {
+            active.cancellation.cancel();
+        }
+        Ok(())
+    }
+
+    /// Whether the thread's latest answer asks the user something in its
+    /// last line; a short reply then answers it (ADR 0035).
+    fn latest_answer_asks(&self, session: &str) -> Result<bool, AgentRunError> {
+        let through = self.latest_event_seq()?;
+        let latest = self.thread_exchanges(session, through.saturating_add(1), 1)?;
+        Ok(latest.first().is_some_and(|thread| {
+            thread
+                .exchange
+                .assistant
+                .trim_end()
+                .lines()
+                .last()
+                .is_some_and(|line| line.contains(['?', '？']))
+        }))
+    }
+
     /// Close admission and drain every owned execution, without a heartbeat.
     pub async fn shutdown_agent_runs(&self) -> Result<(), AgentRunError> {
         let finished = {
@@ -437,23 +518,33 @@ impl DittoKernel {
 
 pub(crate) struct ActiveGuard {
     pub(crate) kernel: DittoKernel,
-    pub(crate) session_id: String,
     pub(crate) input_event_id: String,
     pub(crate) finished: CancellationToken,
 }
 
 impl Drop for ActiveGuard {
     fn drop(&mut self) {
-        if let Ok(mut slot) = self.kernel.inner.agent_runs.lock()
-            && slot
-                .active_for(&self.session_id, &self.input_event_id)
-                .is_some()
-        {
-            slot.active.remove(&self.session_id);
+        if let Ok(mut slot) = self.kernel.inner.agent_runs.lock() {
+            slot.active.remove(&self.input_event_id);
         }
         self.finished.cancel();
         self.kernel.inner.scheduler_wake.notify_one();
     }
+}
+
+/// Messages that only acknowledge, compared without case, spaces, emoji
+/// variants or closing punctuation (ADR 0035). Agreement words such as "네"
+/// or "좋아" are left out: they usually answer an offer.
+const ACKNOWLEDGMENTS: &str = "ㅇㅋ ㅇㅋㅇㅋ 오케이 오키 알겠어 알겠어요 알겠습니다 알았어 알았어요 확인 고마워 고마워요 고맙습니다 감사 감사해요 감사합니다 ㄱㅅ ㄳ ㅇㅋㄱㅅ ㅇㅋ고마워 땡큐 굿 ok okay k kk gotit noted thanks thankyou thx ty okthanks cool great nice perfect 👍 👌 🙏 🙌 ❤ 😊 🙂";
+
+fn is_acknowledgment(text: &str) -> bool {
+    let folded = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '\u{fe0f}' | '\u{1f3fb}'..='\u{1f3ff}'))
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let folded = folded.trim_end_matches(['.', '!', '~', '^']);
+    ACKNOWLEDGMENTS.split(' ').any(|word| word == folded)
 }
 
 fn ranked(nodes: &[ditto_context::ContextNode]) -> Vec<ditto_context::ContextCandidate> {
@@ -499,6 +590,9 @@ pub(crate) fn validate_agent_input(
     .map_err(|_| AgentRunError::Storage)?;
     if metadata.version != if metadata.sort.is_some() { 2 } else { 1 }
         || metadata.request_id != query.request_id
+        || metadata.in_flight.len() >= MAX_ACTIVE_RUNS
+        || !metadata.in_flight.is_sorted_by(|a, b| a < b)
+        || (metadata.acknowledged && (metadata.sort.is_some() || !metadata.in_flight.is_empty()))
         || input.actor != EventActor::User
         || input.kind != event_kind::INPUT_RECEIVED
         || input.session_id.as_deref() != Some(&query.session_id)
@@ -525,6 +619,7 @@ impl DittoKernel {
         slot: &RunSlot,
     ) -> Result<AgentRunResponse, AgentRunError> {
         let active = slot.active_for(&query.session_id, &input.event_id);
+        let acknowledged = input.payload["agent_run"]["acknowledged"] == true;
         let sort = self.agent_sort_progress(&input, active.is_some())?;
         let turn_id = input.correlation_id.ok_or(AgentRunError::Storage)?;
         let task_id = input.task_id.ok_or(AgentRunError::Storage)?;
@@ -539,7 +634,9 @@ impl DittoKernel {
             session_id: query.session_id,
             task_id,
             turn_id,
-            status: if active.is_some() {
+            status: if acknowledged {
+                AgentRunStatus::Acknowledged
+            } else if active.is_some() {
                 AgentRunStatus::Running
             } else {
                 AgentRunStatus::Interrupted
@@ -587,5 +684,45 @@ impl DittoKernel {
             _ => {}
         }
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_acknowledgment;
+
+    #[test]
+    fn acknowledgments_are_a_closed_list() {
+        for text in [
+            "ㅇㅋ",
+            "ㅇㅋ!",
+            "OK.",
+            " okay ",
+            "Thank you!",
+            "thanks~",
+            "고마워",
+            "고맙습니다.",
+            "got it",
+            "👍",
+            "👍🏻",
+            "❤️",
+            "ㄱㅅ",
+        ] {
+            assert!(is_acknowledgment(text), "{text}");
+        }
+        // Agreement words answer an offer, and anything more is a message.
+        for text in [
+            "네",
+            "좋아",
+            "yes",
+            "ok?",
+            "ok, and the docs too",
+            "thanks, what about Friday",
+            "ㅇㅋ 근데 하나만 더",
+            "👍👍",
+            "",
+        ] {
+            assert!(!is_acknowledgment(text), "{text}");
+        }
     }
 }

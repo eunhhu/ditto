@@ -6,7 +6,9 @@ to 96.4 %), Phase B (Task 026: input to provider request 5–10 ms to 1 ms) and
 Phase C (Task 027, turn payload version 7: 1,006 events per 1,000-delta turn
 to 9), Phase D (Task 028: three sessions at once, from one) and, in part,
 Phase E (Task 029: `memory.search` and tool progress). The ADR lists what each
-deferred or replaced.
+deferred or replaced. [ADR 0035](../adr/0035-chat-as-a-bridge.md) later
+replaced Phase D's one run per session with four runs at once from any
+sessions.
 
 The goal is a harness that does as little as possible per turn, streams without
 delay, serves several conversations at once, and gives the model exactly the

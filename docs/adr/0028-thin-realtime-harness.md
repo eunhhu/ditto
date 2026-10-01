@@ -3,7 +3,9 @@
 Status: proposed on 2026-09-30 and decided per phase as each lands. Phase A
 was accepted with Task 025 (turn payload version 6), Phase B with Task 026,
 Phase C with Task 027 (turn payload version 7), Phase D with Task 028 and
-Phase E, in part, with Task 029 (turn payload version 8).
+Phase E, in part, with Task 029 (turn payload version 8). Phase D's one run
+per session was replaced by [ADR 0035](0035-chat-as-a-bridge.md): four runs
+at once from any sessions.
 The full design is in
 [docs/design/realtime-harness.md](../design/realtime-harness.md).
 

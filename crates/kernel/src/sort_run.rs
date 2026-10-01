@@ -76,7 +76,7 @@ impl DittoKernel {
         if slot.stopping {
             return Err(AgentRunError::Stopping);
         }
-        if !slot.can_start(&query.session_id) {
+        if !slot.can_start() {
             return Err(AgentRunError::Busy);
         }
         // Page only the selected implementation contract; malformed installation
@@ -120,16 +120,16 @@ impl DittoKernel {
         let cancellation = CancellationToken::new();
         let finished = CancellationToken::new();
         slot.active.insert(
-            query.session_id.clone(),
+            input.event_id.clone(),
             ActiveRun {
-                input_event_id: input.event_id.clone(),
+                session_id: query.session_id.clone(),
+                agent: false,
                 cancellation: cancellation.clone(),
                 finished: finished.clone(),
             },
         );
         let guard = ActiveGuard {
             kernel: self.clone(),
-            session_id: query.session_id.clone(),
             input_event_id: input.event_id.clone(),
             finished,
         };
