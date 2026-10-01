@@ -17,22 +17,11 @@ and checks establish a new fact.
 
 ## Repository state
 
-- Base: main `58b2b02` (Task 016, PR #21). Branch
-  `dev/task-016-1-personal-recall` holds the preserved
-  [Task 017](tasks/017-evaluation-outcomes.md) draft, raw-report and handoff
-  trimming, the turn-loop split and Task 016.1; `dev/task-018-conversation-threads`
-  stacks Task 018 on it, and `dev/task-019-openai-compatible`,
-  `dev/task-020-web-app`, `dev/task-021-telegram`,
-  `dev/task-022-assistant-instructions` and `dev/task-023-web-fetch` stack
-  Tasks 019–023; `dev/design-realtime-harness`,
-  `dev/task-025-cache-stable-layout`, `dev/task-026-thin-turn-start`,
-  `dev/task-027-one-journal-plane`, `dev/task-028-session-parallel` and
-  `dev/task-029-memory-search` stack the harness design and Tasks 025–029,
-  and `dev/task-030-selection-by-reference`, `dev/task-024-model-memory` and
-  `dev/task-031-forget-memory` stack Tasks 030, 024 and 031, and
-  `dev/task-032-web-search`, `dev/task-033-thin-contract`,
-  `dev/task-034-bridge` and `dev/task-035-one-tool-lifecycle` stack Tasks
-  032–035. Nothing is pushed.
+- On 2026-10-01 the user asked for everything to be merged and pushed. main
+  now holds Tasks 016.1 through 035 as one linear commit per slice on top of
+  `58b2b02` (Task 016, PR #21), fast-forwarded from the stacked `dev/task-*`
+  branches, which are deleted locally, and is pushed to `origin`. The
+  [Task 017](tasks/017-evaluation-outcomes.md) draft is part of it.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
