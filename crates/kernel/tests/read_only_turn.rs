@@ -50,6 +50,8 @@ mod sessions;
 mod stream;
 #[path = "read_only_turn/web_fetch.rs"]
 mod web_fetch;
+#[path = "read_only_turn/web_search.rs"]
+mod web_search;
 
 #[derive(Clone)]
 struct ScriptedDriver {
@@ -336,9 +338,24 @@ impl Fixture {
         capabilities: std::path::PathBuf,
         web_fetch: Option<ditto_web_fetch::FetchPolicy>,
     ) -> Self {
+        Self::configured(capabilities, |config| config.web_fetch = web_fetch)
+    }
+
+    /// The bundled packages with a search service at `endpoint` (ADR 0033).
+    fn with_web_search(endpoint: &str) -> Self {
+        let capabilities =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities");
+        let endpoint = ditto_kernel::SearchEndpoint::new(endpoint).expect("search endpoint");
+        Self::configured(capabilities, |config| config.web_search = Some(endpoint))
+    }
+
+    fn configured(
+        capabilities: std::path::PathBuf,
+        configure: impl FnOnce(&mut KernelConfig),
+    ) -> Self {
         let directory = tempfile::tempdir().expect("temporary directory");
         let mut config = KernelConfig::new(directory.path().join("data"), capabilities);
-        config.web_fetch = web_fetch;
+        configure(&mut config);
         let kernel = DittoKernel::open(config.clone()).expect("open kernel");
         Self {
             _directory: directory,
@@ -463,9 +480,17 @@ const PRE_MANAGED_MEMORY_SEGMENTS: [&str; 2] = [
     "You cannot save or change memories, set reminders, browse the web or act outside this conversation except through the tools supplied in this request, and you never claim an action you did not take. The user saves a memory by sending /remember followed by the fact, and creates reminders in Ditto's schedules.",
 ];
 
+/// The same request without the autonomy segment version 11 added.
+fn before_autonomy(request: &ModelRequest) -> ModelRequest {
+    let mut request = request.clone();
+    let removed = request.stable_system_prefix.segments.remove(3);
+    assert!(removed.starts_with("Work on your own"), "{removed}");
+    request
+}
+
 /// The same request with the memory instructions versions 4 to 9 sent.
 fn before_managed_memory(request: &ModelRequest) -> ModelRequest {
-    let mut request = request.clone();
+    let mut request = before_autonomy(request);
     request
         .stable_system_prefix
         .segments
@@ -621,8 +646,8 @@ async fn successful_two_request_continuation_persists_exact_epoch_schema_history
     let fixture = Fixture::new();
     let loaded = fixture.kernel.capability_load_metrics();
     // artifact.read, artifact.sort, device.process.run, the three memory
-    // tools and web.fetch.
-    assert_eq!(loaded.headers_read, 7);
+    // tools, web.fetch and web.search.
+    assert_eq!(loaded.headers_read, 8);
     assert_eq!(loaded.legacy_manifests_read, 0);
     assert_eq!(loaded.manifests_paged, 0);
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));

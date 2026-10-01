@@ -32,7 +32,8 @@ function event(delta, finish = null) {
 // The mock streams a markdown reply describing what it received, so the page
 // shows which memory and how much history reached the model. Asked to recall,
 // it first calls memory.search and then answers with what the search found;
-// told to remember, it calls memory.remember.
+// told to remember, it calls memory.remember; asked to search the web, it
+// calls web.search.
 function mockModel() {
   const server = http.createServer((request, response) => {
     let raw = '';
@@ -55,6 +56,13 @@ function mockModel() {
         response.end('data: [DONE]\n\n');
         return;
       }
+      if (question.includes('Search the web') && !result) {
+        const call = { index: 0, id: 'call-search', type: 'function', function: { name: 'web_search', arguments: '{"query":"rust 2.0"}' } };
+        response.write(event({ tool_calls: [call] }));
+        response.write(event({}, 'tool_calls'));
+        response.end('data: [DONE]\n\n');
+        return;
+      }
       if (question.includes('Remember that') && !result) {
         const call = { index: 0, id: 'call-remember', type: 'function', function: { name: 'memory_remember', arguments: '{"text":"The user plays tennis on Sundays."}' } };
         response.write(event({ tool_calls: [call] }));
@@ -66,6 +74,8 @@ function mockModel() {
       if (result) await sleep(800);
       const reply = result && result.remembered
         ? `saved as ${result.remembered}`
+        : result && result.results
+        ? `searched: ${result.results.map((hit) => `${hit.title} (${hit.snippet})`).join('; ')}`
         : result
         ? `recalled: ${result.memories.map((found) => found.text).join('; ')}`
         : `You asked: *${question}*\n\n- memory seen: **${memory}**\n- earlier messages: \`${prior}\`\n\n\`\`\`\nstreamed by a mock model\n\`\`\``;
@@ -78,6 +88,16 @@ function mockModel() {
       response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
       response.end('data: [DONE]\n\n');
     });
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
+}
+
+// A SearXNG-shaped search service: one result that names the query.
+function mockSearch() {
+  const server = http.createServer((request, response) => {
+    const query = new URL(request.url, 'http://search.invalid').searchParams.get('q') || '';
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ results: [{ url: 'https://example.org/rust', title: 'Rust 2.0', content: `about ${query}` }] }));
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));
 }
@@ -131,11 +151,13 @@ async function main() {
   fs.mkdirSync(shots, { recursive: true });
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'ditto-web-e2e-'));
   const model = await mockModel();
+  const searchService = await mockSearch();
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const daemon = spawn(daemonBin, [
     '--provider', 'openai-compatible', '--base-url', `http://127.0.0.1:${model.address().port}/v1`, '--model', 'mock',
     '--data-dir', path.join(data, 'data'), '--capabilities-dir', path.join(root, 'capabilities'), '--bind', `127.0.0.1:${port}`,
+    '--search-url', `http://127.0.0.1:${searchService.address().port}`,
   ], { stdio: 'ignore' });
   // An interrupted check still stops the daemon and removes its data.
   const abandon = () => {
@@ -279,6 +301,15 @@ async function main() {
     await page.waitForFunction(() => !document.querySelector('#memory-list').innerText.includes('tennis on Sundays'), { timeout: 10000 });
     check('a memory is forgotten from the list after a second click', armed);
 
+    await send(page, 'Search the web for Rust news');
+    await page.waitForFunction(() => {
+      const nodes = document.querySelectorAll('.msg.assistant .body');
+      const body = nodes[nodes.length - 1];
+      return body.classList.contains('progress') && body.innerText === 'Searching the web…';
+    }, { timeout: 10000 });
+    const searched = await waitDone(page, 10);
+    check('Ditto searches the web on its own', searched.text.includes('searched: Rust 2.0 (about rust 2.0)') && searched.foot.includes('web.search'), searched.text);
+
     const inView = () => page.evaluate(() => {
       const header = document.querySelector('.chat-header').getBoundingClientRect();
       const composer = document.querySelector('#composer').getBoundingClientRect();
@@ -322,6 +353,7 @@ async function main() {
     await browser.close();
     daemon.kill('SIGTERM');
     model.close();
+    searchService.close();
     await new Promise((resolve) => daemon.once('exit', resolve));
     fs.rmSync(data, { recursive: true, force: true });
   }

@@ -125,6 +125,9 @@ pub mod event_kind {
     pub const AGENT_FETCH_REQUESTED: &str = "agent.fetch.requested";
     pub const AGENT_FETCH_STARTED: &str = "agent.fetch.started";
     pub const AGENT_FETCH_OUTPUT: &str = "agent.fetch.output";
+    pub const AGENT_SEARCH_REQUESTED: &str = "agent.search.requested";
+    pub const AGENT_SEARCH_STARTED: &str = "agent.search.started";
+    pub const AGENT_SEARCH_OUTPUT: &str = "agent.search.output";
     pub const AGENT_MEMORY_REQUESTED: &str = "agent.memory.requested";
     pub const AGENT_MEMORY_OUTPUT: &str = "agent.memory.output";
     pub const AGENT_MEMORY_WRITE_REQUESTED: &str = "agent.memory_write.requested";

@@ -14,6 +14,8 @@ use ditto_protocol::{
     EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
 };
 use ditto_retrieval::EmbeddingProvider;
+/// The search service `web.search` uses (ADR 0033).
+pub use ditto_web_fetch::search::SearchEndpoint;
 use serde_json::json;
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -59,6 +61,9 @@ pub struct KernelConfig {
     /// Reach of `web.fetch` for links in the user's message; `None` never
     /// offers the tool (ADR 0027).
     pub web_fetch: Option<ditto_web_fetch::FetchPolicy>,
+    /// The search service `web.search` uses; `None` never offers the tool
+    /// (ADR 0033).
+    pub web_search: Option<ditto_web_fetch::search::SearchEndpoint>,
 }
 
 impl KernelConfig {
@@ -69,6 +74,7 @@ impl KernelConfig {
             event_buffer: 1_024,
             artifact_max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             web_fetch: Some(ditto_web_fetch::FetchPolicy::public_only()),
+            web_search: None,
         }
     }
 }
@@ -139,6 +145,7 @@ struct KernelInner {
     scheduler_wake: tokio::sync::Notify,
     scheduler_state: std::sync::atomic::AtomicU8,
     web_fetch: Option<ditto_web_fetch::FetchPolicy>,
+    web_search: Option<ditto_web_fetch::search::SearchEndpoint>,
     tool_contracts: turn::ToolContracts,
     thread_reuse: Mutex<turn::ThreadReuse>,
 }
@@ -202,6 +209,7 @@ impl DittoKernel {
                 scheduler_wake: tokio::sync::Notify::new(),
                 scheduler_state: std::sync::atomic::AtomicU8::new(0),
                 web_fetch: config.web_fetch,
+                web_search: config.web_search,
                 tool_contracts: Default::default(),
                 thread_reuse: Default::default(),
             }),

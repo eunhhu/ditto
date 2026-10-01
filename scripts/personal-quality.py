@@ -26,7 +26,7 @@ spec = importlib.util.spec_from_file_location("baseline", Path(__file__).with_na
 baseline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(baseline)
 REPO = baseline.REPO
-TURN_PAYLOAD_VERSION = 10
+TURN_PAYLOAD_VERSION = 11
 CAPSULE_ITEM_OVERHEAD_TOKENS = 16
 # Frozen independently of runtime capsules and fixture answers (Tasks 016, 016.1).
 CORPUS = {

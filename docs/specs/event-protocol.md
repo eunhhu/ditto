@@ -573,6 +573,21 @@ node that supersedes the forgotten one. From version 10 `memory.search` also
 reads inferred memories and marks each `inferred: true`. Replay recomputes
 every decision and checks a written result against both session records.
 
+Version 11 ([ADR 0033](../adr/0033-autonomous-web-search.md)) adds a system
+segment after the memory segments: work on your own, and hand off only what
+needs the user by saying it in the answer and stopping. It offers
+`web.search` (`query`) to agent runs while a search service is configured. A
+call journals `agent.search.requested` (model, version 1: `arguments` and the
+normalized `{ query }` or `null`), when claimed `agent.search.started`
+(capability, version 1: claim evidence, `normalized` and `request_url`, which
+must be exactly what the query becomes at some endpoint), and
+`agent.search.output` (capability, version 1: `claimed` and `result`, `found`
+with at most five `{ title, url, snippet }` or `error` with `code`:
+`invalid_arguments`, `credential`, `lease_exhausted`, `lease_expired`,
+`cancelled`, `deadline`, `connection`, `timeout`, `http_status` with
+`status`, or `invalid_response`). A turn may claim three searches. A
+`web.search` call, like a fetch, refuses later memory writes in the turn.
+
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished
 agent-run turns recorded after the latest reset. It deletes nothing and does

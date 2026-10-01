@@ -1,0 +1,48 @@
+{
+  "header_version": 1,
+  "manifest_sha256": "fe046ae17e6ec01265c788e7f1d5b7615804590ace02d87c2852cbb3ece73637",
+  "id": "web.search",
+  "version": "0.1.0",
+  "namespace": "web",
+  "kind": "tool",
+  "lifecycle": "active",
+  "summary": "Search the web for current or outside information; returns the titles, links and snippets of the top results.",
+  "placement": {
+    "modes": [
+      "local"
+    ],
+    "requires": []
+  },
+  "retrieval": {
+    "intents": [
+      "search the web",
+      "look up current information online"
+    ],
+    "negative_examples": [
+      "read a page the user linked",
+      "search memories"
+    ],
+    "complements": [
+      "web.fetch"
+    ],
+    "aliases": [
+      "web search",
+      "look it up"
+    ]
+  },
+  "effects": {
+    "minimum": {
+      "access": "content",
+      "mutation": "none",
+      "externality": "network",
+      "privilege": "user"
+    },
+    "maximum": {
+      "access": "content",
+      "mutation": "none",
+      "externality": "network",
+      "privilege": "user"
+    }
+  },
+  "candidate_bytes": 265
+}

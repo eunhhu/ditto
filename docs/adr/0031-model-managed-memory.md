@@ -4,7 +4,9 @@ Status: accepted on 2026-10-01 for Task 024. Turn payload version 10. Amends
 [ADR 0015](0015-explicit-user-memory.md) (memory writes only through the
 trusted user ingress), [ADR 0026](0026-assistant-instructions-and-local-time.md)
 (the second and third instruction segments) and
-[ADR 0029](0029-memory-search-tool.md) (the search space).
+[ADR 0029](0029-memory-search-tool.md) (the search space). Amended by
+[ADR 0033](0033-autonomous-web-search.md): a `web.search` call also refuses
+later memory writes in the turn.
 
 ## Context
 
