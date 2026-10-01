@@ -64,6 +64,8 @@ The executable foundation includes:
 - reading links: when a message contains http(s) URLs, the model may fetch
   those pages (and only those) as bounded text, with public addresses only and
   every fetch journaled;
+- web search on its own through a configured SearXNG-compatible service, at
+  most three queries per answer, results journaled and replayable;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - model-directed sorting of one explicitly attached file, with separate permission
@@ -215,6 +217,25 @@ reach public addresses only (never this machine or the local network), follow
 at most five redirects and return at most 24,000 characters of text; pages
 that need JavaScript or a login yield little. Start the daemon with
 `--disable-web-fetch` to turn this off.
+
+Ditto searches the web on its own when current or outside information would
+help, without asking first. Point the daemon at a SearXNG-compatible search
+service you trust, for example a local one:
+
+```bash
+docker run -d -p 8888:8080 searxng/searxng   # enable the JSON format in its settings
+cargo run -p ditto-daemon -- --provider openai-compatible ... --search-url http://127.0.0.1:8888
+```
+
+Queries go only to that service, at most three per answer, and never one
+that looks like a password or key. Results come back as titles, links and
+snippets, treated as untrusted content; Ditto does not save memories from
+them in the same answer. Without `--search-url` there is no web search.
+
+Ditto works on its own in general: it uses its tools without asking, and
+when something truly needs you (a decision, information only you have, or
+consent to something irreversible) it says exactly what in its answer and
+stops; your next message continues.
 
 Runs default to the `personal` session. Current session memory is compiled
 into context: while the whole set fits the context budget (about a dozen short

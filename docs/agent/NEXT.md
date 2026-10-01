@@ -23,6 +23,13 @@ The user then chose memory management first:
 3. [031](tasks/031-forget-memory.md) Forgetting a memory directly from the
    web memory list, the CLI or Telegram - complete (ADR 0032).
 
+The user then asked for consent to be a hand-off and for Ditto to work on its
+own ("알아서 잘 딱"):
+
+4. [032](tasks/032-web-search.md) Web search on its own through a configured
+   SearXNG-compatible service, turn payload version 11 - complete (ADR 0033;
+   no per-query approval, consent handed off in the answer).
+
 The next slice waits for the user's choice among the open items below.
 
 The thin-harness phases of ADR 0028 (Tasks 025–029) are complete except the
@@ -31,7 +38,8 @@ and the journal target of three bytes per answer byte.
 
 Still open from the earlier frontier:
 
-- Web search waits for per-call approval.
+- Reading the pages a search returned (today only links the user sends are
+  fetched).
 - The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
   the measurement gate before any claim of parity with other assistants.
 
@@ -39,6 +47,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [032](tasks/032-web-search.md) Web search on its own, turn payload
+  version 11 (ADR 0033).
 - [031](tasks/031-forget-memory.md) Forgetting a memory from the web app,
   CLI or Telegram (ADR 0032).
 - [024](tasks/024-model-managed-memory.md) Memory that Ditto manages, turn

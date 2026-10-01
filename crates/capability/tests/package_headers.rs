@@ -283,6 +283,7 @@ fn bundled_headers_match_the_generator() {
         "memory-search",
         "memory-remember",
         "memory-forget",
+        "web-search",
     ] {
         let path = root.join(name);
         let expected =

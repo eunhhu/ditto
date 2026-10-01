@@ -58,6 +58,10 @@ struct Args {
     /// Never offer `web.fetch`, even for links in a message.
     #[arg(long, env = "DITTO_DISABLE_WEB_FETCH")]
     disable_web_fetch: bool,
+    /// A SearXNG-compatible search service, such as http://127.0.0.1:8888;
+    /// with it Ditto searches the web on its own (ADR 0033).
+    #[arg(long, env = "DITTO_SEARCH_URL")]
+    search_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -108,6 +112,12 @@ async fn serve() -> anyhow::Result<()> {
     if args.disable_web_fetch {
         config.web_fetch = None;
     }
+    config.web_search = args
+        .search_url
+        .as_deref()
+        .map(ditto_kernel::SearchEndpoint::new)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("--search-url: {error}"))?;
     let kernel = DittoKernel::open(config).context("failed to initialize Ditto kernel")?;
     kernel
         .record_runtime_started(&args.bind.to_string())

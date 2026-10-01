@@ -35,7 +35,11 @@ use super::recall::ReplayedRecallCall;
 
 #[path = "memory_write_replay.rs"]
 mod memory_write_replay;
+
+#[path = "search_replay.rs"]
+mod search_replay;
 use super::memory_write::{FORGET_ID, REMEMBER_ID, ReplayedMemoryWrite};
+use super::search::ReplayedSearchCall;
 
 use super::run::turn_signature;
 use super::shared::{
@@ -232,6 +236,10 @@ struct ReplayProjector<'turn, 'snapshot> {
     read_external_content: bool,
     memory_write_count: u32,
     memory_writes: Vec<ReplayedMemoryWrite>,
+    /// Version 11: whether the selection paged `web.search`, and its calls.
+    search_selected: bool,
+    search_claims: u32,
+    search_calls: Vec<ReplayedSearchCall>,
     events: &'turn [EventRecord],
     snapshot: &'snapshot [EventRecord],
     index: usize,
@@ -374,6 +382,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             read_external_content: false,
             memory_write_count: 0,
             memory_writes: Vec::new(),
+            search_selected: false,
+            search_claims: 0,
+            search_calls: Vec::new(),
             events,
             snapshot,
             index: 1,
@@ -545,6 +556,29 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             expected_cards.push(CapabilityCard::from(manifest));
             self.fetch_selected = true;
         }
+        if let Some(manifest) = &selected.search_manifest {
+            // Version 11 offers web.search while a search endpoint is set.
+            if self.version.is_none_or(|version| version < 11)
+                || !self.agent_run
+                || !ditto_web_fetch::search::validate_manifest(manifest)
+            {
+                return Err(replay_invalid(
+                    "selected search contradicts the turn version",
+                ));
+            }
+            let schema = ditto_web_fetch::search::schema();
+            expected_revisions.push(
+                CapabilityRevision::from_contract(
+                    manifest,
+                    &schema,
+                    ditto_web_fetch::search::deriver_revision(),
+                )
+                .map_err(|error| replay_invalid(error.to_string()))?,
+            );
+            expected_schemas.push(schema);
+            expected_cards.push(CapabilityCard::from(manifest));
+            self.search_selected = true;
+        }
         if let Some(manifest) = &selected.memory_manifest {
             // Version 8 offers memory.search to every agent run.
             if self.version.is_none_or(|version| version < 8)
@@ -611,6 +645,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         if (!selected.epoch.invocation_revisions().is_empty()
             || self.sort.is_some()
             || self.fetch_selected
+            || self.search_selected
             || self.memory_selected
             || self.remember_selected
             || self.forget_selected)
@@ -813,6 +848,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         if capability_id != ARTIFACT_READ_ID
                             && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
                             && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
+                            && !(self.search_selected
+                                && capability_id == ditto_web_fetch::search::ID)
                             && !(self.memory_selected && capability_id == super::recall::ID)
                             && !(self.remember_selected && capability_id == REMEMBER_ID)
                             && !(self.forget_selected && capability_id == FORGET_ID)
@@ -866,6 +903,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         if capability_id != ARTIFACT_READ_ID
                             && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
                             && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
+                            && !(self.search_selected
+                                && capability_id == ditto_web_fetch::search::ID)
                             && !(self.memory_selected && capability_id == super::recall::ID)
                             && !(self.remember_selected && capability_id == REMEMBER_ID)
                             && !(self.forget_selected && capability_id == FORGET_ID)
@@ -1042,10 +1081,20 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     }
 
                     if call.capability_id == ditto_web_fetch::ID
+                        || call.capability_id == ditto_web_fetch::search::ID
                         || call.capability_id == ditto_artifact_sort::ID
                         || call.capability_id == ARTIFACT_READ_ID
                     {
                         self.read_external_content = true;
+                    }
+                    if call.capability_id == ditto_web_fetch::search::ID {
+                        if let Some(failure) =
+                            self.replay_search_call(request_index as u8, &call)?
+                        {
+                            return Ok(ArtifactReadTurnReplay::Failed { failure });
+                        }
+                        request_index += 1;
+                        continue;
                     }
                     if call.capability_id == ditto_web_fetch::ID {
                         if let Some(failure) = self.replay_fetch_call(request_index as u8, &call)? {
@@ -1499,6 +1548,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             fetch_calls: self.fetch_calls,
             recall_calls: self.recall_calls,
             memory_writes: self.memory_writes,
+            search_calls: self.search_calls,
             terminal,
 
             sequence_span: TurnSequenceSpan {
@@ -2091,6 +2141,7 @@ fn rebuild_selection(
             ARTIFACT_READ_ID => Ok(ditto_artifact_read::manifest()),
             ditto_artifact_sort::ID => Ok(ditto_artifact_sort::manifest()),
             ditto_web_fetch::ID => Ok(ditto_web_fetch::manifest()),
+            ditto_web_fetch::search::ID => Ok(ditto_web_fetch::search::manifest()),
             super::recall::ID => Ok(super::recall::manifest()),
             REMEMBER_ID => Ok(super::memory_write::remember_manifest()),
             FORGET_ID => Ok(super::memory_write::forget_manifest()),
@@ -2121,6 +2172,7 @@ fn rebuild_selection(
             .ok_or_else(|| replay_invalid("artifact.read was not selected"))?,
         sort_manifest: take(ditto_artifact_sort::ID),
         fetch_manifest: take(ditto_web_fetch::ID),
+        search_manifest: take(ditto_web_fetch::search::ID),
         memory_manifest: take(super::recall::ID),
         remember_manifest: take(REMEMBER_ID),
         forget_manifest: take(FORGET_ID),

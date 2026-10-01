@@ -1,0 +1,39 @@
+id = "web.search"
+version = "0.1.0"
+namespace = "web"
+kind = "tool"
+summary = "Search the web for current or outside information; returns the titles, links and snippets of the top results."
+
+[runtime]
+type = "builtin"
+lazy = true
+idle_ttl_ms = 0
+
+[placement]
+modes = ["local"]
+requires = []
+
+[retrieval]
+intents = ["search the web", "look up current information online"]
+negative_examples = ["read a page the user linked", "search memories"]
+aliases = ["web search", "look it up"]
+complements = ["web.fetch"]
+
+[effects]
+resources = ["url:{url}"]
+
+[effects.minimum]
+access = "content"
+mutation = "none"
+externality = "network"
+privilege = "user"
+
+[effects.maximum]
+access = "content"
+mutation = "none"
+externality = "network"
+privilege = "user"
+
+[policy]
+approval = "never"
+secret_handles = []

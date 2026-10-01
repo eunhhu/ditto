@@ -37,7 +37,7 @@ const STRINGS = {
     capability_unavailable: 'a tool is unavailable', capability_contract: 'a tool call was invalid', invalid_input: 'invalid request',
     'memory.search': 'Searching memories…', 'web.fetch': 'Reading the linked page…',
     'artifact.read': 'Reading the attachment…', 'artifact.sort': 'Sorting the attachment…',
-    'memory.remember': 'Saving to memory…', 'memory.forget': 'Forgetting a memory…',
+    'memory.remember': 'Saving to memory…', 'memory.forget': 'Forgetting a memory…', 'web.search': 'Searching the web…',
     remembered: 'Remembered', updatedMemory: 'Updated a memory', forgotMemory: 'Forgot a memory',
     byDitto: 'by Ditto', byDittoHint: 'Ditto inferred this from your conversation',
   },
@@ -71,7 +71,7 @@ const STRINGS = {
     capability_unavailable: '도구를 사용할 수 없음', capability_contract: '잘못된 도구 호출', invalid_input: '잘못된 요청',
     'memory.search': '기억을 찾는 중…', 'web.fetch': '링크한 페이지를 읽는 중…',
     'artifact.read': '첨부를 읽는 중…', 'artifact.sort': '첨부를 정렬하는 중…',
-    'memory.remember': '기억하는 중…', 'memory.forget': '기억을 지우는 중…',
+    'memory.remember': '기억하는 중…', 'memory.forget': '기억을 지우는 중…', 'web.search': '웹을 검색하는 중…',
     remembered: '기억함', updatedMemory: '기억을 고침', forgotMemory: '기억을 지움',
     byDitto: 'Ditto', byDittoHint: '대화에서 Ditto가 추론한 기억',
   },
@@ -625,7 +625,7 @@ async function inspect(taskId) {
     section(t('excluded'), [...excluded].map(([reason, count]) => [`${t(reason)}: ${count}`]));
     section(t('history'), (context.payload.history_turn_ids || []).map((turn) => [userTextByTurn.get(turn) || t('earlier')]));
   }
-  const toolKinds = { 'capability.requested': null, 'agent.fetch.requested': 'web.fetch', 'agent.sort.requested': 'artifact.sort', 'agent.memory.requested': 'memory.search', 'agent.memory_write.requested': null };
+  const toolKinds = { 'capability.requested': null, 'agent.fetch.requested': 'web.fetch', 'agent.sort.requested': 'artifact.sort', 'agent.memory.requested': 'memory.search', 'agent.memory_write.requested': null, 'agent.search.requested': 'web.search' };
   const tools = events
     .filter((event) => event.kind in toolKinds)
     .map((event) => [toolKinds[event.kind] || event.payload.capability_id, JSON.stringify(event.payload.arguments)]);

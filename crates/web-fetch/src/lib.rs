@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 mod address;
 mod html;
+pub mod search;
 
 pub use address::is_public;
 pub use html::extract as extract_html;
@@ -353,16 +354,25 @@ pub async fn fetch(
     }
 }
 
-async fn follow(requested: String, policy: FetchPolicy) -> Result<FetchedPage, FetchError> {
-    let mut current = Url::parse(&requested).map_err(|_| FetchError::InvalidUrl)?;
+/// A successful response: where it came from after redirects, its status,
+/// media type, and body up to [`MAX_BODY_BYTES`].
+struct Response {
+    final_url: Url,
+    status: u16,
+    media: String,
+    body: Vec<u8>,
+    over: bool,
+}
+
+/// GET `requested`, following redirects by hand: every hop is re-checked
+/// against `policy` and connects only to the addresses it checked.
+async fn get(requested: &str, policy: FetchPolicy, accept: &str) -> Result<Response, FetchError> {
+    let mut current = Url::parse(requested).map_err(|_| FetchError::InvalidUrl)?;
     for _ in 0..=MAX_REDIRECTS {
         let client = client_for(&current, policy).await?;
         let response = client
             .get(current.clone())
-            .header(
-                header::ACCEPT,
-                "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.8,*/*;q=0.1",
-            )
+            .header(header::ACCEPT, accept)
             .send()
             .await
             .map_err(|error| {
@@ -390,55 +400,88 @@ async fn follow(requested: String, policy: FetchPolicy) -> Result<FetchedPage, F
                 status: status.as_u16(),
             });
         }
-        let content_type = response
+        let media = response
             .headers()
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
-            .to_ascii_lowercase();
-        let (body, over) = read_bounded(response).await?;
-        let body = String::from_utf8_lossy(&body);
-        let media = content_type
+            .to_ascii_lowercase()
             .split(';')
             .next()
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let html = match media.as_str() {
-            "text/html" | "application/xhtml+xml" => true,
-            "" => body.trim_start().starts_with('<'),
-            media
-                if media.starts_with("text/")
-                    || matches!(
-                        media,
-                        "application/json"
-                            | "application/xml"
-                            | "application/rss+xml"
-                            | "application/atom+xml"
-                            | "application/ld+json"
-                    ) =>
-            {
-                false
-            }
-            _ => return Err(FetchError::UnsupportedContentType),
-        };
-        let (title, text) = if html {
-            html::extract(&body)
-        } else {
-            (None, body.trim().to_owned())
-        };
-        let (text, cut) = bounded_chars(&text, MAX_TEXT_CHARS);
-        return Ok(FetchedPage {
-            url: requested,
-            final_url: current.to_string(),
+        let (body, over) = read_bounded(response).await?;
+        return Ok(Response {
+            final_url: current,
             status: status.as_u16(),
-            content_type: media.chars().take(256).collect(),
-            title: title.map(|title| title.chars().take(1_024).collect()),
-            text,
-            truncated: over || cut,
+            media,
+            body,
+            over,
         });
     }
     Err(FetchError::TooManyRedirects)
+}
+
+/// [`get`] bounded by cancellation, the fetch timeout and `deadline`.
+async fn get_within(
+    requested: &str,
+    policy: FetchPolicy,
+    accept: &str,
+    cancellation: &CancellationToken,
+    deadline: Duration,
+) -> Result<Response, FetchError> {
+    let limit = deadline.min(FETCH_TIMEOUT);
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(FetchError::Cancelled),
+        result = tokio::time::timeout(limit, get(requested, policy, accept)) => {
+            result.unwrap_or(Err(FetchError::Timeout))
+        }
+    }
+}
+
+async fn follow(requested: String, policy: FetchPolicy) -> Result<FetchedPage, FetchError> {
+    let response = get(
+        &requested,
+        policy,
+        "text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.8,*/*;q=0.1",
+    )
+    .await?;
+    let body = String::from_utf8_lossy(&response.body);
+    let html = match response.media.as_str() {
+        "text/html" | "application/xhtml+xml" => true,
+        "" => body.trim_start().starts_with('<'),
+        media
+            if media.starts_with("text/")
+                || matches!(
+                    media,
+                    "application/json"
+                        | "application/xml"
+                        | "application/rss+xml"
+                        | "application/atom+xml"
+                        | "application/ld+json"
+                ) =>
+        {
+            false
+        }
+        _ => return Err(FetchError::UnsupportedContentType),
+    };
+    let (title, text) = if html {
+        html::extract(&body)
+    } else {
+        (None, body.trim().to_owned())
+    };
+    let (text, cut) = bounded_chars(&text, MAX_TEXT_CHARS);
+    Ok(FetchedPage {
+        url: requested,
+        final_url: response.final_url.to_string(),
+        status: response.status,
+        content_type: response.media.chars().take(256).collect(),
+        title: title.map(|title| title.chars().take(1_024).collect()),
+        text,
+        truncated: response.over || cut,
+    })
 }
 
 /// A client whose only route to the URL's host is the set of addresses that

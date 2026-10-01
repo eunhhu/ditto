@@ -3,6 +3,7 @@ pub(crate) mod memory_write;
 pub(crate) mod recall;
 mod replay;
 mod run;
+pub(crate) mod search;
 mod shared;
 pub(crate) mod sort;
 mod thread;
@@ -21,6 +22,10 @@ pub use recall::{
 };
 pub use replay::replay_artifact_read_turn;
 pub(crate) use run::ToolContracts;
+pub use search::{
+    ReplayedSearchCall, SearchToolError, SearchToolOutput, SearchToolRequested, SearchToolResult,
+    SearchToolStarted,
+};
 pub use shared::request_sha256;
 pub use sort::{
     ReplayedSortCall, SortToolError, SortToolOutput, SortToolRequested, SortToolResult,

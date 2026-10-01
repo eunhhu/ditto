@@ -29,8 +29,8 @@ and checks establish a new fact.
   `dev/task-027-one-journal-plane`, `dev/task-028-session-parallel` and
   `dev/task-029-memory-search` stack the harness design and Tasks 025–029,
   and `dev/task-030-selection-by-reference`, `dev/task-024-model-memory` and
-  `dev/task-031-forget-memory` stack Tasks 030, 024 and 031. Nothing is
-  pushed.
+  `dev/task-031-forget-memory` stack Tasks 030, 024 and 031, and
+  `dev/task-032-web-search` stacks Task 032. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -94,6 +94,13 @@ and checks establish a new fact.
   retrieval.
   The separate V2 joint working-set query is lexical in production with an
   injected embedding seam for tests.
+- **Web search.** With `--search-url`, agent runs search the web on their own
+  through a SearXNG-compatible service (ADR 0033): the endpoint is the only
+  resource a turn's three-call lease allows, credential-shaped queries are
+  refused, at most five bounded results return as untrusted content, and
+  replay uses the journaled results. From version 11 the instructions tell
+  the model to work on its own and to hand off only what needs the user, by
+  saying so in its answer.
 - **Web links.** `ditto-web-fetch` (ADR 0027) reads pages linked in the user's
   own message: exact-URL leases, public addresses only with pinned
   connections, manual redirects, size and time bounds, text extraction and
@@ -117,11 +124,12 @@ and checks establish a new fact.
   optional key only from `DITTO_MODEL_API_KEY`). Keys are redacted and
   transport-only. The daemon defaults to a disabled provider. The kernel turn
   loop compiles context, pages `artifact.read` (plus `artifact.sort` only for a
-  permitted attachment, `web.fetch` while enabled and the three memory tools
+  permitted attachment, `web.fetch` while enabled, `web.search` while a search
+  service is configured, and the three memory tools
   for agent runs while installed), runs at most eight
   model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. New turns write payload
-  version 10:
+  version 11:
   - version 2 added typed `TurnFailureReason`s for validator-derived failures;
   - version 3 gave agent runs the current thread's finished exchanges as
     native messages, with their turn IDs recorded and recomputed on replay
@@ -143,7 +151,9 @@ and checks establish a new fact.
     manifests;
   - version 10 (ADR 0031) adds `memory.remember` and `memory.forget`, lets
     `memory.search` read inferred memories, and rewrites the memory
-    instructions.
+    instructions;
+  - version 11 (ADR 0033) adds `web.search` and the instruction to work on
+    its own and hand off only what needs the user.
 
   Older versions replay under their original rules; a turn never mixes
   versions. A run reuses its session's verified context while no context node
@@ -175,20 +185,19 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 031
+## Latest verified slice: Task 032
 
-- [Contract and evidence](tasks/031-forget-memory.md) (ADR 0032). The user
-  forgets any memory, theirs or Ditto's, from the web memory list (with a
-  second, in-place confirmation), `ditto memory forget ID` or Telegram's
-  `/forget <words>`, which forgets only when exactly one memory holds the
-  words.
-- Its gate passed on its final tree (584 Rust tests).
+- [Contract and evidence](tasks/032-web-search.md) (ADR 0033). With a
+  configured SearXNG-compatible service, Ditto searches the web on its own,
+  without per-query approval; consent is a hand-off in the answer, and no
+  turn waits for a person.
+- Its gate passed on its final tree (591 Rust tests).
 
-## Previous slice: Task 024
+## Previous slice: Task 031
 
-- [Contract and evidence](tasks/024-model-managed-memory.md): memory that
-  Ditto manages on its own, turn payload version 10 (ADR 0031). Its gate
-  passed on its final tree (582 Rust tests).
+- [Contract and evidence](tasks/031-forget-memory.md): forgetting a memory
+  from the web app, the CLI or Telegram (ADR 0032). Its gate passed on its
+  final tree (584 Rust tests).
 
 ## Known gaps
 
@@ -214,8 +223,10 @@ and checks establish a new fact.
   during an answer loses that reply unless Telegram redelivers the update.
   Only text messages are handled.
 - `web.fetch` decodes bodies as UTF-8 and runs no JavaScript, so pages in
-  legacy charsets or rendered by scripts yield garbled or little text. Web
-  search waits for per-call approval.
+  legacy charsets or rendered by scripts yield garbled or little text.
+- Web search needs a SearXNG-compatible service the operator runs or trusts;
+  that service sees each query. Ditto reads results' snippets but cannot open
+  a result page unless the user sends its link.
 
 - Answer quality and tool-use reliability with local or hosted
   OpenAI-compatible models are unmeasured; tools need a model with function

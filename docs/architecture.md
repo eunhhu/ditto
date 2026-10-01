@@ -292,7 +292,8 @@ memories their compilation saw with the read-only `memory.search` tool, which
 replay recomputes (ADR 0029), and from version 10 Ditto remembers, replaces and
 forgets memories on its own through `memory.remember` and `memory.forget`,
 labeled as its inference and never after reading a web page or file
-(ADR 0031).
+(ADR 0031). With a configured search service, agent runs search the web on
+their own through `web.search` (ADR 0033).
 Runs, sorts and the scheduler journal from blocking threads, and daemon
 handlers run kernel calls on the blocking pool, so no async runtime thread
 waits on SQLite; debug builds reject journal access on those threads.
