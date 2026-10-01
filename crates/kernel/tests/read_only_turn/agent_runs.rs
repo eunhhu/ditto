@@ -735,9 +735,8 @@ async fn over_budget_sessions_keep_only_lexically_relevant_memory() {
 }
 
 #[tokio::test]
-async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
-    // With artifact.read alone the tool surface is the same in every version.
-    let fixture = Fixture::artifact_read_only();
+async fn only_the_current_turn_contract_replays() {
+    let fixture = Fixture::new();
     let driver = ScriptedDriver::new(vec![final_script(&["hello"])]);
     let command = start_command("hello");
     fixture
@@ -760,151 +759,24 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
                 == json!(ditto_kernel::turn::TURN_PAYLOAD_VERSION))
     );
     replay_artifact_read_turn(&events, &status.turn_id).unwrap();
-
-    // An empty capsule means the same under both selection contracts, so the
-    // same transcript relabeled as version 1 replays through the legacy rules
-    // once its version-4 instructions and offset are restored to the frozen
-    // legacy form.
-    // Versions before 7 record what version 7 derives: the capsule, the
-    // builtin schemas and each request as sent, which the driver received.
-    // Versions before 9 record the capability selection in full.
-    let requests = driver.requests();
-    let selection = serde_json::to_value(
-        replay_artifact_read_turn(&events, &status.turn_id)
-            .unwrap()
-            .capabilities
-            .unwrap(),
-    )
-    .unwrap();
-    let relabel = |version: u16, only_first: bool, legacy: bool| {
+    // Until the first release there is one contract (ADR 0034): a turn
+    // recorded under any other version is not replayed, in whole or in part.
+    let relabel = |version: u16, only_first: bool| {
         let mut relabeled = events.clone();
         for event in relabeled.iter_mut().filter(|event| versioned(event)) {
-            if version < 9 && event.kind == event_kind::CAPABILITIES_SELECTED {
-                event.payload = selection.clone();
-            }
             event.payload["event_version"] = json!(version);
-            // Version 10 sent no autonomy segment, and versions before it
-            // the earlier memory instructions.
-            if (7..11).contains(&version) && event.kind == event_kind::MODEL_REQUESTED {
-                let index = event.payload["request_index"].as_u64().unwrap() as usize;
-                let sent = if version == 10 {
-                    super::before_autonomy(&requests[index])
-                } else {
-                    super::before_managed_memory(&requests[index])
-                };
-                super::reseal_request(event, &sent);
-            }
-            if version < 7 {
-                match event.kind.as_str() {
-                    event_kind::CONTEXT_COMPILED => event.payload["capsule"] = json!({"nodes": []}),
-                    event_kind::CAPABILITIES_SELECTED => {
-                        event.payload["schemas"] = json!([capability_schema()]);
-                    }
-                    event_kind::MODEL_REQUESTED => {
-                        let index = event.payload["request_index"].as_u64().unwrap() as usize;
-                        event.payload = json!({
-                            "event_version": version,
-                            "turn_id": event.payload["turn_id"],
-                            "request_index": index,
-                            "request": super::before_managed_memory(&requests[index]),
-                        });
-                    }
-                    _ => {}
-                }
-            }
-            if legacy {
-                if let Some(payload) = event.payload.as_object_mut() {
-                    payload.remove("utc_offset_minutes");
-                }
-                if event.kind == event_kind::MODEL_REQUESTED {
-                    event.payload["request"]["stable_system_prefix"]["segments"] =
-                        json!(LEGACY_INSTRUCTIONS);
-                    // Before version 6 the latest message is the recorded text.
-                    let conversation = event.payload["request"]["turn"]["conversation"]
-                        .as_array_mut()
-                        .unwrap();
-                    let latest = conversation
-                        .iter_mut()
-                        .rev()
-                        .find(|item| item["role"] == "user")
-                        .unwrap();
-                    latest["content"][0]["text"] = json!("hello");
-                }
-            }
             if only_first {
                 break;
             }
         }
         relabeled
     };
-    replay_artifact_read_turn(&relabel(1, false, true), &status.turn_id).unwrap();
-    assert!(replay_artifact_read_turn(&relabel(1, true, true), &status.turn_id).is_err());
-    // No history exists, so versions 2 and 3 also replay; unknown versions,
-    // and older versions carrying version-4 instructions, never do.
-    replay_artifact_read_turn(&relabel(2, false, true), &status.turn_id).unwrap();
-    replay_artifact_read_turn(&relabel(3, false, true), &status.turn_id).unwrap();
-    assert!(replay_artifact_read_turn(&relabel(3, false, false), &status.turn_id).is_err());
-    assert!(replay_artifact_read_turn(&relabel(4, false, true), &status.turn_id).is_err());
-    // Versions 4 and 5 state the time in the instructions, not in the message.
-    assert!(replay_artifact_read_turn(&relabel(4, false, false), &status.turn_id).is_err());
-    assert!(replay_artifact_read_turn(&relabel(5, false, false), &status.turn_id).is_err());
-    let future = ditto_kernel::turn::TURN_PAYLOAD_VERSION + 1;
-    assert!(replay_artifact_read_turn(&relabel(future, false, false), &status.turn_id).is_err());
-    assert!(replay_artifact_read_turn(&relabel(0, false, true), &status.turn_id).is_err());
-    // Version 7 sends what version 6 sent: recorded in full, the same turn
-    // replays as version 6. Each version accepts only its own forms.
-    replay_artifact_read_turn(&relabel(6, false, false), &status.turn_id).unwrap();
-    let mut derived_forms_as_six = events.clone();
-    for event in derived_forms_as_six
-        .iter_mut()
-        .filter(|event| versioned(event))
-    {
-        event.payload["event_version"] = json!(6);
+    let current = ditto_kernel::turn::TURN_PAYLOAD_VERSION;
+    for version in [0, 1, current - 1, current + 1] {
+        assert!(replay_artifact_read_turn(&relabel(version, false), &status.turn_id).is_err());
+        assert!(replay_artifact_read_turn(&relabel(version, true), &status.turn_id).is_err());
     }
-    assert!(replay_artifact_read_turn(&derived_forms_as_six, &status.turn_id).is_err());
-    let mut full_forms_as_seven = relabel(6, false, false);
-    for event in full_forms_as_seven
-        .iter_mut()
-        .filter(|event| versioned(event))
-    {
-        event.payload["event_version"] = json!(7);
-    }
-    assert!(replay_artifact_read_turn(&full_forms_as_seven, &status.turn_id).is_err());
-    // Version 9 records the selection by reference: recorded in full, the
-    // same turn replays as versions 7 and 8, and each version accepts only its
-    // own selection form. Version 10 changed only the memory instructions.
-    replay_artifact_read_turn(&relabel(7, false, false), &status.turn_id).unwrap();
-    replay_artifact_read_turn(&relabel(8, false, false), &status.turn_id).unwrap();
-    replay_artifact_read_turn(&relabel(9, false, false), &status.turn_id).unwrap();
-    replay_artifact_read_turn(&relabel(10, false, false), &status.turn_id).unwrap();
-    let mut instructions_of_ten_as_nine = events.clone();
-    for event in instructions_of_ten_as_nine
-        .iter_mut()
-        .filter(|event| versioned(event))
-    {
-        event.payload["event_version"] = json!(9);
-    }
-    assert!(replay_artifact_read_turn(&instructions_of_ten_as_nine, &status.turn_id).is_err());
-    let mut reference_as_eight = events.clone();
-    for event in reference_as_eight
-        .iter_mut()
-        .filter(|event| versioned(event))
-    {
-        event.payload["event_version"] = json!(8);
-    }
-    assert!(replay_artifact_read_turn(&reference_as_eight, &status.turn_id).is_err());
-    let mut full_as_nine = relabel(8, false, false);
-    for event in full_as_nine.iter_mut().filter(|event| versioned(event)) {
-        event.payload["event_version"] = json!(9);
-    }
-    assert!(replay_artifact_read_turn(&full_as_nine, &status.turn_id).is_err());
 }
-
-/// The frozen system instructions of turn payload versions 1 to 3.
-const LEGACY_INSTRUCTIONS: [&str; 2] = [
-    "You are Ditto's model strategy component. The harness owns context, capability authority, effects, persistence, and verification.",
-    "Use only the complete capability schemas supplied for this execution epoch. A model terminal is not verified task completion.",
-];
 
 #[tokio::test]
 async fn assistant_instructions_state_the_local_time_of_acceptance_and_replay() {

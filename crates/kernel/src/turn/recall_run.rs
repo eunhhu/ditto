@@ -69,7 +69,7 @@ impl DittoKernel {
                     Ok(AuthorizationOutcome::Permitted(permit))
                         if permit.validate(&invocation, now).is_ok() =>
                     {
-                        RecallToolResult::search(&query, space, TURN_PAYLOAD_VERSION)
+                        RecallToolResult::search(&query, space)
                     }
                     _ => {
                         return Err(TurnRunError::Internal(

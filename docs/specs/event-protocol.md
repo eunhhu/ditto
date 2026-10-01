@@ -457,8 +457,10 @@ offers the tool. See [ADR 0027](../adr/0027-web-fetch-for-user-links.md).
 
 ## Kernel artifact-read turns
 
-The kernel owns the durable read-only turn state machine; new turns are written
-as version 2 and version-1 turns remain readable. Clients cannot select its
+The kernel owns the durable read-only turn state machine. Until the first
+release there is one turn contract, the current payload version, and replay
+rejects turns recorded under any other ([ADR 0034](../adr/0034-one-turn-contract.md));
+the version notes below record how the contract was reached. Clients cannot select its
 actors, kinds, correlations, or spans. The fixed mapping is:
 
 ```text

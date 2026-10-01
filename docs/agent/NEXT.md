@@ -30,7 +30,16 @@ own ("알아서 잘 딱"):
    SearXNG-compatible service, turn payload version 11 - complete (ADR 0033;
    no per-query approval, consent handed off in the answer).
 
-The next slice waits for the user's choice among the open items below.
+The user then asked for the code to be consolidated and as light and thin as
+possible, then for chat to be a bridge to concurrent work, and for the
+assistant to message by state and spend nothing on acknowledgments:
+
+5. [033](tasks/033-one-turn-contract.md) One turn contract until the first
+   release - complete (ADR 0034).
+6. 034 The chat as a bridge: runs in one session at once, each run aware of
+   the session's work in flight, a message per model request, and a reaction
+   instead of a model call for an acknowledgment.
+7. 035 One builtin tool lifecycle, with the memory and web tools merged.
 
 The thin-harness phases of ADR 0028 (Tasks 025–029) are complete except the
 parts deferred there: one builtin tool lifecycle, parallel read-only calls,
@@ -47,6 +56,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [033](tasks/033-one-turn-contract.md) One turn contract until the first
+  release (ADR 0034).
 - [032](tasks/032-web-search.md) Web search on its own, turn payload
   version 11 (ADR 0033).
 - [031](tasks/031-forget-memory.md) Forgetting a memory from the web app,

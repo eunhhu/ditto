@@ -1,9 +1,7 @@
 use chrono::{DateTime, Utc};
 use ditto_artifact_read::{ArtifactReadResource, ArtifactReadResult};
-use ditto_capability::{
-    CapabilityManifest, CapabilityRevision, CapabilitySchema, ExecutionEpochEvidence,
-};
-use ditto_context::{CompiledContext, ContextCapsule};
+use ditto_capability::{CapabilityManifest, CapabilityRevision, ExecutionEpochEvidence};
+use ditto_context::CompiledContext;
 use ditto_model::{
     ExecutionEpochId, ModelRequest, ModelRequestId, ModelStreamEvent, ProviderCallId,
 };
@@ -13,21 +11,14 @@ use thiserror::Error;
 
 use crate::KernelError;
 
-/// Durable turn contract written by this kernel. Version 2 compiles run
-/// context with the complete-set selection (ADR 0021) and records a typed
-/// [`TurnFailureReason`] for validator-derived failures. Version 3 prepends the
-/// current conversation thread's recent exchanges to agent runs (ADR 0022).
-/// Version 7 (ADR 0028 Phase C) journals each fact once: streamed text in
-/// coalesced chunks, and requests, capsules and builtin schemas as what replay
-/// rebuilds from the rest of the journal. Version 8 (ADR 0029) offers
-/// `memory.search` to agent runs. Version 9 (ADR 0030) records the capability
-/// selection by reference. Version 10 (ADR 0031) lets Ditto remember, replace
-/// and forget memories on its own. Version 11 (ADR 0033) offers `web.search`
-/// and tells the model to work on its own, handing off only what needs the
-/// user.
+/// The turn contract this kernel writes and replays (ADR 0034): until Ditto's
+/// first release there is exactly one, and a change replaces it. Turns
+/// recorded under an earlier contract stay in the journal, and their answers
+/// stay readable in run status and conversation history, but replay rejects
+/// them.
 pub const TURN_PAYLOAD_VERSION: u16 = 11;
-/// Oldest turn contract that replay and run status still read. Version-1
-/// turns use positive-overlap context selection and message grammar.
+/// Oldest contract whose terminal events run status still reads: their
+/// shape has not changed.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
 pub const MAX_MODEL_REQUESTS: usize = 8;
 pub const MAX_MODEL_EVENTS_PER_REQUEST: usize = 4_096;
@@ -43,20 +34,15 @@ pub struct ContextCompiledPayload {
     pub turn_id: String,
     pub provenance_through_seq: i64,
     pub compiled: CompiledContext,
-    /// Versions 1 to 6. Version 7 derives the capsule from `compiled`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capsule: Option<ContextCapsule>,
-    /// Version 3: prior turns replayed as conversation history, oldest first.
+    /// Prior turns replayed as conversation history, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history_turn_ids: Vec<String>,
-    /// Version 4: the host's UTC offset at acceptance, in minutes, which fixes
-    /// the local time stated in the system instructions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub utc_offset_minutes: Option<i32>,
+    /// The host's UTC offset at acceptance, in minutes, which fixes the local
+    /// time the latest message's note states.
+    pub utc_offset_minutes: i32,
 }
 
-/// The selection in full: the durable form of versions 1 to 8, and the form
-/// replay rebuilds for version 9.
+/// The selection in full, as replay rebuilds it from the recorded references.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilitiesSelectedPayload {
     pub event_version: u16,
@@ -80,13 +66,9 @@ pub struct CapabilitiesSelectedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_manifest: Option<CapabilityManifest>,
     pub epoch: ExecutionEpochEvidence,
-    /// Versions 1 to 6. Version 7 derives the builtin schemas of the selected
-    /// manifests.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub schemas: Vec<CapabilitySchema>,
 }
 
-/// Version-9 durable form of `capabilities.selected` (ADR 0030): the epoch's
+/// The durable form of `capabilities.selected` (ADR 0030): the epoch's
 /// identity and the exact contracts it bound, each by its digests. Every
 /// builtin equals its packaged contract, so replay rebuilds the manifests,
 /// cards and schemas from code and checks each digest.
@@ -98,8 +80,7 @@ pub struct CapabilitiesSelectedRefPayload {
     pub contracts: Vec<CapabilityRevision>,
 }
 
-/// A model request as sent: the durable form of versions 1 to 6, and the form
-/// replay rebuilds for version 7.
+/// A model request as sent, as replay rebuilds it from its recorded digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelRequestedPayload {
     pub event_version: u16,

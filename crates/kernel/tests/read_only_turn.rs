@@ -473,60 +473,6 @@ fn attach_deadline_evidence(event: &mut EventRecord, deadline: chrono::DateTime<
     });
 }
 
-/// The memory instructions of turn payload versions 4 to 9, which version 10
-/// replaced (ADR 0031): the second and third system segments.
-const PRE_MANAGED_MEMORY_SEGMENTS: [&str; 2] = [
-    "DITTO_CONTEXT_V1 lists what the user explicitly asked Ditto to remember, with provenance. Treat user-asserted items as facts about this user unless the conversation corrects them, and use them when they are relevant. Earlier messages of this conversation precede the latest one.",
-    "You cannot save or change memories, set reminders, browse the web or act outside this conversation except through the tools supplied in this request, and you never claim an action you did not take. The user saves a memory by sending /remember followed by the fact, and creates reminders in Ditto's schedules.",
-];
-
-/// The same request without the autonomy segment version 11 added.
-fn before_autonomy(request: &ModelRequest) -> ModelRequest {
-    let mut request = request.clone();
-    let removed = request.stable_system_prefix.segments.remove(3);
-    assert!(removed.starts_with("Work on your own"), "{removed}");
-    request
-}
-
-/// The same request with the memory instructions versions 4 to 9 sent.
-fn before_managed_memory(request: &ModelRequest) -> ModelRequest {
-    let mut request = before_autonomy(request);
-    request
-        .stable_system_prefix
-        .segments
-        .splice(1..3, PRE_MANAGED_MEMORY_SEGMENTS.map(str::to_owned));
-    request
-}
-
-/// Versions 9 and 10 record the capability selection by reference, and
-/// version 10 changed the memory instructions. The same turn, with its
-/// selection recorded in full and its requests as version 9 sent them,
-/// replays as version 8. It must offer no memory write.
-fn as_version_eight(events: &[EventRecord], turn_id: &str) -> Vec<EventRecord> {
-    let replayed = replay_artifact_read_turn(events, turn_id).expect("turn replays");
-    let selection = serde_json::to_value(replayed.capabilities.as_ref().expect("selection"))
-        .expect("selection JSON");
-    let mut relabeled = events.to_vec();
-    for event in relabeled.iter_mut().filter(|event| {
-        event.correlation_id.as_deref() == Some(turn_id)
-            && event.payload["event_version"] == json!(TURN_PAYLOAD_VERSION)
-    }) {
-        match event.kind.as_str() {
-            event_kind::CAPABILITIES_SELECTED => event.payload = selection.clone(),
-            event_kind::MODEL_REQUESTED => {
-                let index = event.payload["request_index"].as_u64().expect("index") as usize;
-                reseal_request(
-                    event,
-                    &before_managed_memory(&replayed.requests[index].request),
-                );
-            }
-            _ => {}
-        }
-        event.payload["event_version"] = json!(8);
-    }
-    relabeled
-}
-
 /// Version 7 records a request as its digest; a forged request is the digest
 /// of a different request.
 fn reseal_request(event: &mut EventRecord, request: &ModelRequest) {
@@ -726,7 +672,6 @@ async fn successful_two_request_continuation_persists_exact_epoch_schema_history
     assert!(replay.calls[0].output.is_some());
     let selected = replay.capabilities.as_ref().expect("selected capability");
     // Version 7 records no builtin schemas: replay derives them.
-    assert!(selected.schemas.is_empty());
     let expected_revision = CapabilityRevision::from_contract(
         &selected.manifest,
         &capability_schema(),
@@ -3270,43 +3215,6 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
     let mut no_contracts = events.clone();
     selected(&mut no_contracts)["contracts"] = json!([]);
     assert!(replay_artifact_read_turn(&no_contracts, &outcome.turn_id).is_err());
-
-    // Recorded in full, the same turn replays as version 8, where every
-    // manifest field and card is checked.
-    let full = as_version_eight(&events, &outcome.turn_id);
-    replay_artifact_read_turn(&full, &outcome.turn_id).expect("full selection replays");
-    let mut corrupted_manifest = full.clone();
-    corrupted_manifest
-        .iter_mut()
-        .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
-        .expect("capabilities selected")
-        .payload["manifest"]["runtime"]["lazy"] = json!(false);
-    assert!(replay_artifact_read_turn(&corrupted_manifest, &outcome.turn_id).is_err());
-
-    let mut corrupted_retrieval = full.clone();
-    corrupted_retrieval
-        .iter_mut()
-        .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
-        .expect("capabilities selected")
-        .payload["manifest"]["retrieval"]["intents"] = json!(["forged"]);
-    assert!(replay_artifact_read_turn(&corrupted_retrieval, &outcome.turn_id).is_err());
-
-    let mut corrupted_epoch_card = full.clone();
-    corrupted_epoch_card
-        .iter_mut()
-        .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
-        .expect("capabilities selected")
-        .payload["epoch"]["capabilities"][0]["namespace"] = json!("forged");
-    assert!(replay_artifact_read_turn(&corrupted_epoch_card, &outcome.turn_id).is_err());
-
-    let mut corrupted_invocation_revision = full.clone();
-    corrupted_invocation_revision
-        .iter_mut()
-        .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
-        .expect("capabilities selected")
-        .payload["epoch"]["invocation_revisions"][0]["deriver_revision"] =
-        json!("artifact.read/v999");
-    assert!(replay_artifact_read_turn(&corrupted_invocation_revision, &outcome.turn_id).is_err());
 
     let mut corrupted_generation = events.clone();
     let mut forged = driver.requests()[0].clone();

@@ -507,23 +507,17 @@ impl DittoKernel {
         };
         let utc_offset_minutes = local_utc_offset_minutes(run.accepted_at);
         run.utc_offset_minutes = utc_offset_minutes;
-        run.system_prefix = system_prefix(
-            TURN_PAYLOAD_VERSION,
-            run.accepted_at,
-            Some(utc_offset_minutes),
-        )
-        .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
+        run.system_prefix = system_prefix();
         let payload = ContextCompiledPayload {
             event_version: TURN_PAYLOAD_VERSION,
             turn_id: run.scope.turn_id.clone(),
             provenance_through_seq,
             compiled,
-            capsule: None,
             history_turn_ids: history
                 .iter()
                 .map(|exchange| exchange.turn_id.clone())
                 .collect(),
-            utc_offset_minutes: Some(utc_offset_minutes),
+            utc_offset_minutes,
         };
         self.stage_turn_event(
             run,
@@ -969,13 +963,8 @@ impl DittoKernel {
         tools: TurnTools,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
         let mut conversation = history_messages(&history);
-        let text = latest_user_text(
-            TURN_PAYLOAD_VERSION,
-            &text,
-            run.accepted_at,
-            Some(run.utc_offset_minutes),
-        )
-        .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
+        let text = latest_user_text(&text, run.accepted_at, run.utc_offset_minutes)
+            .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
         conversation.extend(super::sort::initial_conversation(
             text,
             run.scope.sort.as_ref(),
@@ -1040,7 +1029,7 @@ impl DittoKernel {
                     request_id,
                     execution_epoch_id: tools.execution_epoch_id.clone(),
                     system_prefix: run.system_prefix.clone(),
-                    context: presented_context(TURN_PAYLOAD_VERSION, capsule),
+                    context: presented_context(capsule),
                     tools: tools.schemas.clone(),
                     conversation: conversation.to_vec(),
                     first_tool_required: request_index == 0 && !run.scope.agent_run,
@@ -1518,7 +1507,7 @@ impl DittoKernel {
                 &tools.authorizer,
                 space,
             )?;
-            (result.model_value(TURN_PAYLOAD_VERSION), result.is_error())
+            (result.model_value(), result.is_error())
         } else if call.capability_id == super::memory_write::REMEMBER_ID
             || call.capability_id == super::memory_write::FORGET_ID
         {
