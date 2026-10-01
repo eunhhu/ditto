@@ -132,6 +132,9 @@ pub mod event_kind {
     /// A memory Ditto wrote during a run: session-scoped and task-free, so the
     /// context node it sources outlives the run (ADR 0031).
     pub const MEMORY_WRITTEN: &str = "memory.written";
+    /// The user forgot a memory directly (ADR 0032); it sources the disputed
+    /// node that supersedes the memory.
+    pub const MEMORY_FORGOTTEN: &str = "memory.forgotten";
     pub const SORT_REQUESTED: &str = "sort.requested";
     pub const SORT_STARTED: &str = "sort.started";
     pub const SORT_FAILED: &str = "sort.failed";
@@ -365,6 +368,25 @@ pub struct RememberInputCommand {
     pub input_event_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
+}
+
+/// Forget one active memory of the session (ADR 0032); the kernel records
+/// the request and the node that takes the memory out of use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForgetMemoryCommand {
+    pub session_id: String,
+    pub memory_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForgetMemoryResponse {
+    /// The memory that was forgotten.
+    pub memory_id: String,
+    /// The node that supersedes it.
+    pub event_id: String,
+    pub event_seq: i64,
+    pub outcome: MemoryWriteOutcome,
 }
 
 /// Start a new conversation thread in a session. Memories are unaffected.

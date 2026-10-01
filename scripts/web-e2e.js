@@ -269,6 +269,15 @@ async function main() {
     await page.waitForFunction(() => [...document.querySelectorAll('#memory-list li')]
       .some((item) => item.innerText.includes('tennis on Sundays') && item.querySelector('.tag')), { timeout: 10000 });
     check('the memory list marks what Ditto inferred', true);
+    const forgetTennis = () => page.evaluate(() => {
+      const item = [...document.querySelectorAll('#memory-list li')].find((node) => node.innerText.includes('tennis on Sundays'));
+      [...item.querySelectorAll('button.link')].find((button) => button.dataset.armed || button.innerText === 'Forget').click();
+    });
+    await forgetTennis();
+    const armed = await page.evaluate(() => [...document.querySelectorAll('#memory-list button.link')].some((button) => button.innerText === 'Forget it?'));
+    await forgetTennis();
+    await page.waitForFunction(() => !document.querySelector('#memory-list').innerText.includes('tennis on Sundays'), { timeout: 10000 });
+    check('a memory is forgotten from the list after a second click', armed);
 
     const inView = () => page.evaluate(() => {
       const header = document.querySelector('.chat-header').getBoundingClientRect();

@@ -1,8 +1,9 @@
 use anyhow::{Context, bail};
 use clap::Subcommand;
 use ditto_protocol::{
-    MAX_USER_MEMORY_BYTES, MemoryPage, MemoryQuery, MemoryWriteOutcome, RememberInputCommand,
-    RememberInputResponse, SubmitInputCommand, SubmitInputResponse,
+    ForgetMemoryCommand, ForgetMemoryResponse, MAX_USER_MEMORY_BYTES, MemoryPage, MemoryQuery,
+    MemoryWriteOutcome, RememberInputCommand, RememberInputResponse, SubmitInputCommand,
+    SubmitInputResponse,
 };
 
 #[derive(Debug, Subcommand)]
@@ -22,6 +23,13 @@ pub(super) enum Command {
         session: String,
         #[arg(long)]
         replaces: Option<String>,
+    },
+    /// Forget one active memory, yours or one Ditto inferred; it stops being
+    /// used and listed.
+    Forget {
+        memory_id: String,
+        #[arg(long, default_value = "personal")]
+        session: String,
     },
     /// Inspect current memories, with an optional cursor from the previous page.
     List {
@@ -88,6 +96,32 @@ pub(super) async fn run(
                 )
                 .await?,
             )?;
+        }
+        Command::Forget { memory_id, session } => {
+            let response = client
+                .post(format!("{api}/v1/commands/memory/forget"))
+                .json(&ForgetMemoryCommand {
+                    session_id: session,
+                    memory_id,
+                })
+                .send()
+                .await
+                .context("forget response was not received")?;
+            if response.status() == reqwest::StatusCode::CONFLICT {
+                bail!("that is not an active memory in this session; it may already be forgotten");
+            }
+            let response = response
+                .error_for_status()
+                .context("forgetting failed")?
+                .json::<ForgetMemoryResponse>()
+                .await
+                .context("invalid forget response")?;
+            if response.outcome == MemoryWriteOutcome::CommittedButProjectionUnavailable {
+                eprintln!(
+                    "The memory was forgotten durably, but the searchable projection is not ready yet."
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Command::List {
             session,

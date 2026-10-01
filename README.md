@@ -38,7 +38,11 @@ The executable foundation includes:
   `context.node.recorded` events in the canonical event spine, plus a separate,
   checkpointed and rebuildable `context-projection.db` cache;
 - explicit session memory through CLI/HTTP: save exact user text, inspect current
-  memories, and correct an active memory with idempotent input promotion;
+  memories, correct an active memory with idempotent input promotion, and
+  forget any memory from the web app, CLI or Telegram;
+- memory Ditto keeps current on its own: during a run it remembers lasting
+  facts, replaces outdated memories and forgets on request, labeled as its
+  inference, never from web pages or files, and shown under the answer;
 - one bounded V2 `TaskQuery` shared by read-only joint context/capability
   working-set retrieval, with production lexical ranking and an explicit
   injected embedding seam for tests and explicit local composition;
@@ -100,8 +104,9 @@ cargo run -p ditto-cli -- capabilities "run a command on another computer"
 # Explicit memories default to the persistent personal session.
 cargo run -p ditto-cli -- memory save "I prefer afternoon meetings"
 cargo run -p ditto-cli -- memory list
-# Use an ID returned above to correct that memory:
+# Use an ID returned above to correct or forget that memory:
 # cargo run -p ditto-cli -- memory save "I prefer morning meetings" --replaces MEMORY_ID
+# cargo run -p ditto-cli -- memory forget MEMORY_ID
 
 curl -N 'http://127.0.0.1:8787/v1/stream?after_seq=0'
 ```
@@ -155,7 +160,8 @@ DITTO_TELEGRAM_BOT_TOKEN=... cargo run -p ditto-cli -- telegram --allow-user 123
 
 It long-polls Telegram, so no port or webhook is exposed. Only private chats
 from allowed users are answered; others are ignored. Answers stream into a
-draft with a stop button. `/new`, `/remember <fact>`, `/memories` and `/stop`
+draft with a stop button. `/new`, `/remember <fact>`, `/memories`,
+`/forget <words>` (forgets the one memory that holds the words) and `/stop`
 work as in the CLI, and chats share the `personal` session with the CLI and
 web app. Results of scheduled requests are sent to the allowed users, also
 after a gateway restart (`--state-file`, default `.ditto-telegram.json`). The
@@ -190,8 +196,18 @@ ID only for the identical request. Terminal controls in human fields are escaped
 including newlines displayed as `\n`, so content cannot impersonate status lines.
 
 The model is told it is the user's personal assistant, what the memory block
-means, what it cannot do (such as saving memories itself), and the current
-local time; set `TZ` for the daemon if the machine's zone is not yours.
+means, when to keep memories current itself, what it cannot do, and the
+current local time; set `TZ` for the daemon if the machine's zone is not yours.
+
+Ditto manages memory on its own. When you mention a lasting fact ("my dog is
+called Miso", "I moved to Busan"), it remembers it, replacing a memory that
+became outdated, and it forgets one when you ask. These memories are marked
+as Ditto's inference: the web app says under the answer what was remembered
+and badges them in the memory list, `/memories` marks them, and you correct
+or forget them like your own. Ditto never remembers secrets, and never from a
+page or file it read in the same answer, since those may carry instructions;
+tell it again in your next message instead. At most three memory writes
+happen per answer.
 
 Links in a message can be read: "Summarize https://example.com/article" lets
 the model fetch that page, and only pages linked in the message. Fetches
@@ -321,6 +337,7 @@ intervals, without named-time-zone or daylight-saving calendar adjustments. See
 | `GET` | `/v1/conversation` | The current thread's newest finished exchanges, oldest first |
 | `GET` | `/` | Embedded web app (`/app.js`, `/app.css`, `/favicon.svg`) |
 | `POST` | `/v1/commands/memory` | Save an existing same-session user input, optionally replacing an active memory |
+| `POST` | `/v1/commands/memory/forget` | Forget one active memory, yours or one Ditto inferred |
 | `GET` | `/v1/memories` | Inspect current session memories with an ID cursor |
 | `POST` | `/v1/commands/run` | Admit one model run, optionally permitting one attached-file sort |
 | `GET` | `/v1/runs` | Inspect a run by session and request ID |
@@ -342,8 +359,10 @@ intervals, without named-time-zone or daylight-saving calendar adjustments. See
 
 There is intentionally no public arbitrary event-append endpoint.
 
-Memory saving uses the existing input event and context admission. Text is
-bounded to 4 KiB, preserved exactly as recorded, and never inferred by a model.
+Memory saving uses the existing input event and context admission. Text you
+save is bounded to 4 KiB and preserved exactly as recorded; memories Ditto
+writes itself are listed with `"inferred": true`. Forgetting takes a memory out
+of use and listings; the append-only journal keeps its record.
 Use `--session NAME` for an isolated set and `memory list --after-id ID` to
 continue a page. If input capture succeeds but memory saving fails, the CLI
 reports the input ID for `memory from-input INPUT_ID` recovery. A pending

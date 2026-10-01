@@ -6,8 +6,8 @@ use std::{
 use ditto_event_store::EventStore;
 use ditto_kernel::{DittoKernel, KernelConfig, KernelError};
 use ditto_protocol::{
-    EventActor, EventQuery, MemoryQuery, MemoryWriteOutcome, NewEvent, RememberInputCommand,
-    SubmitInputCommand, event_kind,
+    EventActor, EventQuery, ForgetMemoryCommand, MemoryQuery, MemoryWriteOutcome, NewEvent,
+    RememberInputCommand, SubmitInputCommand, event_kind,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -475,4 +475,114 @@ fn memory_listing_rejects_text_that_differs_from_user_evidence_and_repairs_cache
         "canonical text"
     );
     assert_eq!(fixture.kernel.event_count().unwrap(), before);
+}
+
+#[test]
+fn forgetting_takes_one_active_memory_out_of_use_and_survives_rebuild() {
+    let Fixture {
+        _root,
+        config,
+        kernel,
+    } = Fixture::new();
+    let fixture_input = |session: &str, text: &str| {
+        let input = kernel
+            .record_user_input(SubmitInputCommand {
+                session_id: Some(session.into()),
+                task_id: None,
+                text: text.into(),
+            })
+            .unwrap();
+        kernel
+            .remember_input(RememberInputCommand {
+                session_id: session.into(),
+                input_event_id: input.event_id,
+                replaces: None,
+            })
+            .unwrap()
+    };
+    let tea = fixture_input("personal", "I like tea");
+    let seoul = fixture_input("personal", "I live in Seoul");
+    let coffee = fixture_input("other", "I like coffee");
+    let forget = |session: &str, memory_id: &str| {
+        kernel.forget_memory(ForgetMemoryCommand {
+            session_id: session.into(),
+            memory_id: memory_id.into(),
+        })
+    };
+
+    // Another session's memory, an unknown ID and a malformed one forget
+    // nothing and append nothing.
+    let before = kernel.event_count().unwrap();
+    assert!(matches!(
+        forget("personal", &coffee.memory_id),
+        Err(KernelError::MemoryConflict(_))
+    ));
+    assert!(matches!(
+        forget("personal", "memory-01k00000000000000000000000"),
+        Err(KernelError::MemoryConflict(_))
+    ));
+    assert!(matches!(
+        forget("personal", "memory-1"),
+        Err(KernelError::InvalidCommand(_))
+    ));
+    assert_eq!(kernel.event_count().unwrap(), before);
+
+    let forgotten = forget("personal", &tea.memory_id).unwrap();
+    assert_eq!(forgotten.outcome, MemoryWriteOutcome::Recorded);
+    assert_eq!(forgotten.memory_id, tea.memory_id);
+    let listed = |kernel: &DittoKernel, session: &str| {
+        kernel
+            .list_memories(query(session))
+            .unwrap()
+            .memories
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(listed(&kernel, "personal"), [seoul.memory_id.clone()]);
+    assert_eq!(listed(&kernel, "other"), [coffee.memory_id.clone()]);
+
+    // The user's request sources a disputed node that supersedes the memory.
+    let events = kernel.list_events(&EventQuery::default()).unwrap();
+    let request = events
+        .iter()
+        .find(|event| event.kind == event_kind::MEMORY_FORGOTTEN)
+        .unwrap();
+    assert_eq!(request.actor, EventActor::User);
+    assert_eq!(request.task_id, None);
+    assert_eq!(request.payload["memory_id"], json!(tea.memory_id));
+    let node = events
+        .iter()
+        .find(|event| event.event_id == forgotten.event_id)
+        .unwrap();
+    assert_eq!(node.kind, event_kind::CONTEXT_NODE_RECORDED);
+    assert_eq!(
+        node.causation_id.as_deref(),
+        Some(request.event_id.as_str())
+    );
+    assert_eq!(node.payload["node"]["origin"], json!("user"));
+    assert_eq!(node.payload["node"]["epistemic"], json!("disputed"));
+    assert_eq!(node.payload["node"]["supersedes"], json!([tea.memory_id]));
+
+    // It is no longer active, so forgetting it again or correcting it is a
+    // conflict.
+    let before = kernel.event_count().unwrap();
+    assert!(matches!(
+        forget("personal", &tea.memory_id),
+        Err(KernelError::MemoryConflict(_))
+    ));
+    assert_eq!(kernel.event_count().unwrap(), before);
+
+    // A rebuilt projection agrees.
+    drop(kernel);
+    for suffix in ["", "-wal", "-shm"] {
+        let path = config
+            .data_dir
+            .join(format!("context-projection.db{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let kernel = DittoKernel::open(config).unwrap();
+    assert_eq!(listed(&kernel, "personal"), [seoul.memory_id]);
 }

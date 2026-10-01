@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::{
     Command, admit, bot::Bot, bot::BotToken, bot::split_message, bot::tail, command,
-    events::SseParser, load_cursor, request_id, save_cursor,
+    events::SseParser, load_cursor, matching, request_id, save_cursor,
 };
 
 #[test]
@@ -18,6 +18,8 @@ fn commands_parse_with_bot_suffixes_and_arguments() {
     );
     assert_eq!(command("/remember"), Command::Remember(""));
     assert_eq!(command("/memories"), Command::Memories);
+    assert_eq!(command("/forget  green tea "), Command::Forget("green tea"));
+    assert_eq!(command("/forget"), Command::Forget(""));
     assert_eq!(command("/stop"), Command::Stop);
     assert_eq!(command("/unknown thing"), Command::Ask("/unknown thing"));
     assert_eq!(command("hello /new"), Command::Ask("hello /new"));
@@ -200,4 +202,28 @@ fn cursor_state_round_trips_and_rejects_corruption() {
     std::fs::write(&path, b"{broken").unwrap();
     assert!(load_cursor(&path).is_err());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn forget_names_only_memories_that_hold_the_words() {
+    let memory = |id: &str, text: &str| ditto_protocol::UserMemory {
+        id: id.into(),
+        text: text.into(),
+        input_event_id: id.into(),
+        replaces: None,
+        inferred: false,
+    };
+    let memories = [
+        memory("a", "I like green tea"),
+        memory("b", "I live in Seoul"),
+    ];
+    let ids = |words: &str| {
+        matching(&memories, words)
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids("GREEN Tea"), ["a"]);
+    assert_eq!(ids("I "), ["a", "b"]);
+    assert!(ids("coffee").is_empty());
 }

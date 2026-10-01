@@ -6,14 +6,14 @@ use ditto_context_projection::{
     ContextNodeRecordedPayloadV1, ContextProjectionError, VerifiedContextSnapshot,
 };
 use ditto_protocol::{
-    EventActor, EventRecord, MAX_USER_MEMORY_BYTES, MAX_USER_MEMORY_PAGE_SIZE, MemoryPage,
-    MemoryQuery, MemoryWriteOutcome, RememberInputCommand, RememberInputResponse, UserMemory,
-    event_kind,
+    EventActor, EventRecord, ForgetMemoryCommand, ForgetMemoryResponse, MAX_USER_MEMORY_BYTES,
+    MAX_USER_MEMORY_PAGE_SIZE, MemoryPage, MemoryQuery, MemoryWriteOutcome, NewEvent,
+    RememberInputCommand, RememberInputResponse, UserMemory, event_kind,
 };
 use ditto_retrieval::{RetrievalWorkBudget, SessionId};
 use ulid::Ulid;
 
-use crate::turn::memory_write::memory_node as memory_node_written;
+use crate::turn::memory_write::{forgotten_node, is_memory, memory_node as memory_node_written};
 use crate::turn::{MemoryWrite, MemoryWrittenPayload};
 use crate::{DittoKernel, KernelError, TrustedContextNodeDraft};
 
@@ -108,6 +108,72 @@ impl DittoKernel {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Forget one active memory of the session at the user's request
+    /// (ADR 0032): a `memory.forgotten` event and the disputed node it
+    /// sources, which supersedes the memory.
+    pub fn forget_memory(
+        &self,
+        command: ForgetMemoryCommand,
+    ) -> Result<ForgetMemoryResponse, KernelError> {
+        validate_session(&command.session_id)?;
+        validate_memory_id(&command.memory_id)?;
+        let session = command.session_id.as_str();
+        let _gate = self
+            .inner
+            .context_admission_gate
+            .lock()
+            .map_err(|_| KernelError::ContextAdmissionGatePoisoned)?;
+        let high_water = self.inner.events.latest_seq()?;
+        self.inner
+            .context_projection
+            .synchronize_through(&self.inner.events, high_water)?;
+        if !self
+            .memory_snapshot_locked(session, high_water)?
+            .candidates()
+            .iter()
+            .any(|node| node.id == command.memory_id && is_memory(node))
+        {
+            return Err(KernelError::MemoryConflict(
+                "memory is not an active memory in this session",
+            ));
+        }
+        let forgotten = self.append_and_publish(NewEvent {
+            session_id: Some(session.to_owned()),
+            task_id: None,
+            actor: EventActor::User,
+            kind: event_kind::MEMORY_FORGOTTEN.to_owned(),
+            payload: serde_json::json!({"event_version": 1, "memory_id": command.memory_id}),
+            causation_id: None,
+            correlation_id: Some(session.to_owned()),
+            span_id: None,
+        })?;
+        // Other sessions may have appended in between; no context node, since
+        // this gate orders every admission.
+        self.inner
+            .context_projection
+            .synchronize_through(&self.inner.events, forgotten.seq)?;
+        let node = forgotten_node(&forgotten.event_id, &command.memory_id, ContextOrigin::User);
+        let validated = self.inner.context_projection.validate_draft(
+            &self.inner.events,
+            forgotten.seq,
+            &TrustedContextNodeDraft::session(session, node),
+        )?;
+        let (event, outcome) = match self.commit_context_node(&validated) {
+            Ok(event) => (event, MemoryWriteOutcome::Recorded),
+            Err(KernelError::CommittedButProjectionUnavailable { event, .. }) => (
+                *event,
+                MemoryWriteOutcome::CommittedButProjectionUnavailable,
+            ),
+            Err(error) => return Err(error),
+        };
+        Ok(ForgetMemoryResponse {
+            memory_id: command.memory_id,
+            event_id: event.event_id,
+            event_seq: event.seq,
+            outcome,
+        })
     }
 
     /// Inspect current explicit memory through the existing verified snapshot.
