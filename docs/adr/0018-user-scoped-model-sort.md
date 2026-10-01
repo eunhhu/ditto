@@ -3,7 +3,8 @@
 ## Status
 
 Accepted for Task 011. Extends ADRs 0016 and 0017; legacy artifact-read turns
-and explicit provider-free sort commands retain their contracts.
+and explicit provider-free sort commands retain their contracts. Amended by [ADR 0036](0036-two-agent-tools-one-lifecycle.md): a sort
+call journals the shared `tool.*` lifecycle.
 
 ## Decision
 

@@ -33,20 +33,8 @@ use serde::Serialize;
 use serde_json::Value;
 use ulid::Ulid;
 
-#[path = "sort_run.rs"]
-mod sort_tool;
-
-#[path = "fetch_run.rs"]
-mod fetch_tool;
-
-#[path = "recall_run.rs"]
-mod recall_tool;
-
-#[path = "memory_write_run.rs"]
-mod memory_write_tool;
-
-#[path = "search_run.rs"]
-mod search_tool;
+#[path = "tool_run.rs"]
+mod tool_run;
 
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
@@ -79,20 +67,16 @@ pub(super) struct TurnScope {
     /// The session's agent runs active at admission, by input event ID
     /// (ADR 0035).
     in_flight: Vec<String>,
-    /// Whether `web.fetch` is offered. From version 6 it is part of every
-    /// agent run's stable tool surface while enabled.
-    fetch_offered: bool,
-    /// URLs from the user's message that `web.fetch` may read.
-    fetch: Vec<String>,
-    /// Whether `memory.search` is offered: from version 8, to every agent run.
+    /// Whether `artifact.read` is offered: to a legacy artifact turn, and to
+    /// an agent run only with an attachment (ADR 0036).
+    read_offered: bool,
+    /// Whether `web.browse` is offered: part of every agent run's stable
+    /// tool surface while reading or searching is enabled.
+    web_offered: bool,
+    /// URLs from the user's message that `web.browse` may read.
+    web_grant: Vec<String>,
+    /// Whether `memory.manage` is offered: to every agent run.
     memory_offered: bool,
-    /// Whether `memory.remember` and `memory.forget` are offered: from version
-    /// 10, to every agent run (ADR 0031).
-    remember_offered: bool,
-    forget_offered: bool,
-    /// Whether `web.search` is offered: from version 11, to agent runs while a
-    /// search endpoint is configured (ADR 0033).
-    search_offered: bool,
     /// Prelude transitions awaiting the turn's next append, which commits
     /// them with it in one transaction (ADR 0028 Phase B).
     staged: RefCell<Vec<(String, NewEvent)>>,
@@ -282,12 +266,9 @@ impl TurnScope {
 #[derive(Default)]
 pub(crate) struct ToolContracts {
     read: OnceLock<InvocableContract>,
-    fetch: OnceLock<InvocableContract>,
     sort: OnceLock<InvocableContract>,
+    web: OnceLock<InvocableContract>,
     memory: OnceLock<InvocableContract>,
-    remember: OnceLock<InvocableContract>,
-    forget: OnceLock<InvocableContract>,
-    search: OnceLock<InvocableContract>,
 }
 
 fn cached_contract<E>(
@@ -345,16 +326,16 @@ impl DittoKernel {
                 .as_ref()
                 .map(|metadata| metadata.in_flight.clone())
                 .unwrap_or_default(),
-            fetch_offered: agent_run.is_some() && self.inner.web_fetch.is_some(),
-            memory_offered: agent_run.is_some(),
-            remember_offered: agent_run.is_some(),
-            forget_offered: agent_run.is_some(),
-            search_offered: agent_run.is_some() && self.inner.web_search.is_some(),
-            fetch: if agent_run.is_some() && self.inner.web_fetch.is_some() {
-                super::fetch::grant(&text)
+            read_offered: agent_run
+                .as_ref()
+                .is_none_or(|metadata| metadata.sort.is_some()),
+            web_offered: agent_run.is_some() && self.web_access().enabled(),
+            web_grant: if agent_run.is_some() && self.inner.web_fetch.is_some() {
+                super::web::grant(&text)
             } else {
                 Vec::new()
             },
+            memory_offered: agent_run.is_some(),
             staged: RefCell::default(),
             pending_text: RefCell::default(),
         };
@@ -570,214 +551,134 @@ impl DittoKernel {
         Ok(runs.into_iter().map(|(_, run)| run).collect())
     }
 
-    /// Page the permitted capabilities into one sealed execution epoch,
-    /// journal the selection, and derive its authorization ledger.
+    /// Page the turn's tools into one sealed execution epoch, journal the
+    /// selection, and register the leases their calls run under (ADR 0036):
+    /// `artifact.read` for a legacy turn or an attachment, the sort a
+    /// permission grants, and for agent runs `web.browse` and
+    /// `memory.manage` while installed.
     fn select_turn_tools(
         &self,
         run: &mut TurnRun<'_>,
         input_event: &EventRecord,
     ) -> Result<TurnTools, TurnRunError> {
-        let read = cached_contract(&self.inner.tool_contracts.read, || {
-            self.artifact_read_contract(run)
-        })?;
-        // An unavailable or altered web.fetch package withdraws the tool
-        // instead of failing the turn; the epoch is sized after the decision.
-        let fetch = if run.scope.fetch_offered {
-            cached_contract(&self.inner.tool_contracts.fetch, || {
-                self.inner
-                    .capabilities
-                    .page_manifest(ditto_web_fetch::ID)
-                    .ok()
-                    .flatten()
-                    .filter(ditto_web_fetch::validate_manifest)
-                    .and_then(|manifest| {
-                        InvocableContract::new(
-                            &manifest,
-                            &ditto_web_fetch::schema(),
-                            ditto_web_fetch::FetchDeriver::default().revision().clone(),
-                        )
-                        .ok()
-                    })
-                    .ok_or(())
-            })
-            .ok()
+        let read = if run.scope.read_offered {
+            Some(cached_contract(&self.inner.tool_contracts.read, || {
+                self.artifact_read_contract(run)
+            })?)
         } else {
             None
         };
-        if fetch.is_none() {
-            run.scope.fetch_offered = false;
-            run.scope.fetch.clear();
-        }
+        let sort = match &run.scope.sort {
+            Some(grant) => {
+                let root = self
+                    .inner
+                    .events
+                    .get_by_event_id(&grant.source_event_id)
+                    .map_err(KernelError::from)?;
+                if !root
+                    .as_ref()
+                    .is_some_and(|root| grant.matches_root(root, input_event))
+                {
+                    return Err(self.fail_with(
+                        run,
+                        TurnFailureReason::SortPermissionSourceUnavailable,
+                        "sort permission source is unavailable",
+                        None,
+                        None,
+                    ));
+                }
+                let Ok(contract) = cached_contract(&self.inner.tool_contracts.sort, || {
+                    self.inner
+                        .capabilities
+                        .page_manifest(ditto_artifact_sort::ID)
+                        .ok()
+                        .flatten()
+                        .filter(|manifest| ditto_artifact_sort::validate_manifest(manifest).is_ok())
+                        .and_then(|manifest| {
+                            InvocableContract::new(
+                                &manifest,
+                                &ditto_artifact_sort::schema(),
+                                ditto_artifact_sort::SortDeriver::default()
+                                    .revision()
+                                    .clone(),
+                            )
+                            .ok()
+                        })
+                        .ok_or(())
+                }) else {
+                    return Err(self.fail_with(
+                        run,
+                        TurnFailureReason::SortContractUnavailable,
+                        "installed artifact.sort contract is unavailable",
+                        None,
+                        None,
+                    ));
+                };
+                Some(contract)
+            }
+            None => None,
+        };
         // An unavailable or altered package withdraws its tool.
-        let search = self.optional_contract(
-            run.scope.search_offered,
-            &self.inner.tool_contracts.search,
-            ditto_web_fetch::search::ID,
-            ditto_web_fetch::search::validate_manifest,
-            ditto_web_fetch::search::schema,
-            ditto_web_fetch::search::deriver_revision(),
+        let access = self.web_access();
+        let web = self.optional_contract(
+            run.scope.web_offered,
+            &self.inner.tool_contracts.web,
+            ditto_web_fetch::ID,
+            ditto_web_fetch::validate_manifest,
+            || access.schema(),
+            ditto_web_fetch::deriver_revision(),
         );
-        run.scope.search_offered = search.is_some();
+        run.scope.web_offered = web.is_some();
+        if web.is_none() {
+            run.scope.web_grant.clear();
+        }
         let memory = self.optional_contract(
             run.scope.memory_offered,
             &self.inner.tool_contracts.memory,
-            super::recall::ID,
-            super::recall::validate_manifest,
-            super::recall::schema,
-            super::recall::RecallDeriver::default().revision().clone(),
+            super::memory::ID,
+            super::memory::validate_manifest,
+            super::memory::schema,
+            super::memory::deriver_revision(),
         );
         run.scope.memory_offered = memory.is_some();
-        let remember = self.optional_contract(
-            run.scope.remember_offered,
-            &self.inner.tool_contracts.remember,
-            super::memory_write::REMEMBER_ID,
-            super::memory_write::validate_manifest,
-            || super::memory_write::schema(super::memory_write::REMEMBER_ID),
-            super::memory_write::MemoryWriteDeriver::for_capability(
-                super::memory_write::REMEMBER_ID,
-            )
-            .revision()
-            .clone(),
-        );
-        run.scope.remember_offered = remember.is_some();
-        let forget = self.optional_contract(
-            run.scope.forget_offered,
-            &self.inner.tool_contracts.forget,
-            super::memory_write::FORGET_ID,
-            super::memory_write::validate_manifest,
-            || super::memory_write::schema(super::memory_write::FORGET_ID),
-            super::memory_write::MemoryWriteDeriver::for_capability(super::memory_write::FORGET_ID)
-                .revision()
-                .clone(),
-        );
-        run.scope.forget_offered = forget.is_some();
-        let mut live_epoch = LiveExecutionEpoch::new(
-            1 + usize::from(run.scope.sort.is_some())
-                + usize::from(fetch.is_some())
-                + usize::from(search.is_some())
-                + usize::from(memory.is_some())
-                + usize::from(remember.is_some())
-                + usize::from(forget.is_some()),
-        );
-        let paged = live_epoch.page_in_contract(read).map_err(|error| {
-            self.fail_with(
-                run,
-                TurnFailureReason::ArtifactReadSelectionFailed,
-                error.to_string(),
-                None,
-                None,
-            )
-        })?;
-        if paged != 1
-            || live_epoch.evidence().capabilities().len() != 1
-            || live_epoch.evidence().capabilities()[0].id != ARTIFACT_READ_ID
-        {
-            return Err(self.fail_with(
-                run,
-                TurnFailureReason::ArtifactReadSelectionFailed,
-                "artifact.read could not be selected as the sole execution capability",
-                None,
-                None,
-            ));
-        }
-        let sort = if let Some(grant) = &run.scope.sort {
-            let root = self
-                .inner
-                .events
-                .get_by_event_id(&grant.source_event_id)
-                .map_err(KernelError::from)?;
-            if !root
-                .as_ref()
-                .is_some_and(|root| grant.matches_root(root, input_event))
-            {
-                return Err(self.fail_with(
+        let contracts = [read, sort, web, memory]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut live_epoch = LiveExecutionEpoch::new(contracts.len());
+        for contract in &contracts {
+            live_epoch.page_in_contract(contract).map_err(|error| {
+                self.fail_with(
                     run,
-                    TurnFailureReason::SortPermissionSourceUnavailable,
-                    "sort permission source is unavailable",
+                    TurnFailureReason::ToolSelectionFailed,
+                    error.to_string(),
                     None,
                     None,
-                ));
-            }
-            let Ok(contract) = cached_contract(&self.inner.tool_contracts.sort, || {
-                self.inner
-                    .capabilities
-                    .page_manifest(ditto_artifact_sort::ID)
-                    .ok()
-                    .flatten()
-                    .filter(|manifest| ditto_artifact_sort::validate_manifest(manifest).is_ok())
-                    .and_then(|manifest| {
-                        InvocableContract::new(
-                            &manifest,
-                            &ditto_artifact_sort::schema(),
-                            ditto_artifact_sort::SortDeriver::default()
-                                .revision()
-                                .clone(),
-                        )
-                        .ok()
-                    })
-                    .ok_or(())
-            }) else {
-                return Err(self.fail_with(
-                    run,
-                    TurnFailureReason::SortContractUnavailable,
-                    "installed artifact.sort contract is unavailable",
-                    None,
-                    None,
-                ));
-            };
-            live_epoch.page_in_contract(contract).map_err(|_| {
-                TurnRunError::Internal("sort capability could not enter the live epoch")
-            })?;
-            Some(contract)
-        } else {
-            None
-        };
-        if let Some(contract) = fetch {
-            live_epoch.page_in_contract(contract).map_err(|_| {
-                TurnRunError::Internal("fetch capability could not enter the live epoch")
-            })?;
-        }
-        if let Some(contract) = search {
-            live_epoch.page_in_contract(contract).map_err(|_| {
-                TurnRunError::Internal("search capability could not enter the live epoch")
-            })?;
-        }
-        for contract in [memory, remember, forget].into_iter().flatten() {
-            live_epoch.page_in_contract(contract).map_err(|_| {
-                TurnRunError::Internal("memory tool could not enter the live epoch")
+                )
             })?;
         }
         let authorization_ticket = live_epoch.seal_for_authorization().map_err(|error| {
             self.fail_with(
                 run,
-                TurnFailureReason::ArtifactReadSelectionFailed,
+                TurnFailureReason::ToolSelectionFailed,
                 error.to_string(),
                 None,
                 None,
             )
         })?;
-        let binding =
-            live_epoch
-                .invocable_binding(ARTIFACT_READ_ID)
-                .ok_or(TurnRunError::Internal(
-                    "artifact.read live epoch issued no invocation binding",
-                ))?;
         let execution_epoch_id = ExecutionEpochId::new(live_epoch.id()).map_err(|error| {
             self.fail_with(
                 run,
-                TurnFailureReason::ArtifactReadSelectionFailed,
+                TurnFailureReason::ToolSelectionFailed,
                 error.to_string(),
                 None,
                 None,
             )
         })?;
-        let mut schemas = vec![binding.schema().clone()];
-        schemas.extend(sort.map(|contract| contract.schema().clone()));
-        schemas.extend(fetch.map(|contract| contract.schema().clone()));
-        schemas.extend(search.map(|contract| contract.schema().clone()));
-        schemas.extend(memory.map(|contract| contract.schema().clone()));
-        schemas.extend(remember.map(|contract| contract.schema().clone()));
-        schemas.extend(forget.map(|contract| contract.schema().clone()));
+        let schemas = contracts
+            .iter()
+            .map(|contract| contract.schema().clone())
+            .collect();
         // Each contract equals its package, so its digests identify it.
         self.stage_turn_event(
             run,
@@ -794,96 +695,73 @@ impl DittoKernel {
 
         let authorizer = InvocationAuthorizer::from_ticket(authorization_ticket, run.deadline)
             .map_err(|_| TurnRunError::Internal("live epoch authorization setup failed"))?;
+        let mut leases = Vec::new();
         if let Some(grant) = &run.scope.sort {
-            authorizer
-                .register_lease(
-                    ditto_policy::CapabilityLease::new(
-                        "agent-sort",
-                        run.deadline,
-                        ditto_artifact_sort::effect(),
-                        1,
-                        BTreeSet::from([ditto_artifact_sort::ID.into()]),
-                        vec![ditto_policy::ResourceScope::Exact(
-                            ditto_capability::CanonicalResource::artifact(&grant.reference)
-                                .map_err(|_| TurnRunError::Internal("invalid sort grant"))?,
-                        )],
-                        ditto_policy::ApprovalRequirement::Never,
-                    )
-                    .map_err(|_| TurnRunError::Internal("invalid sort lease"))?,
-                )
-                .map_err(|_| TurnRunError::Internal("sort lease registration failed"))?;
+            leases.push((
+                "agent-sort",
+                ditto_artifact_sort::effect(),
+                1,
+                ditto_artifact_sort::ID,
+                vec![
+                    ditto_capability::CanonicalResource::artifact(&grant.reference)
+                        .map_err(|_| TurnRunError::Internal("invalid sort grant"))?,
+                ],
+            ));
         }
-        if !run.scope.fetch.is_empty() {
-            let resources = run
-                .scope
-                .fetch
-                .iter()
-                .map(|url| {
-                    ditto_capability::CanonicalResource::url(url.clone())
-                        .map(ditto_policy::ResourceScope::Exact)
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| TurnRunError::Internal("invalid fetch grant"))?;
-            authorizer
-                .register_lease(
-                    ditto_policy::CapabilityLease::new(
-                        "agent-fetch",
-                        run.deadline,
-                        ditto_web_fetch::effect(),
-                        super::fetch::call_budget(&run.scope.fetch),
-                        BTreeSet::from([ditto_web_fetch::ID.into()]),
-                        resources,
-                        ditto_policy::ApprovalRequirement::Never,
-                    )
-                    .map_err(|_| TurnRunError::Internal("invalid fetch lease"))?,
-                )
-                .map_err(|_| TurnRunError::Internal("fetch lease registration failed"))?;
+        if run.scope.web_offered && !run.scope.web_grant.is_empty() {
+            leases.push((
+                super::web::READ_LEASE,
+                ditto_web_fetch::effect(),
+                super::web::read_budget(&run.scope.web_grant),
+                ditto_web_fetch::ID,
+                run.scope
+                    .web_grant
+                    .iter()
+                    .map(|url| ditto_capability::CanonicalResource::url(url.clone()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| TurnRunError::Internal("invalid web grant"))?,
+            ));
         }
-        if search.is_some() {
-            let endpoint = self
-                .inner
-                .web_search
-                .as_ref()
-                .ok_or(TurnRunError::Internal("web search is not configured"))?;
-            authorizer
-                .register_lease(
-                    ditto_policy::CapabilityLease::new(
-                        super::search::LEASE_ID,
-                        run.deadline,
-                        ditto_web_fetch::search::effect(),
-                        ditto_web_fetch::search::MAX_SEARCHES,
-                        BTreeSet::from([ditto_web_fetch::search::ID.into()]),
-                        vec![ditto_policy::ResourceScope::Exact(
-                            endpoint
-                                .resource()
-                                .map_err(|_| TurnRunError::Internal("invalid search endpoint"))?,
-                        )],
-                        ditto_policy::ApprovalRequirement::Never,
-                    )
-                    .map_err(|_| TurnRunError::Internal("invalid search lease"))?,
-                )
-                .map_err(|_| TurnRunError::Internal("search lease registration failed"))?;
+        if let (true, Some(endpoint)) = (run.scope.web_offered, &access.search) {
+            leases.push((
+                super::web::SEARCH_LEASE,
+                ditto_web_fetch::effect(),
+                ditto_web_fetch::search::MAX_SEARCHES,
+                ditto_web_fetch::ID,
+                vec![
+                    endpoint
+                        .resource()
+                        .map_err(|_| TurnRunError::Internal("invalid search endpoint"))?,
+                ],
+            ));
         }
-        let writers = [remember, forget]
-            .into_iter()
-            .flatten()
-            .map(|contract| contract.manifest().id.clone())
-            .collect::<BTreeSet<_>>();
-        if !writers.is_empty() {
+        if run.scope.memory_offered {
+            leases.push((
+                super::memory::LEASE_ID,
+                super::memory::write_effect(),
+                super::memory::MAX_MEMORY_WRITES,
+                super::memory::ID,
+                Vec::new(),
+            ));
+        }
+        for (id, effect, calls, capability, resources) in leases {
             authorizer
                 .register_lease(
                     ditto_policy::CapabilityLease::new(
-                        super::memory_write::LEASE_ID,
+                        id,
                         run.deadline,
-                        super::memory_write::effect(),
-                        super::memory_write::MAX_MEMORY_WRITES,
-                        writers,
-                        Vec::new(),
+                        effect,
+                        calls,
+                        BTreeSet::from([capability.into()]),
+                        resources
+                            .into_iter()
+                            .map(ditto_policy::ResourceScope::Exact)
+                            .collect(),
                         ditto_policy::ApprovalRequirement::Never,
                     )
-                    .map_err(|_| TurnRunError::Internal("invalid memory lease"))?,
+                    .map_err(|_| TurnRunError::Internal("invalid tool lease"))?,
                 )
-                .map_err(|_| TurnRunError::Internal("memory lease registration failed"))?;
+                .map_err(|_| TurnRunError::Internal("tool lease registration failed"))?;
         }
 
         Ok(TurnTools {
@@ -982,7 +860,7 @@ impl DittoKernel {
         .map_err(|error| {
             self.fail_with(
                 run,
-                TurnFailureReason::ArtifactReadSelectionFailed,
+                TurnFailureReason::ToolSelectionFailed,
                 error.to_string(),
                 None,
                 None,
@@ -1480,100 +1358,59 @@ impl DittoKernel {
         )?;
         // Web pages and file contents may carry instructions: from the first
         // such call on, memory writes are refused (ADR 0031).
-        if call.capability_id == ditto_web_fetch::ID
-            || call.capability_id == ditto_web_fetch::search::ID
-            || call.capability_id == ditto_artifact_sort::ID
-            || call.capability_id == ARTIFACT_READ_ID
-        {
+        if call.capability_id != super::memory::ID {
             run.read_external_content = true;
         }
+        let at = request_index as u8;
+        let binding = tools
+            .live_epoch
+            .invocable_binding(&call.capability_id)
+            .ok_or(TurnRunError::Internal("selected tool has no binding"));
         let (value, is_error) = if call.capability_id == ditto_web_fetch::ID {
-            let binding = tools
-                .live_epoch
-                .invocable_binding(ditto_web_fetch::ID)
-                .ok_or(TurnRunError::Internal("missing fetch binding"))?;
             let result = self
-                .run_fetch_tool(
+                .run_web_call(
                     &mut run.scope,
                     &mut run.cause,
-                    request_index as u8,
+                    at,
                     &call,
-                    binding,
+                    binding?,
                     &tools.authorizer,
                     run.cancellation.clone(),
                     run.deadline,
                 )
                 .await?;
             (result.model_value(), result.is_error())
-        } else if call.capability_id == ditto_web_fetch::search::ID {
-            let binding = tools
-                .live_epoch
-                .invocable_binding(ditto_web_fetch::search::ID)
-                .ok_or(TurnRunError::Internal("missing search binding"))?;
-            let result = self
-                .run_search_tool(
-                    &mut run.scope,
-                    &mut run.cause,
-                    request_index as u8,
-                    &call,
-                    binding,
-                    &tools.authorizer,
-                    run.cancellation.clone(),
-                    run.deadline,
-                )
-                .await?;
-            (result.model_value(), result.is_error())
-        } else if call.capability_id == super::recall::ID {
-            let binding = tools
-                .live_epoch
-                .invocable_binding(super::recall::ID)
-                .ok_or(TurnRunError::Internal("missing memory search binding"))?;
+        } else if call.capability_id == super::memory::ID {
             let space = run
                 .recall_space
                 .get_or_insert_with(|| match &run.recall_source {
                     Some((compiled, snapshot)) => super::recall_space(compiled, snapshot.iter()),
                     None => Vec::new(),
                 });
-            let result = self.run_recall_tool(
-                &run.scope,
-                &mut run.cause,
-                request_index as u8,
-                &call,
-                binding,
-                &tools.authorizer,
-                space,
-            )?;
-            (result.model_value(), result.is_error())
-        } else if call.capability_id == super::memory_write::REMEMBER_ID
-            || call.capability_id == super::memory_write::FORGET_ID
-        {
-            let binding = tools
-                .live_epoch
-                .invocable_binding(&call.capability_id)
-                .ok_or(TurnRunError::Internal("missing memory write binding"))?;
-            let result = self.run_memory_write(
-                &run.scope,
-                &mut run.cause,
-                request_index as u8,
-                &call,
-                binding,
-                &tools.authorizer,
-                run.read_external_content,
-                &mut run.memory_writes,
-            )?;
-            (result.model_value(), result.is_error())
-        } else if call.capability_id == ditto_artifact_sort::ID {
-            let binding = tools
-                .live_epoch
-                .invocable_binding(ditto_artifact_sort::ID)
-                .ok_or(TurnRunError::Internal("missing sort binding"))?;
             let result = self
-                .run_sort_tool(
+                .run_memory_call(
                     &mut run.scope,
                     &mut run.cause,
-                    request_index as u8,
+                    at,
                     &call,
-                    binding,
+                    binding?,
+                    &tools.authorizer,
+                    space,
+                    run.read_external_content,
+                    &mut run.memory_writes,
+                    run.cancellation.clone(),
+                    run.deadline,
+                )
+                .await?;
+            (result.model_value(), result.is_error())
+        } else if call.capability_id == ditto_artifact_sort::ID {
+            let result = self
+                .run_sort_call(
+                    &mut run.scope,
+                    &mut run.cause,
+                    at,
+                    &call,
+                    binding?,
                     &tools.authorizer,
                     run.cancellation.clone(),
                     run.deadline,
@@ -1872,13 +1709,10 @@ impl DittoKernel {
         call_id: &ProviderCallId,
         capability_id: &str,
     ) -> Result<(), TurnRunError> {
-        if capability_id == ARTIFACT_READ_ID
+        if (run.scope.read_offered && capability_id == ARTIFACT_READ_ID)
             || (run.scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
-            || (run.scope.fetch_offered && capability_id == ditto_web_fetch::ID)
-            || (run.scope.search_offered && capability_id == ditto_web_fetch::search::ID)
-            || (run.scope.memory_offered && capability_id == super::recall::ID)
-            || (run.scope.remember_offered && capability_id == super::memory_write::REMEMBER_ID)
-            || (run.scope.forget_offered && capability_id == super::memory_write::FORGET_ID)
+            || (run.scope.web_offered && capability_id == ditto_web_fetch::ID)
+            || (run.scope.memory_offered && capability_id == super::memory::ID)
         {
             return Ok(());
         }

@@ -38,7 +38,7 @@ class AccountingTests(unittest.TestCase):
         result = baseline.accounting([
             {"kind": "model.requested"}, {"kind": "model.output"},
             {"kind": "capability.requested"}, {"kind": "execution.started"},
-            {"kind": "agent.sort.started"}, {"kind": "sort.started"},
+            {"kind": "tool.started"}, {"kind": "sort.started"},
         ])
         self.assertEqual(result["tool_executions"], 3)
         self.assertEqual(result["model_requests"], 1)

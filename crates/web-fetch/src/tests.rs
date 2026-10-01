@@ -59,13 +59,18 @@ fn urls_are_canonical_and_taken_only_from_the_message() {
 }
 
 #[test]
-fn invocations_normalize_urls_into_exact_network_resources() {
+fn invocations_normalize_into_exact_network_resources() {
     assert!(validate_manifest(&manifest()));
-    schema().validate().unwrap();
-    let deriver = FetchDeriver::default();
+    let endpoint = search::SearchEndpoint::new("http://127.0.0.1:8888").unwrap();
+    let access = WebAccess {
+        read: Some(FetchPolicy::public_only()),
+        search: Some(endpoint.clone()),
+    };
+    access.schema().validate().unwrap();
+    let deriver = access.deriver();
     let mut epoch = LiveExecutionEpoch::new(1);
     epoch
-        .page_in_invocable(&manifest(), &schema(), deriver.revision().clone())
+        .page_in_invocable(&manifest(), &access.schema(), deriver.revision().clone())
         .unwrap();
     let binding = epoch.invocable_binding(ID).unwrap();
     let compile = |arguments| {
@@ -85,14 +90,42 @@ fn invocations_normalize_urls_into_exact_network_resources() {
         &BTreeSet::from([CanonicalResource::url("https://example.com/Page").unwrap()])
     );
     assert_eq!(invocation.effect(), effect());
+    // A search is authorized for the endpoint, whatever the query.
+    let invocation = compile(json!({"query": "  rust news "})).unwrap();
+    assert_eq!(
+        invocation.normalized_arguments(),
+        &json!({"query": "rust news"})
+    );
+    assert_eq!(
+        invocation.resources(),
+        &BTreeSet::from([endpoint.resource().unwrap()])
+    );
     for invalid in [
         json!({"url": "file:///etc/passwd"}),
         json!({"url": "https://a:b@example.com/"}),
         json!({"url": "https://example.com/", "method": "POST"}),
+        json!({"url": "https://example.com/", "query": "both"}),
+        json!({"query": "   "}),
         json!({}),
     ] {
         assert!(compile(invalid.clone()).is_err(), "{invalid}");
     }
+    // A deployment offers only what it enables.
+    let read_only = WebAccess {
+        read: Some(FetchPolicy::public_only()),
+        search: None,
+    };
+    assert_eq!(read_only.schema().input_schema["required"], json!(["url"]));
+    assert!(
+        read_only.schema().input_schema["properties"]
+            .get("query")
+            .is_none()
+    );
+    assert_eq!(
+        WebRequest::from_arguments(&json!({"query": "x"}), true, false),
+        None
+    );
+    assert!(!WebAccess::default().enabled());
     assert!(CanonicalResource::url("https://example.com/#frag").is_err());
     assert!(CanonicalResource::url("ftp://example.com/").is_err());
     assert_eq!(
@@ -182,7 +215,7 @@ async fn serve() -> String {
     base
 }
 
-async fn local(url: &str) -> Result<FetchedPage, FetchError> {
+async fn local(url: &str) -> Result<FetchedPage, WebError> {
     fetch(
         url,
         FetchPolicy::allow_private_addresses(),
@@ -211,15 +244,15 @@ async fn pages_are_fetched_as_bounded_readable_text() {
     }
     assert_eq!(
         local(&format!("{base}/loop")).await,
-        Err(FetchError::TooManyRedirects)
+        Err(WebError::TooManyRedirects)
     );
     assert_eq!(
         local(&format!("{base}/missing")).await,
-        Err(FetchError::HttpStatus { status: 404 })
+        Err(WebError::HttpStatus { status: 404 })
     );
     assert_eq!(
         local(&format!("{base}/image")).await,
-        Err(FetchError::UnsupportedContentType)
+        Err(WebError::UnsupportedContentType)
     );
     assert_eq!(
         local(&format!("{base}/json")).await.unwrap().text,
@@ -236,7 +269,7 @@ async fn pages_are_fetched_as_bounded_readable_text() {
         Duration::from_millis(200),
     )
     .await;
-    assert_eq!(slow, Err(FetchError::Timeout));
+    assert_eq!(slow, Err(WebError::Timeout));
     let cancellation = CancellationToken::new();
     cancellation.cancel();
     assert_eq!(
@@ -247,7 +280,7 @@ async fn pages_are_fetched_as_bounded_readable_text() {
             Duration::from_secs(10)
         )
         .await,
-        Err(FetchError::Cancelled)
+        Err(WebError::Cancelled)
     );
 }
 
@@ -272,7 +305,7 @@ async fn the_production_policy_never_connects_to_private_addresses() {
             Duration::from_secs(5),
         )
         .await;
-        assert_eq!(result, Err(FetchError::BlockedAddress), "{url}");
+        assert_eq!(result, Err(WebError::BlockedAddress), "{url}");
     }
     assert_eq!(
         fetch(
@@ -282,7 +315,7 @@ async fn the_production_policy_never_connects_to_private_addresses() {
             Duration::from_secs(5)
         )
         .await,
-        Err(FetchError::InvalidUrl)
+        Err(WebError::InvalidUrl)
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!reached.is_finished());

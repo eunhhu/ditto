@@ -6,7 +6,9 @@ trusted user ingress), [ADR 0026](0026-assistant-instructions-and-local-time.md)
 (the second and third instruction segments) and
 [ADR 0029](0029-memory-search-tool.md) (the search space). Amended by
 [ADR 0033](0033-autonomous-web-search.md): a `web.search` call also refuses
-later memory writes in the turn.
+later memory writes in the turn. Amended by
+[ADR 0036](0036-two-agent-tools-one-lifecycle.md): remembering and forgetting
+are the `remember` and `forget` actions of `memory.manage`.
 
 ## Context
 

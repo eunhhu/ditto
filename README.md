@@ -70,6 +70,9 @@ The executable foundation includes:
   every fetch journaled;
 - web search on its own through a configured SearXNG-compatible service, at
   most three queries per answer, results journaled and replayable;
+- two tools for the model in an ordinary run, `memory.manage` (search,
+  remember, forget) and `web.browse` (read a linked page, search the web),
+  on one journaled tool lifecycle;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;
 - model-directed sorting of one explicitly attached file, with separate permission

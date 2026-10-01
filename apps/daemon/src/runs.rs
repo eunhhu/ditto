@@ -189,15 +189,16 @@ pub(crate) mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Answers after one tool call: the permitted sort when the run has an
+    /// attachment, a memory search otherwise; `block` never answers.
     pub(crate) struct HttpDriver {
         descriptor: DriverDescriptor,
         calls: AtomicUsize,
-        reference: String,
         block: bool,
     }
 
     impl HttpDriver {
-        pub(crate) fn new(reference: String, block: bool) -> Self {
+        pub(crate) fn new(block: bool) -> Self {
             Self {
                 descriptor: DriverDescriptor {
                     id: DriverId::new("http-test").unwrap(),
@@ -211,7 +212,6 @@ pub(crate) mod tests {
                         .collect(),
                 },
                 calls: AtomicUsize::new(0),
-                reference,
                 block,
             }
         }
@@ -223,7 +223,6 @@ pub(crate) mod tests {
         }
         fn stream(&self, request: ModelRequest, _: CancellationToken) -> ModelEventStream {
             let index = self.calls.fetch_add(1, Ordering::SeqCst);
-            let reference = self.reference.clone();
             let grant = request.turn.conversation.iter().find_map(|item| {
                 let ditto_model::ConversationItem::Message { content, .. } = item else {
                     return None;
@@ -245,7 +244,7 @@ pub(crate) mod tests {
                     let id = ProviderCallId::new("http-read").unwrap();
                     let (capability,arguments) = match grant {
                         Some((reference,unique)) => ("artifact.sort",json!({"reference":reference,"unique":unique})),
-                        None => ("artifact.read",json!({"reference":reference,"offset":0,"length":32})),
+                        None => ("memory.manage",json!({"action":"search","query":"evidence"})),
                     };
                     yield ModelEvent::ToolCallStarted { call_id: id.clone(), capability_id: capability.into() };
                     yield ModelEvent::ToolCallArgumentDelta { call_id: id.clone(), delta: arguments.to_string() };
@@ -311,19 +310,7 @@ pub(crate) mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
         );
         let kernel = DittoKernel::open(config).unwrap();
-        let reference = kernel
-            .store_artifact(
-                b"CLI evidence",
-                ditto_kernel::ArtifactWriteContext {
-                    session_id: Some("personal".into()),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .metadata
-            .reference
-            .to_string();
-        let driver = Arc::new(HttpDriver::new(reference, false));
+        let driver = Arc::new(HttpDriver::new(false));
         let (api, server_task) = server(kernel.clone(), Some(driver.clone())).await;
         let id = "01K00000000000000000000003";
         let output = built_cli(&api, vec!["run", "read evidence", "--request-id", id]).await;
@@ -356,11 +343,8 @@ pub(crate) mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
         ))
         .unwrap();
-        let (api, server_task) = server(
-            kernel.clone(),
-            Some(Arc::new(HttpDriver::new(String::new(), true))),
-        )
-        .await;
+        let (api, server_task) =
+            server(kernel.clone(), Some(Arc::new(HttpDriver::new(true)))).await;
         let detached = built_cli(&api, vec!["run", "wait", "--request-id", id, "--detach"]).await;
         assert!(detached.status.success());
         assert_eq!(
@@ -389,34 +373,30 @@ pub(crate) mod tests {
 
     /// A canned OpenAI-compatible server: the first request answers with one
     /// streamed tool call, the second with final text. Bodies are captured.
-    async fn compatible_server(
-        reference: String,
-    ) -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+    async fn compatible_server() -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = Arc::clone(&captured);
         let app = Router::new().route(
             "/v1/chat/completions",
             post(move |Json(body): Json<serde_json::Value>| {
                 let log = Arc::clone(&log);
-                let reference = reference.clone();
                 async move {
                     let count = {
                         let mut log = log.lock().unwrap();
                         log.push(body);
                         log.len()
                     };
-                    let arguments =
-                        json!({"reference": reference, "offset": 0, "length": 32}).to_string();
+                    let arguments = json!({"action": "search", "query": "local model"}).to_string();
                     let (first, second) = arguments.split_at(arguments.len() / 2);
                     let chunks = if count == 1 {
                         vec![
-                            json!({"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "artifact_read", "arguments": first}}]}}]}),
+                            json!({"choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "memory_manage", "arguments": first}}]}}]}),
                             json!({"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": second}}]}}]}),
                             json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
                         ]
                     } else {
                         vec![
-                            json!({"choices": [{"index": 0, "delta": {"content": "The file says "}}]}),
+                            json!({"choices": [{"index": 0, "delta": {"content": "Your memory says "}}]}),
                             json!({"choices": [{"index": 0, "delta": {"content": "hello."}, "finish_reason": "stop"}]}),
                         ]
                     };
@@ -443,20 +423,21 @@ pub(crate) mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
         ))
         .unwrap();
-        let reference = kernel
-            .store_artifact(
-                b"hello from a local model",
-                ditto_kernel::ArtifactWriteContext {
-                    session_id: Some("personal".into()),
-                    mime: Some("text/plain".into()),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .metadata
-            .reference
-            .to_string();
-        let (base, captured) = compatible_server(reference.clone()).await;
+        let input = kernel
+            .record_user_input(ditto_protocol::SubmitInputCommand {
+                text: "hello from a local model".into(),
+                session_id: Some("personal".into()),
+                task_id: None,
+            })
+            .unwrap();
+        kernel
+            .remember_input(ditto_protocol::RememberInputCommand {
+                session_id: "personal".into(),
+                input_event_id: input.event_id,
+                replaces: None,
+            })
+            .unwrap();
+        let (base, captured) = compatible_server().await;
         let driver = configured_driver(
             &model(Provider::OpenaiCompatible, Some("local-mock"), Some(&base)),
             "127.0.0.1:0".parse().unwrap(),
@@ -466,7 +447,7 @@ pub(crate) mod tests {
         let command = StartAgentRunCommand {
             request_id: "01K5Z9X3Y4W5V6T7S8R9Q0P1N2".into(),
             session_id: "personal".into(),
-            text: "What does the stored file say?".into(),
+            text: "What does my memory say?".into(),
             sort: None,
         };
         let query = AgentRunQuery {
@@ -487,23 +468,34 @@ pub(crate) mod tests {
         .await
         .unwrap();
         assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
-        assert_eq!(status.response.as_deref(), Some("The file says hello."));
+        assert_eq!(status.response.as_deref(), Some("Your memory says hello."));
 
         let captured = captured.lock().unwrap().clone();
         assert_eq!(captured.len(), 2);
         assert_eq!(captured[0]["model"], "local-mock");
-        assert_eq!(captured[0]["tools"][0]["function"]["name"], "artifact_read");
+        let tools = captured[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(tools, ["web_browse", "memory_manage"]);
         assert_eq!(captured[0]["tool_choice"], "auto");
         assert_eq!(captured[0]["parallel_tool_calls"], false);
         let continuation = captured[1]["messages"].as_array().unwrap();
         let call = &continuation[continuation.len() - 2];
         assert_eq!(call["role"], "assistant");
         assert_eq!(call["tool_calls"][0]["id"], "call_1");
-        assert_eq!(call["tool_calls"][0]["function"]["name"], "artifact_read");
+        assert_eq!(call["tool_calls"][0]["function"]["name"], "memory_manage");
         let result = &continuation[continuation.len() - 1];
         assert_eq!(result["role"], "tool");
         assert_eq!(result["tool_call_id"], "call_1");
-        assert!(result["content"].as_str().unwrap().contains(&reference));
+        assert!(
+            result["content"]
+                .as_str()
+                .unwrap()
+                .contains("hello from a local model")
+        );
 
         kernel.shutdown_agent_runs().await.unwrap();
         let events = kernel
@@ -597,19 +589,7 @@ pub(crate) mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
         );
         let kernel = DittoKernel::open(config.clone()).unwrap();
-        let reference = kernel
-            .store_artifact(
-                b"HTTP evidence",
-                ditto_kernel::ArtifactWriteContext {
-                    session_id: Some("personal".into()),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .metadata
-            .reference
-            .to_string();
-        let driver = Arc::new(HttpDriver::new(reference, false));
+        let driver = Arc::new(HttpDriver::new(false));
         let (api, task) = server(kernel.clone(), Some(driver.clone())).await;
         let client = reqwest::Client::new();
         let command = json!({"request_id":"01K00000000000000000000001","session_id":"personal","text":"read evidence"});
@@ -770,7 +750,7 @@ pub(crate) mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
         ))
         .unwrap();
-        let driver = Arc::new(HttpDriver::new(String::new(), true));
+        let driver = Arc::new(HttpDriver::new(true));
         let (api, task) = server(kernel.clone(), Some(driver)).await;
         let client = reqwest::Client::new();
         let mut command = json!({"request_id":"invalid","session_id":"personal","text":"hello"});
@@ -831,7 +811,7 @@ pub(crate) mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
         );
         let kernel = DittoKernel::open(config.clone()).unwrap();
-        let driver = Arc::new(HttpDriver::new(String::new(), false));
+        let driver = Arc::new(HttpDriver::new(false));
         let (api, server_task) = server(kernel.clone(), Some(driver.clone())).await;
         let file = root.path().join("input.txt");
         std::fs::write(&file, b"b\na\nb").unwrap();
@@ -917,7 +897,7 @@ pub(crate) mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
         ))
         .unwrap();
-        let driver = Arc::new(HttpDriver::new(String::new(), false));
+        let driver = Arc::new(HttpDriver::new(false));
         let (api, server_task) = server(kernel.clone(), Some(driver.clone())).await;
         let client = reqwest::Client::new();
         let command = json!({"request_id":"01K00000000000000000000011","session_id":"personal","text":"sort", "sort":{"text":"b\na","allow_deduplicate":false}});

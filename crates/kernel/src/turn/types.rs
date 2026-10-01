@@ -16,7 +16,7 @@ use crate::KernelError;
 /// recorded under an earlier contract stay in the journal, and their answers
 /// stay readable in run status and conversation history, but replay rejects
 /// them.
-pub const TURN_PAYLOAD_VERSION: u16 = 12;
+pub const TURN_PAYLOAD_VERSION: u16 = 13;
 /// Oldest contract whose terminal events run status still reads: their
 /// shape has not changed.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -47,24 +47,16 @@ pub struct ContextCompiledPayload {
 pub struct CapabilitiesSelectedPayload {
     pub event_version: u16,
     pub turn_id: String,
-    pub manifest: CapabilityManifest,
+    /// `artifact.read`: a legacy artifact turn's, or an attachment's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<CapabilityManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_manifest: Option<CapabilityManifest>,
-    /// Version 5: `web.fetch`, paged when the user's message holds URLs.
+    /// `web.browse` and `memory.manage`, offered to agent runs (ADR 0036).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetch_manifest: Option<CapabilityManifest>,
-    /// Version 8: `memory.search`, offered to every agent run.
+    pub web_manifest: Option<CapabilityManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_manifest: Option<CapabilityManifest>,
-    /// Version 10: `memory.remember` and `memory.forget`, only ever rebuilt
-    /// from a reference.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remember_manifest: Option<CapabilityManifest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forget_manifest: Option<CapabilityManifest>,
-    /// Version 11: `web.search`, only ever rebuilt from a reference.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub search_manifest: Option<CapabilityManifest>,
     pub epoch: ExecutionEpochEvidence,
 }
 
@@ -234,7 +226,7 @@ pub enum TurnFailureReason {
     ArtifactReadPackageUnverified,
     ArtifactReadManifestMismatch,
     ArtifactReadSchemaMismatch,
-    ArtifactReadSelectionFailed,
+    ToolSelectionFailed,
     SortPermissionSourceUnavailable,
     SortContractUnavailable,
     DriverFeaturesUnsupported,
@@ -260,7 +252,7 @@ impl TurnFailureReason {
             Self::ArtifactReadPackageUnverified
             | Self::ArtifactReadManifestMismatch
             | Self::ArtifactReadSchemaMismatch
-            | Self::ArtifactReadSelectionFailed
+            | Self::ToolSelectionFailed
             | Self::SortPermissionSourceUnavailable
             | Self::SortContractUnavailable => TurnFailureCode::CapabilityContract,
             Self::DriverFeaturesUnsupported
@@ -327,16 +319,10 @@ pub struct ReplayedReadOnlyTurn {
     pub requests: Vec<ModelRequestedPayload>,
     pub outputs: Vec<ModelOutputPayload>,
     pub calls: Vec<ReplayedArtifactReadCall>,
+    /// The calls of `web.browse`, `memory.manage` and `artifact.sort`, in
+    /// order (ADR 0036).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sort_calls: Vec<super::sort::ReplayedSortCall>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fetch_calls: Vec<super::fetch::ReplayedFetchCall>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub recall_calls: Vec<super::recall::ReplayedRecallCall>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub memory_writes: Vec<super::memory_write::ReplayedMemoryWrite>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub search_calls: Vec<super::search::ReplayedSearchCall>,
+    pub tool_calls: Vec<super::tool::ReplayedToolCall>,
     pub terminal: ArtifactReadTurnReplay,
     pub sequence_span: TurnSequenceSpan,
 }

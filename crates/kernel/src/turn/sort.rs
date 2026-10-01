@@ -1,8 +1,8 @@
-//! The additional closed tool profile used only by explicitly permitted runs.
-use chrono::{DateTime, Utc};
+//! `artifact.sort` inside a turn (ADR 0018): the closed tool profile only an
+//! explicitly permitted run offers, on the shared tool lifecycle (ADR 0036).
 use ditto_artifact_sort::{self as worker, SortArguments};
 use ditto_capability::CanonicalResource;
-use ditto_model::{ContentPart, ConversationItem, MessageRole, ProviderCallId};
+use ditto_model::{ContentPart, ConversationItem, MessageRole};
 use ditto_protocol::{AgentSortPermission, EventActor, EventRecord, event_kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -80,33 +80,6 @@ pub(super) fn initial_conversation(
     }]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SortToolRequested {
-    pub event_version: u16,
-    pub turn_id: String,
-    pub request_index: u8,
-    pub call_id: ProviderCallId,
-    pub arguments: Value,
-    pub normalized: Option<SortArguments>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SortToolStarted {
-    pub event_version: u16,
-    pub turn_id: String,
-    pub request_index: u8,
-    pub call_id: ProviderCallId,
-    pub epoch_id: String,
-    pub invocation_digest: String,
-    pub claim_id: String,
-    pub permit_id: String,
-    pub claimed_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-    pub normalized: SortArguments,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortToolError {
@@ -154,173 +127,73 @@ impl SortToolResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SortToolOutput {
-    pub event_version: u16,
-    pub turn_id: String,
-    pub request_index: u8,
-    pub call_id: ProviderCallId,
-    /// Claim consumption, not a claim that the OS definitely spawned a process.
-    pub claimed: bool,
-    pub result: SortToolResult,
-    pub artifact_event_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplayedSortCall {
-    pub requested: SortToolRequested,
-    pub started: Option<SortToolStarted>,
-    pub output: Option<SortToolOutput>,
-}
-
 pub(crate) fn normalize_call(arguments: &Value) -> Option<SortArguments> {
     ditto_capability::validate_invocation_instance(&worker::schema().input_schema, arguments)
         .ok()?;
     serde_json::from_value(arguments.clone()).ok()
 }
 
-pub(crate) fn valid_started(
-    start: &SortToolStarted,
-    event: &EventRecord,
-    input: &EventRecord,
+/// Replay's check of a recorded result. Status additionally hashes both
+/// artifacts and checks the line contract; replay performs no I/O.
+pub(crate) fn valid_result(
+    result: &SortToolResult,
+    request: Option<&SortArguments>,
+    started: bool,
     grant: &SortGrant,
-) -> bool {
-    let digest = &start.invocation_digest;
-    start.event_version == 1
-        && start.turn_id == input.correlation_id.as_deref().unwrap_or_default()
-        && event.span_id.as_deref() == Some(start.call_id.as_str())
-        && event.actor == EventActor::Capability
-        && event.kind == event_kind::AGENT_SORT_STARTED
-        && event.session_id == input.session_id
-        && event.task_id == input.task_id
-        && event.correlation_id == input.correlation_id
-        && event.seq > input.seq
-        && grant.permits(&start.normalized)
-        && start.request_index < 7
-        && !start.epoch_id.is_empty()
-        && start.epoch_id.len() <= 256
-        && CanonicalResource::artifact(format!("artifact:sha256:{digest}")).is_ok()
-        && start.claim_id == format!("claim_{digest}")
-        && start.permit_id == format!("permit_{digest}")
-        && start.claimed_at.timestamp_millis() <= event.recorded_at.timestamp_millis()
-        && start.claimed_at >= input.recorded_at
-        && start.expires_at > start.claimed_at
-        && start.expires_at <= input.recorded_at + chrono::Duration::minutes(5)
-}
-
-pub(crate) fn valid_requested(
-    request: &SortToolRequested,
-    event: &EventRecord,
-    input: &EventRecord,
-) -> bool {
-    request.event_version == 1
-        && request.turn_id == input.correlation_id.as_deref().unwrap_or_default()
-        && request.request_index < 7
-        && request.normalized == normalize_call(&request.arguments)
-        && event.kind == event_kind::AGENT_SORT_REQUESTED
-        && event.actor == EventActor::Model
-        && event.span_id.as_deref() == Some(request.call_id.as_str())
-        && event.session_id == input.session_id
-        && event.task_id == input.task_id
-        && event.correlation_id == input.correlation_id
-        && event.seq > input.seq
-}
-
-pub(crate) fn start_matches_request(
-    start: &SortToolStarted,
-    event: &EventRecord,
-    request: &SortToolRequested,
-    requested: &EventRecord,
-) -> bool {
-    start.request_index == request.request_index
-        && start.call_id == request.call_id
-        && request.normalized.as_ref() == Some(&start.normalized)
-        && event.causation_id.as_deref() == Some(&requested.event_id)
-        && event.seq > requested.seq
-}
-
-/// Structural evidence only. Status additionally hashes both artifacts and
-/// independently checks the line contract; replay deliberately performs no I/O.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn valid_output(
-    output: &SortToolOutput,
-    event: &EventRecord,
-    input: &EventRecord,
-    grant: &SortGrant,
-    request: &SortToolRequested,
-    requested: &EventRecord,
-    started: Option<&EventRecord>,
     already_claimed: bool,
-    deadline: DateTime<Utc>,
+    after_deadline: bool,
+    artifact_event_id: Option<&str>,
 ) -> bool {
-    if output.event_version != 1
-        || output.turn_id != request.turn_id
-        || output.call_id != request.call_id
-        || output.request_index != request.request_index
-        || output.claimed != started.is_some()
-        || event.actor != EventActor::Capability
-        || event.kind != event_kind::AGENT_SORT_OUTPUT
-        || event.span_id.as_deref() != Some(output.call_id.as_str())
-        || event.session_id != input.session_id
-        || event.task_id != input.task_id
-        || event.correlation_id != input.correlation_id
-        || event.causation_id.as_deref() != Some(&started.unwrap_or(requested).event_id)
-        || event.seq <= started.unwrap_or(requested).seq
-    {
-        return false;
-    }
-    if let SortToolResult::Error { code } = &output.result {
-        if output.artifact_event_id.is_some() {
-            return false;
-        }
-        return if started.is_some() {
-            matches!(
-                code,
-                SortToolError::InputUnavailable
-                    | SortToolError::Cancelled
-                    | SortToolError::ProcessDeadline
-                    | SortToolError::ProcessFailed
-                    | SortToolError::VerificationFailed
-            )
-        } else {
-            match request.normalized.as_ref() {
+    match result {
+        SortToolResult::Error { code } => {
+            if artifact_event_id.is_some() {
+                return false;
+            }
+            if started {
+                return matches!(
+                    code,
+                    SortToolError::InputUnavailable
+                        | SortToolError::Cancelled
+                        | SortToolError::ProcessDeadline
+                        | SortToolError::ProcessFailed
+                        | SortToolError::VerificationFailed
+                );
+            }
+            match request {
                 None => *code == SortToolError::InvalidArguments,
                 Some(args) if !grant.permits(args) => *code == SortToolError::PermissionDenied,
                 Some(_) => {
                     (already_claimed && *code == SortToolError::LeaseExhausted)
-                        || (*code == SortToolError::LeaseExpired && event.recorded_at >= deadline)
+                        || (*code == SortToolError::LeaseExpired && after_deadline)
                 }
             }
-        };
+        }
+        SortToolResult::Verified {
+            reference,
+            verifier,
+            input_lines,
+            output_lines,
+        } => {
+            started
+                && artifact_event_id.is_some()
+                && CanonicalResource::artifact(reference).is_ok()
+                && verifier == worker::VERIFIER
+                && *input_lines <= worker::MAX_LINES
+                && *output_lines <= *input_lines
+        }
     }
-    let SortToolResult::Verified {
-        reference,
-        verifier,
-        input_lines,
-        output_lines,
-    } = &output.result
-    else {
-        return false;
-    };
-    started.is_some()
-        && output.artifact_event_id.is_some()
-        && CanonicalResource::artifact(reference).is_ok()
-        && verifier == worker::VERIFIER
-        && *input_lines <= worker::MAX_LINES
-        && *output_lines <= *input_lines
 }
 
+/// The verified artifact a sort's output names: created by the sort's start,
+/// before its output.
 pub(crate) fn valid_output_root(
     root: &EventRecord,
-    output: &SortToolOutput,
+    reference: &str,
+    artifact_event_id: Option<&str>,
     event: &EventRecord,
     started: &EventRecord,
 ) -> bool {
-    let SortToolResult::Verified { reference, .. } = &output.result else {
-        return false;
-    };
-    Some(&root.event_id) == output.artifact_event_id.as_ref()
+    Some(root.event_id.as_str()) == artifact_event_id
         && root.kind == event_kind::ARTIFACT_CREATED
         && root.actor == EventActor::System
         && root.session_id == event.session_id

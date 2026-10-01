@@ -30,8 +30,9 @@ and checks establish a new fact.
   `dev/task-029-memory-search` stack the harness design and Tasks 025–029,
   and `dev/task-030-selection-by-reference`, `dev/task-024-model-memory` and
   `dev/task-031-forget-memory` stack Tasks 030, 024 and 031, and
-  `dev/task-032-web-search`, `dev/task-033-thin-contract` and
-  `dev/task-034-bridge` stack Tasks 032–034. Nothing is pushed.
+  `dev/task-032-web-search`, `dev/task-033-thin-contract`,
+  `dev/task-034-bridge` and `dev/task-035-one-tool-lifecycle` stack Tasks
+  032–035. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -42,7 +43,7 @@ and checks establish a new fact.
   concurrency, real-time streaming and context injection timing and scope. The
   design is [realtime-harness](../design/realtime-harness.md) and ADR 0028.
   Phases A–D are implemented (Tasks 025–028) and Phase E in part (Task 029:
-  `memory.search` and tool progress); one tool lifecycle and parallel
+  memory search and tool progress; Task 035: one tool lifecycle); parallel
   read-only calls are deferred.
 - On 2026-09-30 a codebase review found that run context missed paraphrased or
   inflected questions and admitted unrelated memories, and that replay parsed
@@ -85,10 +86,10 @@ and checks establish a new fact.
   compile the verified active session/task snapshot with the complete-set
   contract (ADR 0021): the whole current set when it fits the budget (default
   900 estimated tokens, about twelve short memories), otherwise positive
-  lexical overlap without function words. Agent runs can search the
-  memories their compilation saw, including those it left out, with the
-  read-only `memory.search` (ADR 0029), and Ditto remembers, replaces and
-  forgets memories on its own during agent runs (ADR 0031): each is a node
+  lexical overlap without function words. With `memory.manage` agent runs
+  search the memories their compilation saw, including those it left out
+  (ADR 0029), and Ditto remembers, replaces and forgets memories on its own
+  (ADR 0031): each written memory is a node
   sourced by a session-scoped `memory.written` event, labeled origin `model`,
   status `inferred`, refused after the turn read a web page or file, for
   credential-shaped facts and past three writes per turn. There is no
@@ -96,17 +97,16 @@ and checks establish a new fact.
   retrieval.
   The separate V2 joint working-set query is lexical in production with an
   injected embedding seam for tests.
-- **Web search.** With `--search-url`, agent runs search the web on their own
-  through a SearXNG-compatible service (ADR 0033): the endpoint is the only
-  resource a turn's three-call lease allows, credential-shaped queries are
-  refused, at most five bounded results return as untrusted content, and
-  replay uses the journaled results. From version 11 the instructions tell
-  the model to work on its own and to hand off only what needs the user, by
-  saying so in its answer.
-- **Web links.** `ditto-web-fetch` (ADR 0027) reads pages linked in the user's
-  own message: exact-URL leases, public addresses only with pinned
-  connections, manual redirects, size and time bounds, text extraction and
-  journaled `agent.fetch.*` evidence replayed without network I/O.
+- **Web.** `web.browse` (crate `ditto-web-fetch`, ADR 0036) reads pages
+  linked in the user's own message (ADR 0027: exact-URL leases, public
+  addresses only with pinned connections, manual redirects, size and time
+  bounds, text extraction) and, with `--search-url`, searches on its own
+  through a SearXNG-compatible service (ADR 0033: the endpoint is the only
+  resource a three-call lease allows, credential-shaped queries are refused,
+  at most five bounded results). Its schema offers only what the deployment
+  enables; results return as untrusted content and replay uses the journaled
+  ones. The instructions tell the model to work on its own and to hand off
+  only what needs the user, ending its answer with the question.
 - **Capabilities.** Generated package headers keep full manifests out of
   startup and search; a selected manifest is paged after digest and projection
   checks. Live invocation uses the closed Invocation Schema Profile V1 through a
@@ -114,10 +114,10 @@ and checks establish a new fact.
   authority. `device.process.run` is a discovery-only manifest with no runner.
 - **Policy.** Sealed canonical invocations carry harness-derived effect,
   resource and placement. One affine ticket per epoch creates one expiring
-  ledger. `artifact.read` and `memory.search` use static no-approval permits;
-  `artifact.sort` consumes a one-shot `ExecutionClaim` under an
-  exact-resource, one-call lease, and memory writes share one three-call lease
-  without resources.
+  ledger. `artifact.read` and memory searches use static no-approval permits;
+  `artifact.sort`, web reads and web searches each consume one-shot
+  `ExecutionClaim`s under their own exact-resource leases, and memory writes
+  share one three-call lease without resources.
 - **Model and turns.** `ditto-model` owns the provider-neutral request/stream
   contract. `ditto-model-openai` holds two drivers on one request lifecycle:
   the closed `gpt-5.6` Responses profile (ephemeral storage) and an
@@ -125,22 +125,24 @@ and checks establish a new fact.
   local or hosted server (ADR 0023; HTTPS unless loopback, no redirects,
   optional key only from `DITTO_MODEL_API_KEY`). Keys are redacted and
   transport-only. The daemon defaults to a disabled provider. The kernel turn
-  loop compiles context, pages `artifact.read` (plus `artifact.sort` only for a
-  permitted attachment, `web.fetch` while enabled, `web.search` while a search
-  service is configured, and the three memory tools
-  for agent runs while installed), runs at most eight
-  model requests, journals versioned transitions before publication and
-  replays without provider, artifact or network I/O. There is one turn
-  contract, version 12 (ADR 0034): replay rejects turns recorded under any
-  other version, while status and thread history still read their answers.
+  loop compiles context, pages its tools from one table of builtins (an
+  ordinary agent run gets `web.browse` while reading or searching is enabled
+  and `memory.manage`; an attachment adds `artifact.read` and the permitted
+  `artifact.sort`; a legacy artifact turn gets `artifact.read`), runs at most
+  eight model requests, journals versioned transitions before publication and
+  replays without provider, artifact or network I/O. Agent tool calls share
+  one `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
+  There is one turn contract, version 13 (ADR 0034): replay rejects turns
+  recorded under any other version, while status and thread history still
+  read their answers.
   The contract carries typed failure reasons (ADR 0021), the thread's recent
   exchanges as native messages in a stepped window (ADRs 0022, 0028), the
   assistant instructions with the local time and the session's runs still in
   flight as notes in the latest message (ADRs 0026, 0028, 0035), each fact
   recorded once (text in chunks, each
   request as its SHA-256, the selection by contract digests; ADRs 0028,
-  0030), and the tools of ADRs 0027, 0029, 0031 and 0033, with the
-  instruction to work on its own and hand off only what needs the user.
+  0030), and the two agent tools of ADR 0036, with the instruction to work
+  on its own and hand off only what needs the user.
 
   A run reuses its session's verified context while no context node
   has been committed since (sessions with task-scoped or windowed nodes are
@@ -172,21 +174,22 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 034
+## Latest verified slice: Task 035
 
-- [Contract and evidence](tasks/034-chat-as-a-bridge.md) (ADR 0035), turn
-  contract 12. A session runs up to four answers at once; a later run's
-  latest message names the session's runs still in flight; an
-  acknowledgment of an answer that asked nothing costs no model call and
-  gets a 👍; the web app and Telegram never make the user wait, and show
-  what the model says before a tool call as its own message.
-- Its gate passed on its final tree (593 Rust tests).
+- [Contract and evidence](tasks/035-two-agent-tools.md) (ADR 0036), turn
+  contract 13. An ordinary run offers two tools, `memory.manage` and
+  `web.browse`, instead of five or six; `artifact.read` comes only with an
+  attachment; every agent tool call journals one `tool.*` lifecycle, and
+  fourteen per-tool modules became five. A minimal request shrank from 4,538
+  to 3,571 bytes and the turn module from 8,989 to 7,731 lines.
+- Its gate passed on its final tree (592 Rust tests).
 
-## Previous slice: Task 033
+## Previous slice: Task 034
 
-- [Contract and evidence](tasks/033-one-turn-contract.md) (ADR 0034): one
-  turn contract instead of eleven versions. Its gate passed on its final
-  tree (590 Rust tests).
+- [Contract and evidence](tasks/034-chat-as-a-bridge.md) (ADR 0035): four
+  answers at once even in one session, the in-flight note, free
+  acknowledgments and per-state messages. Its gate passed on its final tree
+  (593 Rust tests).
 
 ## Known gaps
 
@@ -217,7 +220,7 @@ and checks establish a new fact.
   latest answer: an offer phrased without a question mark followed by "ok"
   is taken as an acknowledgment, which the instructions avoid by asking the
   model to end hand-offs with a question.
-- `web.fetch` decodes bodies as UTF-8 and runs no JavaScript, so pages in
+- `web.browse` decodes pages as UTF-8 and runs no JavaScript, so pages in
   legacy charsets or rendered by scripts yield garbled or little text.
 - Web search needs a SearXNG-compatible service the operator runs or trusts;
   that service sees each query. Ditto reads results' snippets but cannot open
@@ -269,7 +272,7 @@ and checks establish a new fact.
   without weakening its single-gate, single-rebuild or atomic-checkpoint
   semantics.
 - Three lexical tokenizers differ (context V1, capability search, retrieval
-  V2); `memory.search` reuses context V1.
+  V2); the memory search reuses context V1.
 - Each builtin tool keeps its own journal events, run path and replay checks;
   ADR 0028 defers one shared lifecycle until another effectful tool is added.
 - Journal bytes per answer byte are 13.4 (200-delta answer) and 4.3

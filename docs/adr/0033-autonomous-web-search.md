@@ -2,7 +2,7 @@
 
 Status: accepted on 2026-10-01 for Task 032. Turn payload version 11. Amends
 [ADR 0027](0027-web-fetch-for-user-links.md), which left web search waiting for
-per-call approval.
+per-call approval. Amended by [ADR 0036](0036-two-agent-tools-one-lifecycle.md): searching is the `query` request of `web.browse`.
 
 ## Context
 

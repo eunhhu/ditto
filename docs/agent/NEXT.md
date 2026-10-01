@@ -40,11 +40,14 @@ assistant to message by state and spend nothing on acknowledgments:
    12 - complete (ADR 0035; four answers at once even in one session, each
    run aware of the session's work in flight, the line before a tool call as
    its own message, and a 👍 instead of a model call for an acknowledgment).
-7. 035 One builtin tool lifecycle, with the memory and web tools merged.
+7. [035](tasks/035-two-agent-tools.md) Two agent tools and one tool
+   lifecycle, turn contract 13 - complete (ADR 0036; `memory.manage` and
+   `web.browse` replace five tools, every agent tool call journals
+   `tool.*`, a minimal request 4,538 → 3,571 bytes).
 
-The thin-harness phases of ADR 0028 (Tasks 025–029) are complete except the
-parts deferred there: one builtin tool lifecycle, parallel read-only calls,
-and the journal target of three bytes per answer byte.
+The thin-harness phases of ADR 0028 (Tasks 025–029, with Task 035's tool
+lifecycle) are complete except the parts deferred there: parallel read-only
+calls and the journal target of three bytes per answer byte.
 
 Still open from the earlier frontier:
 
@@ -57,6 +60,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [035](tasks/035-two-agent-tools.md) Two agent tools and one tool
+  lifecycle, turn contract 13 (ADR 0036).
 - [034](tasks/034-chat-as-a-bridge.md) The chat as a bridge, turn contract
   12 (ADR 0035).
 - [033](tasks/033-one-turn-contract.md) One turn contract until the first

@@ -31,10 +31,10 @@ function event(delta, finish = null) {
 
 // The mock streams a markdown reply describing what it received, so the page
 // shows which memory and how much history reached the model, and whether
-// another run was still in flight. Asked to recall, it first calls
-// memory.search and then answers with what the search found; told to
-// remember, it calls memory.remember; asked to search the web, it says so and
-// calls web.search.
+// another run was still in flight. Asked to recall, it first searches with
+// memory.manage and then answers with what the search found; told to
+// remember, it remembers with memory.manage; asked to search the web, it says
+// so and searches with web.browse.
 let modelRequests = 0;
 function mockModel() {
   const server = http.createServer((request, response) => {
@@ -54,14 +54,14 @@ function mockModel() {
       const result = messages[messages.length - 1].role === 'tool' ? JSON.parse(messages[messages.length - 1].content) : null;
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       if (question.includes('recall') && !result) {
-        const call = { index: 0, id: 'call-recall', type: 'function', function: { name: 'memory_search', arguments: '{"query":"meetings"}' } };
+        const call = { index: 0, id: 'call-recall', type: 'function', function: { name: 'memory_manage', arguments: '{"action":"search","query":"meetings"}' } };
         response.write(event({ tool_calls: [call] }));
         response.write(event({}, 'tool_calls'));
         response.end('data: [DONE]\n\n');
         return;
       }
       if (question.includes('Search the web') && !result) {
-        const call = { index: 0, id: 'call-search', type: 'function', function: { name: 'web_search', arguments: '{"query":"rust 2.0"}' } };
+        const call = { index: 0, id: 'call-search', type: 'function', function: { name: 'web_browse', arguments: '{"query":"rust 2.0"}' } };
         response.write(event({ content: 'Looking that up.' }));
         response.write(event({ tool_calls: [call] }));
         response.write(event({}, 'tool_calls'));
@@ -69,7 +69,7 @@ function mockModel() {
         return;
       }
       if (question.includes('Remember that') && !result) {
-        const call = { index: 0, id: 'call-remember', type: 'function', function: { name: 'memory_remember', arguments: '{"text":"The user plays tennis on Sundays."}' } };
+        const call = { index: 0, id: 'call-remember', type: 'function', function: { name: 'memory_manage', arguments: '{"action":"remember","text":"The user plays tennis on Sundays."}' } };
         response.write(event({ tool_calls: [call] }));
         response.write(event({}, 'tool_calls'));
         response.end('data: [DONE]\n\n');
@@ -311,7 +311,7 @@ async function main() {
     }, { timeout: 10000 });
     check('a running memory search shows progress', true);
     const recalled = await waitDone(page, 9);
-    check('the memory search result reaches the model', recalled.text.includes('recalled: I prefer morning meetings') && recalled.foot.includes('memory.search'), recalled.text);
+    check('the memory search result reaches the model', recalled.text.includes('recalled: I prefer morning meetings') && recalled.foot.includes('memory.manage'), recalled.text);
 
     await send(page, 'Remember that I play tennis on Sundays');
     const saved = await waitDone(page, 10);
@@ -341,7 +341,7 @@ async function main() {
       return body.classList.contains('progress') && body.innerText === 'Searching the web…';
     }, { timeout: 10000 });
     const searched = await waitDone(page, 11);
-    check('Ditto searches the web on its own', searched.text.includes('searched: Rust 2.0 (about rust 2.0)') && searched.foot.includes('web.search'), searched.text);
+    check('Ditto searches the web on its own', searched.text.includes('searched: Rust 2.0 (about rust 2.0)') && searched.foot.includes('web.browse'), searched.text);
     const said = await page.evaluate(() => {
       const nodes = document.querySelectorAll('.msg.assistant');
       const before = nodes[nodes.length - 1].previousElementSibling;

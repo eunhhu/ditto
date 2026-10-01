@@ -55,7 +55,8 @@ struct Args {
     /// Explicit escape hatch until authenticated remote ingress exists.
     #[arg(long, env = "DITTO_ALLOW_UNAUTHENTICATED_REMOTE")]
     allow_unauthenticated_remote: bool,
-    /// Never offer `web.fetch`, even for links in a message.
+    /// Never read web pages, even for links in a message (`web.browse` then
+    /// only searches, when a search service is set).
     #[arg(long, env = "DITTO_DISABLE_WEB_FETCH")]
     disable_web_fetch: bool,
     /// A SearXNG-compatible search service, such as http://127.0.0.1:8888;

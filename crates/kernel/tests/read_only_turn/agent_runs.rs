@@ -208,7 +208,15 @@ async fn agent_read_continues_and_replays_without_repeating_tool_or_model_work()
         ),
         final_script(&["Read sample evidence."]),
     ]);
-    let command = start_command(&format!("read {reference}"));
+    // An agent run is offered artifact.read only with an attachment
+    // (ADR 0036).
+    let command = StartAgentRunCommand {
+        sort: Some(ditto_protocol::AgentSortPermission {
+            text: "b\na".into(),
+            allow_deduplicate: false,
+        }),
+        ..start_command(&format!("read {reference}"))
+    };
     // Record-only input uses the task ID as correlation, not a kernel turn ID,
     // and must not steal an explicit run's durable retry identity.
     fixture

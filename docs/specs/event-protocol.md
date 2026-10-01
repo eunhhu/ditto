@@ -416,57 +416,75 @@ canonical-resource lease/affine claim, and continues with a structured result.
 Each process retains the existing five-second owned lifetime; the lease expires
 with the turn, at most five minutes after admission.
 
-Version-1 `agent.sort.requested` (model), `agent.sort.started` (capability), and
-`agent.sort.output` (capability) extend the same strict turn cause chain. They
-carry `turn_id`, request index and call ID; spans use the call ID. Requested
-evidence includes raw and normalized arguments. Started evidence records the
-normalized operation, epoch/digest/permit/claim identities and claim/expiry times.
-`claimed` on output means a claim was consumed, not that process spawning was
-observed. Output is either a verified reference/verifier/line-count result or a
-closed error code. A successful artifact root is system-authored, task-scoped,
-caused by that start and outside the turn correlation. Output names its exact
-artifact event while retaining the start as its cause.
+A sort call journals the shared agent tool lifecycle below (`tool.requested`,
+`tool.started` when claimed, `tool.output`). `claimed` on output means a claim
+was consumed, not that process spawning was observed. Its result is either a
+verified reference/verifier/line-count result or a closed error code. A
+successful artifact root is system-authored, task-scoped, caused by that start
+and outside the turn correlation; the output names it as `artifact_event_id`
+while retaining the start as its cause.
 
 No model `run_*` task.completed is emitted. The response optionally contains
 `sort` with input reference, deduplication permission, state (`not_run`,
 `running`, `verified`, `failed`, `interrupted`) and output/reference or failure
 code. A rejected attempt may report a failure code while remaining `not_run`.
 Later rejected attempts cannot overwrite an already executed result. Status
-uses a schema-4 partial index for start/output records with a nine-row corruption
-sentinel (one start plus seven outputs are valid). Exact evidence/root lookups,
+reads the turn's tool starts and outputs through a schema-8 partial index with a
+fifteen-row corruption sentinel (seven calls are valid) and keeps the sort's. Exact evidence/root lookups,
 bounded hashes and an independent line verifier establish verified output,
 including after model failure or owner loss. Corruption returns storage failure.
 
-Pure replay adds `sort_calls`, validates permission, selected contracts,
+Pure replay projects the call in `tool_calls`, validates permission, selected contracts,
 normalization, one-shot dispatch, output roots and exact continuation without
 I/O or reconstructed live authority. It checks structural evidence; status also
 checks artifact content. Existing turns remain readable, and an old reader must
 reject version-2 metadata. See [ADR 0018](../adr/0018-user-scoped-model-sort.md).
 
-## Links the user sends (`web.fetch`)
+## Agent tool calls (`tool.*`)
 
-An agent run whose message contains http(s) URLs grants the canonical form of
-up to five of them to `web.fetch` for that turn. Version-5 turns page the tool
-only then and record its package as `fetch_manifest` in
-`capabilities.selected`. A lease allows min(links, 3) calls, each on an exact
-`url:` resource from the grant.
+Every call of `web.browse`, `memory.manage` and `artifact.sort` journals one
+lifecycle ([ADR 0036](../adr/0036-two-agent-tools-one-lifecycle.md)) in the
+turn's cause chain, with spans set to the call ID and version-1 payloads that
+carry `turn_id`, `request_index`, `call_id` and `capability_id`:
 
-Version-1 `agent.fetch.requested` (model), `agent.fetch.started` (capability)
-and `agent.fetch.output` (capability) extend the turn's cause chain like the
-sort events, with spans set to the call ID:
+- `tool.requested` (model): the raw `arguments` and the `normalized`
+  arguments, or `null` when invalid. Replay normalizes the call itself and
+  requires the same value.
+- A cancellation or deadline before authorization ends the turn with
+  "tool call stopped before authorization".
+- `tool.started` (capability), for a leased call that was claimed: the epoch,
+  invocation digest, permit and claim identities and the claim and expiry
+  times (the turn deadline), and for a search its `request_url`.
+- `tool.output` (capability): `claimed`, the tool's `result`, and a sort's
+  `artifact_event_id`.
 
-- Requested evidence holds the raw and the normalized arguments.
-- Started evidence holds the normalized URL, the epoch, digest, permit and
-  claim identities, and the claim and expiry times.
-- Output holds `claimed` and either `{outcome: "fetched", page: {url,
-  final_url, status, content_type, title?, text, truncated}}` or
-  `{outcome: "error", code, status?}` with a closed snake_case code.
+Replay projects the calls as `tool_calls`. A call to `web.browse` or
+`artifact.sort`, refused or not, refuses later memory writes in the turn.
 
-The model receives the page with `content_origin: "untrusted web page"`.
-Replay recomputes the grant from the input, validates normalization, budget,
-claims and bounds, and continues from the recorded page without network I/O.
-Fetches reach only globally routable addresses. `--disable-web-fetch` never
-offers the tool. See [ADR 0027](../adr/0027-web-fetch-for-user-links.md).
+## The web tool (`web.browse`)
+
+Agent runs are offered `web.browse` while reading or searching is enabled.
+Its schema offers only what the deployment enables: `{ url }` to read a page
+whose link is in the user's message, `{ query }` to search through the
+configured service, or one of the two; replay recognizes the variant from the
+recorded contract digest.
+
+- An agent run's message grants the canonical form of up to five of its http(s)
+  URLs. A read lease allows min(links, 3) calls, each on an exact `url:`
+  resource from the grant; any other URL is `permission_denied` without
+  network I/O. Reads reach only globally routable addresses, and
+  `--disable-web-fetch` turns reading off.
+- A search lease allows three calls on the endpoint's resource; the request is
+  `<endpoint>/search?q=<query>&format=json`, recorded as `request_url`. A
+  credential-shaped query is `credential` and never sent.
+- Results are `{outcome: "read", page: {url, final_url, status,
+  content_type, title?, text, truncated}}`, `{outcome: "found", results: [{
+  title, url, snippet }]}` (at most five) or `{outcome: "error", code,
+  status?}` with a closed snake_case code. The model receives pages and
+  results labeled as untrusted content, and replay continues from the
+  recorded result without network I/O. See ADRs
+  [0027](../adr/0027-web-fetch-for-user-links.md) and
+  [0033](../adr/0033-autonomous-web-search.md).
 
 ## Kernel artifact-read turns
 
@@ -485,6 +503,9 @@ model.output            model
 capability.requested    model
 execution.started       capability
 execution.output        capability
+tool.requested          model
+tool.started            capability
+tool.output             capability
 turn.finished           system
 turn.failed             system
 ```
@@ -602,6 +623,20 @@ with at most five `{ title, url, snippet }` or `error` with `code`:
 `cancelled`, `deadline`, `connection`, `timeout`, `http_status` with
 `status`, or `invalid_response`). A turn may claim three searches. A
 `web.search` call, like a fetch, refuses later memory writes in the turn.
+
+Version 12 ([ADR 0035](../adr/0035-chat-as-a-bridge.md)) adds the in-flight
+note to the latest message and the instructions that explain it, asks for a
+short line before a step that takes a while, and for a hand-off to end with
+its question.
+
+Version 13 ([ADR 0036](../adr/0036-two-agent-tools-one-lifecycle.md))
+replaces `web.fetch` and `web.search` with `web.browse`, and `memory.search`,
+`memory.remember` and `memory.forget` with `memory.manage`
+(`{action: "search", query}`, `{action: "remember", text, replaces?}` or
+`{action: "forget", memory_id}`, results `found`, `remembered`, `forgotten`
+or `refused` as before), all on the `tool.*` lifecycle with `artifact.sort`.
+`capabilities.selected` rebuilds `web_manifest` and `memory_manifest`, and
+`artifact.read` is selected for an agent run only with an attachment.
 
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished

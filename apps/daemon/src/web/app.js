@@ -36,9 +36,10 @@ const STRINGS = {
     deadline_exceeded: 'took too long', model_failure: 'the model failed', driver_contract: 'unsupported model response',
     protocol: 'invalid model response', bound_exceeded: 'response too large', context_compilation: 'memory could not be read',
     capability_unavailable: 'a tool is unavailable', capability_contract: 'a tool call was invalid', invalid_input: 'invalid request',
-    'memory.search': 'Searching memories…', 'web.fetch': 'Reading the linked page…',
+    'web.browse': 'Looking on the web…', 'memory.manage': 'Checking memories…',
     'artifact.read': 'Reading the attachment…', 'artifact.sort': 'Sorting the attachment…',
-    'memory.remember': 'Saving to memory…', 'memory.forget': 'Forgetting a memory…', 'web.search': 'Searching the web…',
+    'web.read': 'Reading the linked page…', 'web.search': 'Searching the web…', 'memory.search': 'Searching memories…',
+    'memory.remember': 'Saving to memory…', 'memory.forget': 'Forgetting a memory…',
     remembered: 'Remembered', updatedMemory: 'Updated a memory', forgotMemory: 'Forgot a memory',
     byDitto: 'by Ditto', byDittoHint: 'Ditto inferred this from your conversation',
   },
@@ -70,9 +71,10 @@ const STRINGS = {
     deadline_exceeded: '시간 초과', model_failure: '모델 오류', driver_contract: '지원하지 않는 모델 응답',
     protocol: '잘못된 모델 응답', bound_exceeded: '응답이 너무 큼', context_compilation: '기억을 읽지 못함',
     capability_unavailable: '도구를 사용할 수 없음', capability_contract: '잘못된 도구 호출', invalid_input: '잘못된 요청',
-    'memory.search': '기억을 찾는 중…', 'web.fetch': '링크한 페이지를 읽는 중…',
+    'web.browse': '웹을 살펴보는 중…', 'memory.manage': '기억을 확인하는 중…',
     'artifact.read': '첨부를 읽는 중…', 'artifact.sort': '첨부를 정렬하는 중…',
-    'memory.remember': '기억하는 중…', 'memory.forget': '기억을 지우는 중…', 'web.search': '웹을 검색하는 중…',
+    'web.read': '링크한 페이지를 읽는 중…', 'web.search': '웹을 검색하는 중…', 'memory.search': '기억을 찾는 중…',
+    'memory.remember': '기억하는 중…', 'memory.forget': '기억을 지우는 중…',
     remembered: '기억함', updatedMemory: '기억을 고침', forgotMemory: '기억을 지움',
     byDitto: 'Ditto', byDittoHint: '대화에서 Ditto가 추론한 기억',
   },
@@ -405,12 +407,18 @@ function onEvent(event) {
       if (bubble && !bubble.done) finishBubble(bubble, '', payload.failure);
       return;
     }
-    case 'agent.memory_write.requested': {
+    case 'tool.requested': {
+      // Once the call is complete, say exactly what it does (ADR 0036).
       const bubble = bubbles.get(payload.turn_id);
-      if (bubble && payload.write) (bubble.writes = bubble.writes || new Map()).set(payload.call_id, payload.write);
+      const call = payload.normalized;
+      if (!bubble || bubble.done || !call) return;
+      const doing = call.action ? `memory.${call.action}` : call.query !== undefined ? 'web.search' : call.url ? 'web.read' : null;
+      if (doing && bubble.body.classList.contains('progress')) bubble.body.textContent = t(doing);
+      if (call.action === 'remember' || call.action === 'forget') (bubble.writes = bubble.writes || new Map()).set(payload.call_id, call);
       return;
     }
-    case 'agent.memory_write.output': {
+    case 'tool.output': {
+      // What Ditto remembered or forgot, kept under the answer.
       const bubble = bubbles.get(payload.turn_id);
       const write = bubble && bubble.writes && bubble.writes.get(payload.call_id);
       if (!write || payload.result.outcome === 'refused') return;
@@ -434,7 +442,7 @@ function onEvent(event) {
 }
 
 const STREAM_KINDS = ['input.received', 'model.output', 'turn.finished', 'turn.failed', 'conversation.reset',
-  'context.node.recorded', 'agent.memory_write.requested', 'agent.memory_write.output', 'schedule.requested', 'schedule.claimed', 'schedule.cancelled', 'schedule.expired',
+  'context.node.recorded', 'tool.requested', 'tool.output', 'schedule.requested', 'schedule.claimed', 'schedule.cancelled', 'schedule.expired',
   'schedule.repeat.requested', 'schedule.repeat.cancelled', 'schedule.repeat.claimed', 'schedule.repeat.skipped'];
 
 function connect() {
@@ -649,10 +657,9 @@ async function inspect(taskId) {
     section(t('excluded'), [...excluded].map(([reason, count]) => [`${t(reason)}: ${count}`]));
     section(t('history'), (context.payload.history_turn_ids || []).map((turn) => [userTextByTurn.get(turn) || t('earlier')]));
   }
-  const toolKinds = { 'capability.requested': null, 'agent.fetch.requested': 'web.fetch', 'agent.sort.requested': 'artifact.sort', 'agent.memory.requested': 'memory.search', 'agent.memory_write.requested': null, 'agent.search.requested': 'web.search' };
   const tools = events
-    .filter((event) => event.kind in toolKinds)
-    .map((event) => [toolKinds[event.kind] || event.payload.capability_id, JSON.stringify(event.payload.arguments)]);
+    .filter((event) => event.kind === 'tool.requested' || event.kind === 'capability.requested')
+    .map((event) => [event.payload.capability_id, JSON.stringify(event.payload.arguments)]);
   section(t('tools'), tools);
   const requests = events.filter((event) => event.kind === 'model.requested').length;
   const terminal = events.find((event) => event.kind === 'turn.finished' || event.kind === 'turn.failed');

@@ -48,7 +48,7 @@ def accounting(events):
     kinds = Counter(e["kind"] for e in events)
     calls = kinds["model.requested"]
     return {"model_requests": calls,
-            "tool_executions": sum(kinds[k] for k in ("execution.started", "sort.started", "agent.sort.started")),
+            "tool_executions": sum(kinds[k] for k in ("execution.started", "sort.started", "tool.started")),
             "tool_count_basis": "durable dispatch records, not model intent or OS syscall tracing",
             "event_counts": dict(sorted(kinds.items())),
             "model_tokens": None if calls else 0,

@@ -19,25 +19,10 @@ use serde_json::Value;
 
 use crate::normalize_input_text;
 
-#[path = "sort_replay.rs"]
-mod sort_replay;
-use super::sort::{ReplayedSortCall, SortGrant};
-
-#[path = "fetch_replay.rs"]
-mod fetch_replay;
-use super::fetch::ReplayedFetchCall;
-
-#[path = "recall_replay.rs"]
-mod recall_replay;
-use super::recall::ReplayedRecallCall;
-
-#[path = "memory_write_replay.rs"]
-mod memory_write_replay;
-
-#[path = "search_replay.rs"]
-mod search_replay;
-use super::memory_write::{FORGET_ID, REMEMBER_ID, ReplayedMemoryWrite};
-use super::search::ReplayedSearchCall;
+#[path = "tool_replay.rs"]
+mod tool_replay;
+use super::sort::SortGrant;
+use super::tool::ReplayedToolCall;
 
 use super::run::turn_signature;
 use super::shared::{
@@ -209,31 +194,24 @@ struct ReplayProjector<'turn, 'snapshot> {
     /// The session's runs active at admission, by input event ID (ADR 0035).
     in_flight: Vec<String>,
     sort_claimed: bool,
-    sort_calls: Vec<ReplayedSortCall>,
-    /// URLs the user's message grants to `web.fetch`, recomputed from it.
-    fetch_grant: Vec<String>,
-    /// Whether the recorded selection paged `web.fetch`.
-    fetch_selected: bool,
-    fetch_claims: u32,
-    fetch_calls: Vec<ReplayedFetchCall>,
-    /// Whether the recorded selection paged `memory.search`.
+    /// Whether the recorded selection paged `artifact.read`.
+    read_selected: bool,
+    /// The `web.browse` schema the selection offered: (read, search).
+    web: Option<(bool, bool)>,
+    /// URLs the user's message grants to `web.browse`, recomputed from it.
+    web_grant: Vec<String>,
+    web_reads: u32,
+    web_searches: u32,
+    /// Whether the recorded selection paged `memory.manage`.
     memory_selected: bool,
-    /// Version 8: the memories `memory.search` read, rebuilt at the first
-    /// search.
+    /// The memories a search read, rebuilt at the first search.
     recall_space: Option<Vec<ditto_context::ContextNode>>,
-    recall_calls: Vec<ReplayedRecallCall>,
-    /// Version 10: whether the selection paged `memory.remember` and
-    /// `memory.forget`, whether a tool returned a web page or file content
-    /// yet, and the memory writes made (ADR 0031).
-    remember_selected: bool,
-    forget_selected: bool,
+    /// Whether a tool returned a web page or file content yet, and the
+    /// memory writes made (ADR 0031).
     read_external_content: bool,
     memory_write_count: u32,
-    memory_writes: Vec<ReplayedMemoryWrite>,
-    /// Version 11: whether the selection paged `web.search`, and its calls.
-    search_selected: bool,
-    search_claims: u32,
-    search_calls: Vec<ReplayedSearchCall>,
+    /// The agent tool calls replayed, in order (ADR 0036).
+    tool_calls: Vec<ReplayedToolCall>,
     events: &'turn [EventRecord],
     snapshot: &'snapshot [EventRecord],
     index: usize,
@@ -361,8 +339,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         let sort = input.agent_run.and_then(|metadata| metadata.sort);
         let input_text = input.text;
         let conversation = super::sort::initial_conversation(input_text.clone(), sort.as_ref());
-        let fetch_grant = if agent_run {
-            super::fetch::grant(&input_text)
+        let web_grant = if agent_run {
+            super::web::grant(&input_text)
         } else {
             Vec::new()
         };
@@ -372,22 +350,16 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             sort,
             in_flight,
             sort_claimed: false,
-            sort_calls: Vec::new(),
-            fetch_grant,
-            fetch_selected: false,
-            fetch_claims: 0,
-            fetch_calls: Vec::new(),
+            read_selected: false,
+            web: None,
+            web_grant,
+            web_reads: 0,
+            web_searches: 0,
             memory_selected: false,
             recall_space: None,
-            recall_calls: Vec::new(),
-            remember_selected: false,
-            forget_selected: false,
             read_external_content: false,
             memory_write_count: 0,
-            memory_writes: Vec::new(),
-            search_selected: false,
-            search_claims: 0,
-            search_calls: Vec::new(),
+            tool_calls: Vec::new(),
             events,
             snapshot,
             index: 1,
@@ -463,19 +435,41 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 "capabilities.selected must not carry a span id",
             ));
         }
-        validate_artifact_read_manifest(&selected.manifest)
-            .map_err(|error| replay_invalid(error.to_string()))?;
-        let expected_schema = capability_schema();
-        let mut expected_schemas = vec![expected_schema.clone()];
-        let mut expected_cards = vec![CapabilityCard::from(&selected.manifest)];
-        let mut expected_revisions = vec![
-            CapabilityRevision::from_contract(
-                &selected.manifest,
-                &expected_schema,
-                ArtifactReadDeriver::default().revision().clone(),
-            )
-            .map_err(|error| replay_invalid(error.to_string()))?,
-        ];
+        // The selection must be exactly the turn's tools: `artifact.read`
+        // for a legacy turn or an attachment, the permitted sort, and the
+        // agent tools (ADR 0036).
+        let mut expected_schemas = Vec::new();
+        let mut expected_cards = Vec::new();
+        let mut expected_revisions = Vec::new();
+        let mut expect = |manifest: &ditto_capability::CapabilityManifest,
+                          schema: CapabilitySchema,
+                          deriver: ditto_capability::DeriverRevision|
+         -> Result<(), ReplayError> {
+            expected_revisions.push(
+                CapabilityRevision::from_contract(manifest, &schema, deriver)
+                    .map_err(|error| replay_invalid(error.to_string()))?,
+            );
+            expected_schemas.push(schema);
+            expected_cards.push(CapabilityCard::from(manifest));
+            Ok(())
+        };
+        match (&selected.manifest, !self.agent_run || self.sort.is_some()) {
+            (Some(manifest), true) => {
+                validate_artifact_read_manifest(manifest)
+                    .map_err(|error| replay_invalid(error.to_string()))?;
+                expect(
+                    manifest,
+                    capability_schema(),
+                    ArtifactReadDeriver::default().revision().clone(),
+                )?;
+            }
+            (None, false) => {}
+            _ => {
+                return Err(replay_invalid(
+                    "artifact.read selection contradicts the turn",
+                ));
+            }
+        }
         match (&self.sort, &selected.sort_manifest) {
             (Some(grant), Some(manifest)) => {
                 if !self
@@ -487,19 +481,13 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 }
                 ditto_artifact_sort::validate_manifest(manifest)
                     .map_err(|_| replay_invalid("sort manifest changed"))?;
-                let schema = ditto_artifact_sort::schema();
-                expected_revisions.push(
-                    CapabilityRevision::from_contract(
-                        manifest,
-                        &schema,
-                        ditto_artifact_sort::SortDeriver::default()
-                            .revision()
-                            .clone(),
-                    )
-                    .map_err(|error| replay_invalid(error.to_string()))?,
-                );
-                expected_schemas.push(schema);
-                expected_cards.push(CapabilityCard::from(manifest));
+                expect(
+                    manifest,
+                    ditto_artifact_sort::schema(),
+                    ditto_artifact_sort::SortDeriver::default()
+                        .revision()
+                        .clone(),
+                )?;
             }
             (None, None) => {}
             _ => {
@@ -508,90 +496,57 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 ));
             }
         }
-        if let Some(manifest) = &selected.fetch_manifest {
-            // Part of every agent run's stable tool surface while enabled.
+        if let Some(manifest) = &selected.web_manifest {
+            // Part of every agent run's stable tool surface while enabled; the
+            // recorded contract tells which of reading and searching it offered.
             if !self.agent_run || !ditto_web_fetch::validate_manifest(manifest) {
-                return Err(replay_invalid(
-                    "selected fetch contract contradicts the user's message",
-                ));
+                return Err(replay_invalid("selected web.browse is not an agent run's"));
             }
-            let schema = ditto_web_fetch::schema();
-            expected_revisions.push(
-                CapabilityRevision::from_contract(
-                    manifest,
-                    &schema,
-                    ditto_web_fetch::FetchDeriver::default().revision().clone(),
-                )
-                .map_err(|error| replay_invalid(error.to_string()))?,
-            );
-            expected_schemas.push(schema);
-            expected_cards.push(CapabilityCard::from(manifest));
-            self.fetch_selected = true;
-        }
-        if let Some(manifest) = &selected.search_manifest {
-            // Offered to agent runs while a search endpoint is set.
-            if !self.agent_run || !ditto_web_fetch::search::validate_manifest(manifest) {
-                return Err(replay_invalid("selected search is not an agent run's"));
+            let position = usize::from(selected.manifest.is_some())
+                + usize::from(selected.sort_manifest.is_some());
+            let recorded = selected
+                .epoch
+                .invocation_revisions()
+                .get(position)
+                .ok_or_else(|| replay_invalid("selected web.browse has no contract"))?;
+            let (read, search) = [(true, true), (true, false), (false, true)]
+                .into_iter()
+                .find(|(read, search)| {
+                    CapabilityRevision::from_contract(
+                        manifest,
+                        &ditto_web_fetch::schema(*read, *search),
+                        ditto_web_fetch::deriver_revision(),
+                    )
+                    .is_ok_and(|revision| &revision == recorded)
+                })
+                .ok_or_else(|| replay_invalid("selected web.browse schema is unknown"))?;
+            expect(
+                manifest,
+                ditto_web_fetch::schema(read, search),
+                ditto_web_fetch::deriver_revision(),
+            )?;
+            self.web = Some((read, search));
+            if !read {
+                self.web_grant.clear();
             }
-            let schema = ditto_web_fetch::search::schema();
-            expected_revisions.push(
-                CapabilityRevision::from_contract(
-                    manifest,
-                    &schema,
-                    ditto_web_fetch::search::deriver_revision(),
-                )
-                .map_err(|error| replay_invalid(error.to_string()))?,
-            );
-            expected_schemas.push(schema);
-            expected_cards.push(CapabilityCard::from(manifest));
-            self.search_selected = true;
+        } else {
+            self.web_grant.clear();
         }
         if let Some(manifest) = &selected.memory_manifest {
             // Offered to every agent run.
-            if !self.agent_run || !super::recall::validate_manifest(manifest) {
+            if !self.agent_run || !super::memory::validate_manifest(manifest) {
                 return Err(replay_invalid(
-                    "selected memory search is not an agent run's",
+                    "selected memory.manage is not an agent run's",
                 ));
             }
-            let schema = super::recall::schema();
-            expected_revisions.push(
-                CapabilityRevision::from_contract(
-                    manifest,
-                    &schema,
-                    super::recall::RecallDeriver::default().revision().clone(),
-                )
-                .map_err(|error| replay_invalid(error.to_string()))?,
-            );
-            expected_schemas.push(schema);
-            expected_cards.push(CapabilityCard::from(manifest));
+            expect(
+                manifest,
+                super::memory::schema(),
+                super::memory::deriver_revision(),
+            )?;
             self.memory_selected = true;
         }
-        for manifest in [&selected.remember_manifest, &selected.forget_manifest]
-            .into_iter()
-            .flatten()
-        {
-            // Offered to every agent run.
-            if !self.agent_run || !super::memory_write::validate_manifest(manifest) {
-                return Err(replay_invalid(
-                    "selected memory write is not an agent run's",
-                ));
-            }
-            let schema = super::memory_write::schema(&manifest.id);
-            expected_revisions.push(
-                CapabilityRevision::from_contract(
-                    manifest,
-                    &schema,
-                    super::memory_write::MemoryWriteDeriver::for_capability(&manifest.id)
-                        .revision()
-                        .clone(),
-                )
-                .map_err(|error| replay_invalid(error.to_string()))?,
-            );
-            expected_schemas.push(schema);
-            expected_cards.push(CapabilityCard::from(manifest));
-        }
-        self.remember_selected = selected.remember_manifest.is_some();
-        self.forget_selected = selected.forget_manifest.is_some();
+        self.read_selected = selected.manifest.is_some();
         if selected.epoch.invocation_revisions() != expected_revisions {
             return Err(replay_invalid("selected invocation revisions changed"));
         }
@@ -774,15 +729,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         call_id,
                         capability_id,
                     } => {
-                        if capability_id != ARTIFACT_READ_ID
-                            && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
-                            && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
-                            && !(self.search_selected
-                                && capability_id == ditto_web_fetch::search::ID)
-                            && !(self.memory_selected && capability_id == super::recall::ID)
-                            && !(self.remember_selected && capability_id == REMEMBER_ID)
-                            && !(self.forget_selected && capability_id == FORGET_ID)
-                        {
+                        if !self.offers(capability_id) {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
                                 format!("unknown capability {capability_id}"),
@@ -829,15 +776,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         capability_id,
                         arguments,
                     } => {
-                        if capability_id != ARTIFACT_READ_ID
-                            && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
-                            && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
-                            && !(self.search_selected
-                                && capability_id == ditto_web_fetch::search::ID)
-                            && !(self.memory_selected && capability_id == super::recall::ID)
-                            && !(self.remember_selected && capability_id == REMEMBER_ID)
-                            && !(self.forget_selected && capability_id == FORGET_ID)
-                        {
+                        if !self.offers(capability_id) {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
                                 format!("unknown capability {capability_id}"),
@@ -1009,45 +948,28 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         return Ok(ArtifactReadTurnReplay::Failed { failure });
                     }
 
-                    if call.capability_id == ditto_web_fetch::ID
-                        || call.capability_id == ditto_web_fetch::search::ID
-                        || call.capability_id == ditto_artifact_sort::ID
-                        || call.capability_id == ARTIFACT_READ_ID
-                    {
+                    if call.capability_id != super::memory::ID {
                         self.read_external_content = true;
                     }
-                    if call.capability_id == ditto_web_fetch::search::ID {
-                        if let Some(failure) =
-                            self.replay_search_call(request_index as u8, &call)?
-                        {
+                    let at = request_index as u8;
+                    let stopped = if call.capability_id == ditto_web_fetch::ID {
+                        Some(self.replay_web_call(at, &call)?)
+                    } else if call.capability_id == super::memory::ID {
+                        Some(self.replay_memory_call(at, &call)?)
+                    } else if call.capability_id == ditto_artifact_sort::ID {
+                        Some(self.replay_sort_call(at, &call)?)
+                    } else {
+                        None
+                    };
+                    match stopped {
+                        Some(Some(failure)) => {
                             return Ok(ArtifactReadTurnReplay::Failed { failure });
                         }
-                        request_index += 1;
-                        continue;
-                    }
-                    if call.capability_id == ditto_web_fetch::ID {
-                        if let Some(failure) = self.replay_fetch_call(request_index as u8, &call)? {
-                            return Ok(ArtifactReadTurnReplay::Failed { failure });
+                        Some(None) => {
+                            request_index += 1;
+                            continue;
                         }
-                        request_index += 1;
-                        continue;
-                    }
-                    if call.capability_id == ditto_artifact_sort::ID {
-                        if let Some(failure) = self.replay_sort_call(request_index as u8, &call)? {
-                            return Ok(ArtifactReadTurnReplay::Failed { failure });
-                        }
-                        request_index += 1;
-                        continue;
-                    }
-                    if call.capability_id == super::recall::ID {
-                        self.replay_recall_call(request_index as u8, &call)?;
-                        request_index += 1;
-                        continue;
-                    }
-                    if call.capability_id == REMEMBER_ID || call.capability_id == FORGET_ID {
-                        self.replay_memory_write(request_index as u8, &call)?;
-                        request_index += 1;
-                        continue;
+                        None => {}
                     }
 
                     let capability_event =
@@ -1497,11 +1419,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             requests: self.requests,
             outputs: self.outputs,
             calls: self.calls,
-            sort_calls: self.sort_calls,
-            fetch_calls: self.fetch_calls,
-            recall_calls: self.recall_calls,
-            memory_writes: self.memory_writes,
-            search_calls: self.search_calls,
+            tool_calls: self.tool_calls,
             terminal,
 
             sequence_span: TurnSequenceSpan {
@@ -1651,6 +1569,14 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         }
     }
 
+    /// Whether the recorded selection offered a call to `capability_id`.
+    fn offers(&self, capability_id: &str) -> bool {
+        (self.read_selected && capability_id == ARTIFACT_READ_ID)
+            || (self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
+            || (self.web.is_some() && capability_id == ditto_web_fetch::ID)
+            || (self.memory_selected && capability_id == super::memory::ID)
+    }
+
     fn take(&mut self, kind: &str, actor: EventActor) -> Result<&'turn EventRecord, ReplayError> {
         let event = self
             .events
@@ -1759,7 +1685,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             TurnFailureReason::ArtifactReadPackageUnverified,
             TurnFailureReason::ArtifactReadManifestMismatch,
             TurnFailureReason::ArtifactReadSchemaMismatch,
-            TurnFailureReason::ArtifactReadSelectionFailed,
+            TurnFailureReason::ToolSelectionFailed,
         ];
         if self.sort.is_some() {
             allowed.extend([
@@ -2046,10 +1972,7 @@ fn rebuild_selection(
             ARTIFACT_READ_ID => Ok(ditto_artifact_read::manifest()),
             ditto_artifact_sort::ID => Ok(ditto_artifact_sort::manifest()),
             ditto_web_fetch::ID => Ok(ditto_web_fetch::manifest()),
-            ditto_web_fetch::search::ID => Ok(ditto_web_fetch::search::manifest()),
-            super::recall::ID => Ok(super::recall::manifest()),
-            REMEMBER_ID => Ok(super::memory_write::remember_manifest()),
-            FORGET_ID => Ok(super::memory_write::forget_manifest()),
+            super::memory::ID => Ok(super::memory::manifest()),
             _ => Err(replay_invalid("selected contract is not a builtin")),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2073,14 +1996,10 @@ fn rebuild_selection(
     Ok(CapabilitiesSelectedPayload {
         event_version: recorded.event_version,
         turn_id: recorded.turn_id,
-        manifest: take(ARTIFACT_READ_ID)
-            .ok_or_else(|| replay_invalid("artifact.read was not selected"))?,
+        manifest: take(ARTIFACT_READ_ID),
         sort_manifest: take(ditto_artifact_sort::ID),
-        fetch_manifest: take(ditto_web_fetch::ID),
-        search_manifest: take(ditto_web_fetch::search::ID),
-        memory_manifest: take(super::recall::ID),
-        remember_manifest: take(REMEMBER_ID),
-        forget_manifest: take(FORGET_ID),
+        web_manifest: take(ditto_web_fetch::ID),
+        memory_manifest: take(super::memory::ID),
         epoch,
     })
 }

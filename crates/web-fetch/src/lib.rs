@@ -1,8 +1,10 @@
-//! `web.fetch`: read the text of a web page the user linked (ADR 0027).
+//! `web.browse` (ADR 0036): read the text of a web page the user linked
+//! (ADR 0027), or search through the operator's service (ADR 0033).
 //!
-//! Only URLs that appear in the user's own message may be fetched, so a model
-//! cannot choose a destination. Every hop of a fetch resolves to public
-//! addresses only and connects to exactly the addresses it checked.
+//! Only URLs that appear in the user's own message may be read, and only the
+//! configured endpoint searched, so a model cannot choose a destination.
+//! Every hop of a read resolves to public addresses only and connects to
+//! exactly the addresses it checked.
 use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
 
 use ditto_capability::{
@@ -25,7 +27,7 @@ pub mod search;
 pub use address::is_public;
 pub use html::extract as extract_html;
 
-pub const ID: &str = "web.fetch";
+pub const ID: &str = "web.browse";
 pub const VERSION: &str = "0.1.0";
 /// URLs taken from one user message; later ones are ignored.
 pub const MAX_USER_URLS: usize = 5;
@@ -126,9 +128,9 @@ pub fn effect() -> EffectProfile {
 
 pub fn manifest() -> CapabilityManifest {
     toml::from_str(include_str!(
-        "../../../capabilities/core/web-fetch/capability.toml"
+        "../../../capabilities/core/web-browse/capability.toml"
     ))
-    .expect("packaged web.fetch manifest is valid")
+    .expect("packaged web.browse manifest is valid")
 }
 
 /// The installed package must be exactly the one this code implements.
@@ -136,54 +138,130 @@ pub fn validate_manifest(installed: &CapabilityManifest) -> bool {
     canonical_manifest_digest(installed) == canonical_manifest_digest(&manifest())
 }
 
-pub fn schema() -> CapabilitySchema {
+pub fn deriver_revision() -> DeriverRevision {
+    DeriverRevision::new("web-browse-v1").expect("static deriver revision is valid")
+}
+
+/// What one call asks for: a page the user linked, or a search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum WebRequest {
+    Read { url: String },
+    Search { query: String },
+}
+
+impl WebRequest {
+    /// The request of schema-valid arguments under a schema that offers
+    /// `read` and `search`: a canonical URL, or a trimmed, nonblank query.
+    pub fn from_arguments(arguments: &Value, read: bool, search: bool) -> Option<Self> {
+        match (arguments.get("url"), arguments.get("query")) {
+            (Some(url), None) if read => Some(Self::Read {
+                url: canonical_url(url.as_str()?).ok()?,
+            }),
+            (None, Some(query)) if search => {
+                let query = query.as_str()?.trim();
+                (!query.is_empty()).then(|| Self::Search {
+                    query: query.to_owned(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// What a deployment lets `web.browse` do: read pages the user linked,
+/// search at the operator's endpoint, or both. The tool is offered only when
+/// one of them is enabled, and its schema offers only those.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebAccess {
+    pub read: Option<FetchPolicy>,
+    pub search: Option<search::SearchEndpoint>,
+}
+
+impl WebAccess {
+    pub fn enabled(&self) -> bool {
+        self.read.is_some() || self.search.is_some()
+    }
+
+    pub fn schema(&self) -> CapabilitySchema {
+        schema(self.read.is_some(), self.search.is_some())
+    }
+
+    pub fn deriver(&self) -> WebDeriver {
+        WebDeriver {
+            read: self.read.is_some(),
+            search: self.search.clone(),
+            revision: deriver_revision(),
+        }
+    }
+}
+
+/// The tool's schema when the deployment offers `read`, `search` or both.
+pub fn schema(read: bool, search: bool) -> CapabilitySchema {
+    let mut properties = serde_json::Map::new();
+    if read {
+        properties.insert(
+            "url".into(),
+            json!({"type": "string", "minLength": 10, "maxLength": MAX_URL_BYTES,
+                   "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"}),
+        );
+    }
+    if search {
+        properties.insert(
+            "query".into(),
+            json!({"type": "string", "minLength": 1, "maxLength": search::MAX_QUERY_CHARS}),
+        );
+    }
+    let (summary, input_schema) = match (read, search) {
+        (true, true) => (
+            "Search the web for current or outside information (query), or read a web page whose link the user sent in this message (url); give one of them.",
+            json!({"type": "object", "additionalProperties": false,
+                   "minProperties": 1, "maxProperties": 1, "properties": properties}),
+        ),
+        (true, false) => (
+            "Read the text of a web page whose link the user sent in this message.",
+            json!({"type": "object", "additionalProperties": false,
+                   "required": ["url"], "properties": properties}),
+        ),
+        _ => (
+            "Search the web for current or outside information; returns the titles, links and snippets of the top results.",
+            json!({"type": "object", "additionalProperties": false,
+                   "required": ["query"], "properties": properties}),
+        ),
+    };
     CapabilitySchema {
         id: ID.into(),
         version: VERSION.into(),
-        summary: manifest().summary,
-        input_schema: json!({
-            "type": "object", "additionalProperties": false, "required": ["url"],
-            "properties": {
-                "url": {"type": "string", "minLength": 10, "maxLength": MAX_URL_BYTES,
-                        "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://"}
-            }
-        }),
-        output_schema: json!({
-            "type": "object", "additionalProperties": false,
-            "required": ["url", "final_url", "status", "content_type", "text", "truncated"],
-            "properties": {
-                "url": {"type": "string", "maxLength": MAX_URL_BYTES},
-                "final_url": {"type": "string", "maxLength": MAX_URL_BYTES},
-                "status": {"type": "integer", "minimum": 200, "maximum": 299},
-                "content_type": {"type": "string", "maxLength": 256},
-                "title": {"type": "string", "maxLength": 1_024},
-                "text": {"type": "string", "maxLength": MAX_TEXT_CHARS * 4},
-                "truncated": {"type": "boolean"}
-            }
-        }),
+        summary: summary.into(),
+        input_schema,
+        output_schema: json!({"type": "object"}),
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FetchArguments {
-    pub url: String,
+/// Derives a call's one resource: the URL it reads, or the endpoint it
+/// searches.
+pub struct WebDeriver {
+    read: bool,
+    search: Option<search::SearchEndpoint>,
+    revision: DeriverRevision,
 }
 
-pub struct FetchDeriver(DeriverRevision);
-
-impl Default for FetchDeriver {
-    fn default() -> Self {
-        Self(DeriverRevision::new("web-fetch-v1").expect("static deriver revision is valid"))
+impl WebDeriver {
+    fn resource(&self, request: &WebRequest) -> Option<CanonicalResource> {
+        match request {
+            WebRequest::Read { url } if self.read => CanonicalResource::url(url).ok(),
+            WebRequest::Search { .. } => self.search.as_ref()?.resource().ok(),
+            WebRequest::Read { .. } => None,
+        }
     }
 }
 
-impl CapabilityDeriver for FetchDeriver {
+impl CapabilityDeriver for WebDeriver {
     fn capability_id(&self) -> &str {
         ID
     }
     fn revision(&self) -> &DeriverRevision {
-        &self.0
+        &self.revision
     }
     fn normalize(
         &self,
@@ -191,11 +269,11 @@ impl CapabilityDeriver for FetchDeriver {
         budget: &mut DerivationBudget,
     ) -> Result<Value, DeriverError> {
         budget.charge(1)?;
-        let arguments: FetchArguments = serde_json::from_value(arguments.clone())
-            .map_err(|_| DeriverError::new("invalid web.fetch arguments"))?;
-        let url =
-            canonical_url(&arguments.url).map_err(|error| DeriverError::new(error.to_string()))?;
-        Ok(json!(FetchArguments { url }))
+        WebRequest::from_arguments(arguments, self.read, self.search.is_some())
+            .map(|request| json!(request))
+            .ok_or_else(|| {
+                DeriverError::new("web.browse takes one fetchable url or nonblank query")
+            })
     }
     fn derive_effect(
         &self,
@@ -211,10 +289,11 @@ impl CapabilityDeriver for FetchDeriver {
         budget: &mut DerivationBudget,
     ) -> Result<BTreeSet<CanonicalResource>, DeriverError> {
         budget.charge(1)?;
-        let arguments: FetchArguments = serde_json::from_value(arguments.clone())
-            .map_err(|_| DeriverError::new("invalid web.fetch arguments"))?;
-        let resource = CanonicalResource::url(arguments.url)
-            .map_err(|_| DeriverError::new("invalid URL resource"))?;
+        let request: WebRequest = serde_json::from_value(arguments.clone())
+            .map_err(|_| DeriverError::new("invalid web.browse request"))?;
+        let resource = self
+            .resource(&request)
+            .ok_or_else(|| DeriverError::new("web.browse request has no resource"))?;
         Ok(BTreeSet::from([resource]))
     }
 }
@@ -279,7 +358,7 @@ impl FetchedPage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "error", rename_all = "snake_case")]
-pub enum FetchError {
+pub enum WebError {
     #[error("the invocation or execution claim is invalid")]
     Unauthorized,
     #[error("URL is not fetchable")]
@@ -300,39 +379,69 @@ pub enum FetchError {
     HttpStatus { status: u16 },
     #[error("the content type is not text")]
     UnsupportedContentType,
+    #[error("the search service's answer is not a result list")]
+    InvalidResponse,
 }
 
-/// Execute one authorized `web.fetch` invocation. The claim is consumed here:
-/// it must match the invocation, whose contract, placement, effect and
-/// resource must be exactly this capability's.
+/// What a call returned: a page's text, or search results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebOutput {
+    Page(FetchedPage),
+    Results(search::SearchResults),
+}
+
+/// Execute one authorized `web.browse` invocation. The claim is consumed
+/// here: it must match the invocation, whose contract, placement, effect and
+/// resource must be exactly this capability's under `access`.
 pub async fn execute(
     invocation: CanonicalInvocation,
     claim: ExecutionClaim,
-    policy: FetchPolicy,
+    access: &WebAccess,
     cancellation: CancellationToken,
-) -> Result<FetchedPage, FetchError> {
+) -> Result<WebOutput, WebError> {
     let now = chrono::Utc::now();
     claim
         .validate(&invocation, now)
-        .map_err(|_| FetchError::Unauthorized)?;
+        .map_err(|_| WebError::Unauthorized)?;
     let revision =
-        CapabilityRevision::from_contract(&manifest(), &schema(), FetchDeriver::default().0)
-            .map_err(|_| FetchError::Unauthorized)?;
-    let arguments: FetchArguments =
-        serde_json::from_value(invocation.normalized_arguments().clone())
-            .map_err(|_| FetchError::Unauthorized)?;
-    let resource = CanonicalResource::url(&arguments.url).map_err(|_| FetchError::Unauthorized)?;
+        CapabilityRevision::from_contract(&manifest(), &access.schema(), deriver_revision())
+            .map_err(|_| WebError::Unauthorized)?;
+    let request: WebRequest = serde_json::from_value(invocation.normalized_arguments().clone())
+        .map_err(|_| WebError::Unauthorized)?;
+    let resource = access
+        .deriver()
+        .resource(&request)
+        .ok_or(WebError::Unauthorized)?;
     if invocation.capability_revision() != &revision
         || invocation.placement() != ResolvedPlacement::LocalBuiltin
         || invocation.effect() != effect()
         || invocation.resources() != &BTreeSet::from([resource])
     {
-        return Err(FetchError::Unauthorized);
+        return Err(WebError::Unauthorized);
     }
     let remaining = (claim.expires_at() - now)
         .to_std()
-        .map_err(|_| FetchError::Timeout)?;
-    fetch(&arguments.url, policy, &cancellation, remaining).await
+        .map_err(|_| WebError::Timeout)?;
+    match (request, access) {
+        (
+            WebRequest::Read { url },
+            WebAccess {
+                read: Some(policy), ..
+            },
+        ) => fetch(&url, *policy, &cancellation, remaining)
+            .await
+            .map(WebOutput::Page),
+        (
+            WebRequest::Search { query },
+            WebAccess {
+                search: Some(endpoint),
+                ..
+            },
+        ) => search::search(&endpoint.request_url(&query), &cancellation, remaining)
+            .await
+            .map(WebOutput::Results),
+        _ => Err(WebError::Unauthorized),
+    }
 }
 
 /// Fetch `url` with GET and return its readable text. Stops at the first of
@@ -342,14 +451,14 @@ pub async fn fetch(
     policy: FetchPolicy,
     cancellation: &CancellationToken,
     deadline: Duration,
-) -> Result<FetchedPage, FetchError> {
-    let requested = canonical_url(url).map_err(|_| FetchError::InvalidUrl)?;
+) -> Result<FetchedPage, WebError> {
+    let requested = canonical_url(url).map_err(|_| WebError::InvalidUrl)?;
     let limit = deadline.min(FETCH_TIMEOUT);
     tokio::select! {
         biased;
-        () = cancellation.cancelled() => Err(FetchError::Cancelled),
+        () = cancellation.cancelled() => Err(WebError::Cancelled),
         result = tokio::time::timeout(limit, follow(requested, policy)) => {
-            result.unwrap_or(Err(FetchError::Timeout))
+            result.unwrap_or(Err(WebError::Timeout))
         }
     }
 }
@@ -366,8 +475,8 @@ struct Response {
 
 /// GET `requested`, following redirects by hand: every hop is re-checked
 /// against `policy` and connects only to the addresses it checked.
-async fn get(requested: &str, policy: FetchPolicy, accept: &str) -> Result<Response, FetchError> {
-    let mut current = Url::parse(requested).map_err(|_| FetchError::InvalidUrl)?;
+async fn get(requested: &str, policy: FetchPolicy, accept: &str) -> Result<Response, WebError> {
+    let mut current = Url::parse(requested).map_err(|_| WebError::InvalidUrl)?;
     for _ in 0..=MAX_REDIRECTS {
         let client = client_for(&current, policy).await?;
         let response = client
@@ -377,9 +486,9 @@ async fn get(requested: &str, policy: FetchPolicy, accept: &str) -> Result<Respo
             .await
             .map_err(|error| {
                 if error.is_timeout() {
-                    FetchError::Timeout
+                    WebError::Timeout
                 } else {
-                    FetchError::Connection
+                    WebError::Connection
                 }
             })?;
         let status = response.status();
@@ -388,15 +497,14 @@ async fn get(requested: &str, policy: FetchPolicy, accept: &str) -> Result<Respo
                 .headers()
                 .get(header::LOCATION)
                 .and_then(|value| value.to_str().ok())
-                .ok_or(FetchError::Connection)?;
-            let next = current.join(location).map_err(|_| FetchError::InvalidUrl)?;
-            current =
-                Url::parse(&canonical_url(next.as_str()).map_err(|_| FetchError::InvalidUrl)?)
-                    .map_err(|_| FetchError::InvalidUrl)?;
+                .ok_or(WebError::Connection)?;
+            let next = current.join(location).map_err(|_| WebError::InvalidUrl)?;
+            current = Url::parse(&canonical_url(next.as_str()).map_err(|_| WebError::InvalidUrl)?)
+                .map_err(|_| WebError::InvalidUrl)?;
             continue;
         }
         if !status.is_success() {
-            return Err(FetchError::HttpStatus {
+            return Err(WebError::HttpStatus {
                 status: status.as_u16(),
             });
         }
@@ -420,7 +528,7 @@ async fn get(requested: &str, policy: FetchPolicy, accept: &str) -> Result<Respo
             over,
         });
     }
-    Err(FetchError::TooManyRedirects)
+    Err(WebError::TooManyRedirects)
 }
 
 /// [`get`] bounded by cancellation, the fetch timeout and `deadline`.
@@ -430,18 +538,18 @@ async fn get_within(
     accept: &str,
     cancellation: &CancellationToken,
     deadline: Duration,
-) -> Result<Response, FetchError> {
+) -> Result<Response, WebError> {
     let limit = deadline.min(FETCH_TIMEOUT);
     tokio::select! {
         biased;
-        () = cancellation.cancelled() => Err(FetchError::Cancelled),
+        () = cancellation.cancelled() => Err(WebError::Cancelled),
         result = tokio::time::timeout(limit, get(requested, policy, accept)) => {
-            result.unwrap_or(Err(FetchError::Timeout))
+            result.unwrap_or(Err(WebError::Timeout))
         }
     }
 }
 
-async fn follow(requested: String, policy: FetchPolicy) -> Result<FetchedPage, FetchError> {
+async fn follow(requested: String, policy: FetchPolicy) -> Result<FetchedPage, WebError> {
     let response = get(
         &requested,
         policy,
@@ -465,7 +573,7 @@ async fn follow(requested: String, policy: FetchPolicy) -> Result<FetchedPage, F
         {
             false
         }
-        _ => return Err(FetchError::UnsupportedContentType),
+        _ => return Err(WebError::UnsupportedContentType),
     };
     let (title, text) = if html {
         html::extract(&body)
@@ -486,22 +594,22 @@ async fn follow(requested: String, policy: FetchPolicy) -> Result<FetchedPage, F
 
 /// A client whose only route to the URL's host is the set of addresses that
 /// passed the policy, so DNS cannot change between the check and the connect.
-async fn client_for(url: &Url, policy: FetchPolicy) -> Result<reqwest::Client, FetchError> {
-    let host = url.host_str().ok_or(FetchError::InvalidUrl)?;
-    let port = url.port_or_known_default().ok_or(FetchError::InvalidUrl)?;
+async fn client_for(url: &Url, policy: FetchPolicy) -> Result<reqwest::Client, WebError> {
+    let host = url.host_str().ok_or(WebError::InvalidUrl)?;
+    let port = url.port_or_known_default().ok_or(WebError::InvalidUrl)?;
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     let addresses: Vec<SocketAddr> = match bare.parse::<std::net::IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],
         Err(_) => tokio::net::lookup_host((bare, port))
             .await
-            .map_err(|_| FetchError::Resolution)?
+            .map_err(|_| WebError::Resolution)?
             .collect(),
     };
     if addresses.is_empty() {
-        return Err(FetchError::Resolution);
+        return Err(WebError::Resolution);
     }
     if !policy.allow_private_addresses && addresses.iter().any(|address| !is_public(address.ip())) {
-        return Err(FetchError::BlockedAddress);
+        return Err(WebError::BlockedAddress);
     }
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -511,18 +619,18 @@ async fn client_for(url: &Url, policy: FetchPolicy) -> Result<reqwest::Client, F
     if bare.parse::<std::net::IpAddr>().is_err() {
         builder = builder.resolve_to_addrs(bare, &addresses);
     }
-    builder.build().map_err(|_| FetchError::Connection)
+    builder.build().map_err(|_| WebError::Connection)
 }
 
-async fn read_bounded(response: reqwest::Response) -> Result<(Vec<u8>, bool), FetchError> {
+async fn read_bounded(response: reqwest::Response) -> Result<(Vec<u8>, bool), WebError> {
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| {
             if error.is_timeout() {
-                FetchError::Timeout
+                WebError::Timeout
             } else {
-                FetchError::Connection
+                WebError::Connection
             }
         })?;
         let room = MAX_BODY_BYTES - body.len();

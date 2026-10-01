@@ -3,7 +3,8 @@
 Status: accepted on 2026-09-30 for Task 029, as part of
 [ADR 0028](0028-thin-realtime-harness.md) Phase E. Turn payload version 8.
 Amended by [ADR 0031](0031-model-managed-memory.md): from version 10 the search
-also reads what Ditto inferred, marked as such.
+also reads what Ditto inferred, marked as such. Amended by [ADR 0036](0036-two-agent-tools-one-lifecycle.md): the search is the
+`search` action of `memory.manage`.
 
 ## Context
 

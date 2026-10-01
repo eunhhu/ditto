@@ -70,10 +70,8 @@ async fn model_sort_continues_with_verified_output_and_survives_restart() {
         [
             "artifact.read",
             "artifact.sort",
-            "web.fetch",
-            "memory.search",
-            "memory.remember",
-            "memory.forget"
+            "web.browse",
+            "memory.manage"
         ]
     );
     let initial = serde_json::to_value(&requests[0].turn.conversation).unwrap();
@@ -89,7 +87,7 @@ async fn model_sort_continues_with_verified_output_and_survives_restart() {
     let events = fixture.events_for_session("personal");
     assert!(!events.iter().any(|e| e.kind == event_kind::TASK_COMPLETED));
     let replay = replay_artifact_read_turn(&events, &accepted.turn_id).unwrap();
-    assert_eq!(replay.sort_calls.len(), 1);
+    assert_eq!(replay.tool_calls.len(), 1);
     assert_eq!(replay.calls.len(), 1);
     assert_eq!(replay.requests.len(), 3);
     let count = fixture.kernel.event_count().unwrap();
@@ -139,7 +137,7 @@ async fn invalid_or_unpermitted_calls_preserve_one_shot_lease_and_repeats_cannot
     let events = fixture.events_for_session("personal");
     let outputs: Vec<_> = events
         .iter()
-        .filter(|e| e.kind == event_kind::AGENT_SORT_OUTPUT)
+        .filter(|e| e.kind == event_kind::TOOL_OUTPUT)
         .collect();
     assert_eq!(outputs.len(), 5);
     for (index, code) in [
@@ -154,14 +152,14 @@ async fn invalid_or_unpermitted_calls_preserve_one_shot_lease_and_repeats_cannot
     assert_eq!(
         events
             .iter()
-            .filter(|e| e.kind == event_kind::AGENT_SORT_STARTED)
+            .filter(|e| e.kind == event_kind::TOOL_STARTED)
             .count(),
         1
     );
     assert_eq!(
         replay_artifact_read_turn(&events, &accepted.turn_id)
             .unwrap()
-            .sort_calls
+            .tool_calls
             .len(),
         5
     );
@@ -183,25 +181,17 @@ async fn no_permission_means_no_sort_schema_or_execution_even_when_text_asks_for
     let status = terminal(&fixture.kernel, &command).await;
     assert_eq!(status.failure_code.as_deref(), Some("protocol"));
     assert!(status.sort.is_none());
-    // The stable surface offers web.fetch; artifact.sort needs an attachment.
+    // The stable surface is the two agent tools; artifact.read and
+    // artifact.sort need an attachment.
     let tools = driver.requests()[0]
         .tools
         .iter()
         .map(|tool| tool.id.clone())
         .collect::<Vec<_>>();
-    assert_eq!(
-        tools,
-        [
-            "artifact.read",
-            "web.fetch",
-            "memory.search",
-            "memory.remember",
-            "memory.forget"
-        ]
-    );
+    assert_eq!(tools, ["web.browse", "memory.manage"]);
     fixture.kernel.shutdown_agent_runs().await.unwrap();
     let events = fixture.events_for_session("personal");
-    assert!(!events.iter().any(|e| e.kind.starts_with("agent.sort.")));
+    assert!(!events.iter().any(|e| e.kind.starts_with("tool.")));
     replay_artifact_read_turn(&events, &accepted.turn_id).unwrap();
 }
 
@@ -279,10 +269,7 @@ async fn verified_sort_survives_later_model_failure() {
 
 #[tokio::test]
 async fn cancellation_before_authorization_and_after_claim_never_publishes_success() {
-    for checkpoint in [
-        event_kind::AGENT_SORT_REQUESTED,
-        event_kind::AGENT_SORT_STARTED,
-    ] {
+    for checkpoint in [event_kind::TOOL_REQUESTED, event_kind::TOOL_STARTED] {
         let fixture = Fixture::new();
         let command = permitted(false);
         let driver = ScriptedDriver::new(vec![sort_call(
@@ -312,7 +299,7 @@ async fn cancellation_before_authorization_and_after_claim_never_publishes_succe
         let sort = status.sort.unwrap();
         assert_eq!(
             sort.state,
-            if checkpoint == event_kind::AGENT_SORT_STARTED {
+            if checkpoint == event_kind::TOOL_STARTED {
                 AgentSortState::Failed
             } else {
                 AgentSortState::NotRun
@@ -322,7 +309,7 @@ async fn cancellation_before_authorization_and_after_claim_never_publishes_succe
         fixture.kernel.shutdown_agent_runs().await.unwrap();
         let events = fixture.events_for_session("personal");
         let replay = replay_artifact_read_turn(&events, &accepted.turn_id).unwrap();
-        assert_eq!(replay.sort_calls.len(), 1);
+        assert_eq!(replay.tool_calls.len(), 1);
         assert_eq!(driver.requests().len(), 1);
         assert!(
             !events
@@ -367,30 +354,22 @@ async fn replay_and_status_reject_changed_permission_dispatch_result_and_roots()
             json!(ulid::Ulid::new().to_string()),
         ),
         (
-            event_kind::AGENT_SORT_REQUESTED,
+            event_kind::TOOL_REQUESTED,
             "/normalized/unique",
             json!(false),
         ),
         (
-            event_kind::AGENT_SORT_STARTED,
-            "/normalized/reference",
-            json!(worker::input_reference(b"elsewhere")),
+            event_kind::TOOL_STARTED,
+            "/invocation_digest",
+            json!("0".repeat(64)),
         ),
-        (event_kind::AGENT_SORT_STARTED, "/claim_id", json!("fake")),
-        (event_kind::AGENT_SORT_STARTED, "/request_index", json!(6)),
-        (event_kind::AGENT_SORT_OUTPUT, "/claimed", json!(false)),
+        (event_kind::TOOL_STARTED, "/claim_id", json!("fake")),
+        (event_kind::TOOL_STARTED, "/request_index", json!(6)),
+        (event_kind::TOOL_OUTPUT, "/claimed", json!(false)),
+        (event_kind::TOOL_OUTPUT, "/result/verifier", json!("fake")),
+        (event_kind::TOOL_OUTPUT, "/result/output_lines", json!(999)),
         (
-            event_kind::AGENT_SORT_OUTPUT,
-            "/result/verifier",
-            json!("fake"),
-        ),
-        (
-            event_kind::AGENT_SORT_OUTPUT,
-            "/result/output_lines",
-            json!(999),
-        ),
-        (
-            event_kind::AGENT_SORT_OUTPUT,
+            event_kind::TOOL_OUTPUT,
             "/artifact_event_id",
             json!(ulid::Ulid::new().to_string()),
         ),

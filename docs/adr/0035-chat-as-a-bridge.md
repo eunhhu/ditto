@@ -65,6 +65,14 @@ The instructions grew by 244 bytes (2,066 to 2,310), constant across turns.
 Lines said before a tool call are not shown again after a web page reload;
 the answer is.
 
+## Compatibility and rollback
+
+Turns recorded under contract 11 no longer replay (ADR 0034); their answers
+stay readable. Clients that relied on HTTP 429 for a second message now get
+that message answered. Rolling back means restoring the per-session slot
+check and contract 11; acknowledged inputs, which have no turn, would then
+read as interrupted runs.
+
 ## Alternatives
 
 - **A queue per session.** Still makes the next message wait.

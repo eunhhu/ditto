@@ -270,25 +270,7 @@ mod tests {
     #[tokio::test]
     async fn conversation_endpoint_lists_the_current_thread() {
         let root = tempfile::tempdir().unwrap();
-        let setup = DittoKernel::open(KernelConfig::new(
-            root.path().join("data"),
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities"),
-        ))
-        .unwrap();
-        let reference = setup
-            .store_artifact(
-                b"web evidence",
-                ditto_kernel::ArtifactWriteContext {
-                    session_id: Some("personal".into()),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .metadata
-            .reference
-            .to_string();
-        drop(setup);
-        let driver: Arc<dyn ModelDriver> = Arc::new(HttpDriver::new(reference, false));
+        let driver: Arc<dyn ModelDriver> = Arc::new(HttpDriver::new(false));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let kernel = DittoKernel::open(KernelConfig::new(

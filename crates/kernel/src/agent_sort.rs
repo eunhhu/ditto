@@ -1,8 +1,16 @@
 //! Bounded, independently verified process status inside an agent run.
-use ditto_artifact_sort as worker;
+use ditto_artifact_sort::{self as worker, SortArguments};
 use ditto_protocol::{AgentSortProgress, AgentSortState, EventRecord, event_kind};
+use serde_json::json;
 
-use crate::{AgentRunError, DittoKernel, agent_run::AgentRunMetadata, turn::sort::*};
+use crate::{
+    AgentRunError, DittoKernel,
+    agent_run::AgentRunMetadata,
+    turn::{
+        sort::*,
+        tool::{self, ToolOutput, ToolRequested, ToolStarted},
+    },
+};
 
 impl DittoKernel {
     pub(crate) fn agent_sort_progress(
@@ -34,7 +42,7 @@ impl DittoKernel {
         let events = self
             .inner
             .events
-            .agent_sort_events(
+            .turn_tool_events(
                 input.session_id.as_deref().ok_or(AgentRunError::Storage)?,
                 input.task_id.as_deref().ok_or(AgentRunError::Storage)?,
                 input
@@ -43,7 +51,7 @@ impl DittoKernel {
                     .ok_or(AgentRunError::Storage)?,
             )
             .map_err(|_| AgentRunError::Storage)?;
-        if events.len() > 8 {
+        if events.len() > 14 {
             return Err(AgentRunError::Storage);
         }
         let mut progress = AgentSortProgress {
@@ -54,24 +62,44 @@ impl DittoKernel {
             output: None,
             failure_code: None,
         };
-        let mut start: Option<(SortToolStarted, &EventRecord)> = None;
+        // The request a start or output answers, with its arguments as replay
+        // normalizes them.
+        let request_of = |id: Option<&str>| {
+            let requested = get(id.ok_or(AgentRunError::Storage)?)?;
+            let request: ToolRequested = serde_json::from_value(requested.payload.clone())
+                .map_err(|_| AgentRunError::Storage)?;
+            let arguments = normalize_call(&request.arguments);
+            if !tool::valid_requested(
+                &request,
+                &requested,
+                input,
+                arguments
+                    .as_ref()
+                    .map(|arguments| json!(arguments))
+                    .as_ref(),
+            ) {
+                return Err(AgentRunError::Storage);
+            }
+            Ok((requested, request, arguments))
+        };
+        let deadline = input.recorded_at + chrono::Duration::minutes(5);
+        let mut start: Option<(&EventRecord, SortArguments)> = None;
         let mut claimed_output = false;
         let mut last_output_index = None;
-        for event in &events {
-            if event.kind == event_kind::AGENT_SORT_STARTED {
-                let payload: SortToolStarted = serde_json::from_value(event.payload.clone())
+        for event in events
+            .iter()
+            .filter(|event| event.payload["capability_id"] == worker::ID)
+        {
+            if event.kind == event_kind::TOOL_STARTED {
+                let payload: ToolStarted = serde_json::from_value(event.payload.clone())
                     .map_err(|_| AgentRunError::Storage)?;
-                let requested = get(event
-                    .causation_id
-                    .as_deref()
-                    .ok_or(AgentRunError::Storage)?)?;
-                let request: SortToolRequested = serde_json::from_value(requested.payload.clone())
-                    .map_err(|_| AgentRunError::Storage)?;
+                let (requested, request, arguments) = request_of(event.causation_id.as_deref())?;
+                let Some(arguments) = arguments.filter(|arguments| grant.permits(arguments)) else {
+                    return Err(AgentRunError::Storage);
+                };
                 if start.is_some()
                     || last_output_index.is_some_and(|i| payload.request_index <= i)
-                    || !valid_requested(&request, &requested, input)
-                    || !valid_started(&payload, event, input, &grant)
-                    || !start_matches_request(&payload, event, &request, &requested)
+                    || !tool::valid_started(&payload, event, &request, &requested, input)
                 {
                     return Err(AgentRunError::Storage);
                 }
@@ -81,9 +109,11 @@ impl DittoKernel {
                     AgentSortState::Interrupted
                 };
                 progress.failure_code = None;
-                start = Some((payload, event));
+                start = Some((event, arguments));
             } else {
-                let output: SortToolOutput = serde_json::from_value(event.payload.clone())
+                let output: ToolOutput = serde_json::from_value(event.payload.clone())
+                    .map_err(|_| AgentRunError::Storage)?;
+                let result: SortToolResult = serde_json::from_value(output.result.clone())
                     .map_err(|_| AgentRunError::Storage)?;
                 let current_start = if output.claimed {
                     if claimed_output {
@@ -93,43 +123,44 @@ impl DittoKernel {
                 } else {
                     None
                 };
-                let requested = get(current_start
-                    .map_or(event.causation_id.as_deref(), |(_, s)| {
-                        s.causation_id.as_deref()
-                    })
-                    .ok_or(AgentRunError::Storage)?)?;
-                let request: SortToolRequested = serde_json::from_value(requested.payload.clone())
-                    .map_err(|_| AgentRunError::Storage)?;
+                let (requested, request, arguments) = request_of(
+                    current_start.map_or(event.causation_id.as_deref(), |(started, _)| {
+                        started.causation_id.as_deref()
+                    }),
+                )?;
                 if last_output_index.is_some_and(|i| output.request_index <= i)
-                    || !valid_requested(&request, &requested, input)
-                    || !valid_output(
+                    || !tool::valid_output(
                         &output,
                         event,
-                        input,
-                        &grant,
                         &request,
                         &requested,
-                        current_start.map(|(_, s)| *s),
-                        start.is_some(),
-                        input.recorded_at + chrono::Duration::minutes(5),
+                        current_start.map(|(started, _)| *started),
+                        input,
                     )
-                    || current_start
-                        .is_some_and(|(s, e)| !start_matches_request(s, e, &request, &requested))
+                    || !valid_result(
+                        &result,
+                        arguments.as_ref(),
+                        current_start.is_some(),
+                        &grant,
+                        start.is_some(),
+                        event.recorded_at >= deadline,
+                        output.artifact_event_id.as_deref(),
+                    )
                     || (!output.claimed && start.is_some() && !claimed_output)
                 {
                     return Err(AgentRunError::Storage);
                 }
                 last_output_index = Some(output.request_index);
-                if start.is_none() {
-                    if let SortToolResult::Error { code } = &output.result {
-                        progress.failure_code = serde_json::to_value(code)
-                            .ok()
-                            .and_then(|v| v.as_str().map(str::to_owned));
-                    }
+                if start.is_none()
+                    && let SortToolResult::Error { code } = &result
+                {
+                    progress.failure_code = serde_json::to_value(code)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned));
                 }
-                if let Some((start_payload, started)) = current_start {
+                if let Some((started, arguments)) = current_start {
                     claimed_output = true;
-                    match &output.result {
+                    match &result {
                         SortToolResult::Error { code } => {
                             progress.state = AgentSortState::Failed;
                             progress.failure_code = serde_json::to_value(code)
@@ -146,7 +177,13 @@ impl DittoKernel {
                                 .artifact_event_id
                                 .as_deref()
                                 .ok_or(AgentRunError::Storage)?)?;
-                            if !valid_output_root(&root, &output, event, started) {
+                            if !valid_output_root(
+                                &root,
+                                reference,
+                                output.artifact_event_id.as_deref(),
+                                event,
+                                started,
+                            ) {
                                 return Err(AgentRunError::Storage);
                             }
                             let output_bytes =
@@ -154,12 +191,9 @@ impl DittoKernel {
                             if root.payload["bytes"].as_u64() != Some(output_bytes.len() as u64) {
                                 return Err(AgentRunError::Storage);
                             }
-                            let verified = worker::verify_output(
-                                &bytes,
-                                output_bytes,
-                                start_payload.normalized.unique,
-                            )
-                            .map_err(|_| AgentRunError::Storage)?;
+                            let verified =
+                                worker::verify_output(&bytes, output_bytes, arguments.unique)
+                                    .map_err(|_| AgentRunError::Storage)?;
                             if verified.input_lines() != *input_lines
                                 || verified.output_lines() != *output_lines
                             {

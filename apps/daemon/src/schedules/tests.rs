@@ -37,19 +37,7 @@ async fn server(
     loopback: bool,
 ) -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
     let driver = if enabled {
-        let reference = kernel
-            .store_artifact(
-                b"schedule evidence",
-                ditto_kernel::ArtifactWriteContext {
-                    session_id: Some("personal".into()),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .metadata
-            .reference
-            .to_string();
-        Some(Arc::new(HttpDriver::new(reference, false)) as Arc<dyn ditto_model::ModelDriver>)
+        Some(Arc::new(HttpDriver::new(false)) as Arc<dyn ditto_model::ModelDriver>)
     } else {
         None
     };
