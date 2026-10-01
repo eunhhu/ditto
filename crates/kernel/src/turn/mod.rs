@@ -1,40 +1,26 @@
-pub(crate) mod fetch;
-pub(crate) mod memory_write;
-pub(crate) mod recall;
+pub(crate) mod memory;
 mod replay;
 mod run;
-pub(crate) mod search;
 mod shared;
 pub(crate) mod sort;
 mod thread;
+pub(crate) mod tool;
 mod types;
+pub(crate) mod web;
 
-pub use fetch::{
-    FetchToolError, FetchToolOutput, FetchToolRequested, FetchToolResult, FetchToolStarted,
-    ReplayedFetchCall,
-};
-pub use memory_write::{
-    MemoryWrite, MemoryWriteOutput, MemoryWriteRefusal, MemoryWriteRequested, MemoryWriteResult,
-    MemoryWrittenPayload, ReplayedMemoryWrite,
-};
-pub use recall::{
-    RecallToolOutput, RecallToolRequested, RecallToolResult, RecalledMemory, ReplayedRecallCall,
+pub use memory::{
+    MemoryAction, MemoryRefusal, MemoryResult, MemoryWrite, MemoryWrittenPayload, RecalledMemory,
 };
 pub use replay::replay_artifact_read_turn;
 pub(crate) use run::ToolContracts;
-pub use search::{
-    ReplayedSearchCall, SearchToolError, SearchToolOutput, SearchToolRequested, SearchToolResult,
-    SearchToolStarted,
-};
 pub use shared::request_sha256;
-pub use sort::{
-    ReplayedSortCall, SortToolError, SortToolOutput, SortToolRequested, SortToolResult,
-    SortToolStarted,
-};
+pub use sort::{SortToolError, SortToolResult};
 pub(crate) use thread::ThreadReuse;
+pub use tool::{ReplayedToolCall, ToolOutput, ToolRequested, ToolStarted};
 pub use types::*;
+pub use web::{WebResult, WebToolError};
 
-/// What `memory.search` reads in a turn: the compiled nodes, then the
+/// What a memory search reads in a turn: the compiled nodes, then the
 /// candidates the compilation left out only as irrelevant or over budget.
 /// Only those are copied.
 pub(crate) fn recall_space<'a>(
@@ -45,7 +31,7 @@ pub(crate) fn recall_space<'a>(
         .receipt
         .excluded
         .iter()
-        .filter(|exclusion| recall::searchable(&exclusion.reason))
+        .filter(|exclusion| memory::searchable(&exclusion.reason))
         .map(|exclusion| exclusion.node_id.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     let mut space = compiled.nodes.clone();

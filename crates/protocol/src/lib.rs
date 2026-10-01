@@ -121,19 +121,10 @@ pub struct AgentRunResponse {
 }
 
 pub mod event_kind {
-    pub const AGENT_SORT_REQUESTED: &str = "agent.sort.requested";
-    pub const AGENT_SORT_STARTED: &str = "agent.sort.started";
-    pub const AGENT_SORT_OUTPUT: &str = "agent.sort.output";
-    pub const AGENT_FETCH_REQUESTED: &str = "agent.fetch.requested";
-    pub const AGENT_FETCH_STARTED: &str = "agent.fetch.started";
-    pub const AGENT_FETCH_OUTPUT: &str = "agent.fetch.output";
-    pub const AGENT_SEARCH_REQUESTED: &str = "agent.search.requested";
-    pub const AGENT_SEARCH_STARTED: &str = "agent.search.started";
-    pub const AGENT_SEARCH_OUTPUT: &str = "agent.search.output";
-    pub const AGENT_MEMORY_REQUESTED: &str = "agent.memory.requested";
-    pub const AGENT_MEMORY_OUTPUT: &str = "agent.memory.output";
-    pub const AGENT_MEMORY_WRITE_REQUESTED: &str = "agent.memory_write.requested";
-    pub const AGENT_MEMORY_WRITE_OUTPUT: &str = "agent.memory_write.output";
+    /// One lifecycle for every agent tool call (ADR 0036).
+    pub const TOOL_REQUESTED: &str = "tool.requested";
+    pub const TOOL_STARTED: &str = "tool.started";
+    pub const TOOL_OUTPUT: &str = "tool.output";
     /// A memory Ditto wrote during a run: session-scoped and task-free, so the
     /// context node it sources outlives the run (ADR 0031).
     pub const MEMORY_WRITTEN: &str = "memory.written";

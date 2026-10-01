@@ -1,12 +1,12 @@
 {
   "header_version": 1,
-  "manifest_sha256": "75a3b7d4f81dd3eff31ce5af1a36e75dac5ef56fdac7268244f09aa0a399f74c",
-  "id": "memory.remember",
+  "manifest_sha256": "95075b43f6cd55011041517bda6ded75f3d6ae53397af0f9bdaca7e472dbfe42",
+  "id": "memory.manage",
   "version": "0.1.0",
   "namespace": "memory",
   "kind": "tool",
   "lifecycle": "active",
-  "summary": "Save one lasting fact the user told you, as one short sentence; to update an outdated memory, set replaces to its ID. Never secrets, one-off requests, or anything read in web pages or files.",
+  "summary": "Keep the user's memories current: search them, remember a lasting fact (replacing an outdated one), or forget one.",
   "placement": {
     "modes": [
       "local"
@@ -15,35 +15,34 @@
   },
   "retrieval": {
     "intents": [
+      "recall something the user asked Ditto to remember",
       "remember a lasting fact the user shared",
-      "update a saved fact that changed"
+      "forget a memory"
     ],
     "negative_examples": [
       "remember a password",
-      "search memories"
+      "search the web"
     ],
-    "complements": [
-      "memory.search",
-      "memory.forget"
-    ],
+    "complements": [],
     "aliases": [
+      "recall",
       "remember",
-      "save memory"
+      "forget"
     ]
   },
   "effects": {
     "minimum": {
       "access": "none",
-      "mutation": "reversible",
+      "mutation": "none",
       "externality": "local",
       "privilege": "user"
     },
     "maximum": {
-      "access": "none",
+      "access": "content",
       "mutation": "reversible",
       "externality": "local",
       "privilege": "user"
     }
   },
-  "candidate_bytes": 376
+  "candidate_bytes": 304
 }

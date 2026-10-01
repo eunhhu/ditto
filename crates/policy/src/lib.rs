@@ -132,12 +132,12 @@ impl StaticPolicy {
         })
     }
 
-    /// No-approval policy for `memory.search`: a local read of the session's
-    /// own memories, which names no resource (ADR 0029).
+    /// No-approval policy for a `memory.manage` search: a local read of the
+    /// session's own memories, which names no resource (ADRs 0029, 0036).
     pub fn memory_search() -> Self {
         Self {
             id: STATIC_MEMORY_SEARCH_POLICY_ID.into(),
-            capability_id: "memory.search".into(),
+            capability_id: "memory.manage".into(),
             effect_ceiling: EffectProfile::read_content(),
             resources: BTreeSet::new(),
             permit_ttl: Duration::seconds(STATIC_ARTIFACT_PERMIT_SECONDS),

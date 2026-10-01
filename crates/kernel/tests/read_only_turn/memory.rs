@@ -1,9 +1,11 @@
-//! `memory.remember` and `memory.forget` (ADR 0031): Ditto keeps the user's
-//! memories current on its own, labeled as its inference, within bounds and
-//! never from web or file content; replay recomputes every decision.
+//! `memory.manage` (ADR 0036): the model searches the memories its turn saw,
+//! including those the context budget left out (ADR 0029), and keeps them
+//! current on its own, labeled as its inference, within bounds and never
+//! from web or file content (ADR 0031); replay recomputes every result and
+//! decision.
 use super::agent_runs::{context_ids, save_memory, start_command, start_when_idle, terminal};
 use super::*;
-use ditto_kernel::ReplayedReadOnlyTurn;
+use ditto_kernel::{ReplayedReadOnlyTurn, TrustedContextNodeDraft};
 use ditto_protocol::{AgentRunResponse, AgentRunStatus, MemoryQuery, UserMemory};
 
 fn tool_results(request: &ModelRequest) -> Vec<Value> {
@@ -44,8 +46,25 @@ fn call(capability_id: &str, arguments: Value) -> Vec<ModelEvent> {
     )
 }
 
+fn search(query: &str) -> Vec<ModelEvent> {
+    call(
+        "memory.manage",
+        json!({ "action": "search", "query": query }),
+    )
+}
+
 fn remember(text: &str) -> Vec<ModelEvent> {
-    call("memory.remember", json!({ "text": text }))
+    call(
+        "memory.manage",
+        json!({ "action": "remember", "text": text }),
+    )
+}
+
+fn forget(memory_id: &str) -> Vec<ModelEvent> {
+    call(
+        "memory.manage",
+        json!({ "action": "forget", "memory_id": memory_id }),
+    )
 }
 
 fn memories(kernel: &DittoKernel) -> Vec<UserMemory> {
@@ -61,6 +80,191 @@ fn memories(kernel: &DittoKernel) -> Vec<UserMemory> {
 
 fn replays(fixture: &Fixture, turn_id: &str) -> ReplayedReadOnlyTurn {
     replay_artifact_read_turn(&fixture.events_for_session("personal"), turn_id).unwrap()
+}
+
+/// Enough unrelated memories that the complete set no longer fits the context
+/// budget, so selection falls back to lexical overlap with the question.
+fn fill_past_the_budget(kernel: &DittoKernel) {
+    for index in 0..40 {
+        save_memory(
+            kernel,
+            "personal",
+            &format!("synthetic filler fact number {index:02} about pebbles and moss"),
+            None,
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_search_finds_a_memory_the_context_budget_left_out() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let miso = save_memory(kernel, "personal", "My dog is called Miso", None);
+    let old = save_memory(kernel, "personal", "My dog is called Rex", None);
+    let corrected = save_memory(
+        kernel,
+        "personal",
+        "My dog is called Mochi",
+        Some(old.clone()),
+    );
+    save_memory(kernel, "elsewhere", "My dog is called Private", None);
+    fill_past_the_budget(kernel);
+
+    // "What is my pet's name?" shares no word with the dog memories.
+    let (status, driver) = ask(
+        kernel,
+        "What is my pet's name?",
+        vec![search("dog called"), final_script(&["Miso and Mochi."])],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let requests = driver.requests();
+    assert!(!context_ids(&requests[0]).contains(&miso));
+    let found = &tool_results(&requests[1])[0];
+    let ids = found["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|memory| memory["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    // Equal scores rank by ID; superseded and other-session memories are
+    // never searched.
+    assert_eq!(ids, [miso.clone(), corrected.clone()]);
+    assert_eq!(found["searched"], json!(42));
+    assert_eq!(
+        found["content_origin"],
+        json!(
+            "memories Ditto keeps for the user: what they asked Ditto to remember, and what Ditto inferred (marked inferred)"
+        )
+    );
+    kernel.shutdown_agent_runs().await.unwrap();
+
+    let events = fixture.events_for_session("personal");
+    let replay = replay_artifact_read_turn(&events, &status.turn_id).unwrap();
+    assert_eq!(replay.tool_calls.len(), 1);
+
+    // Replay recomputes the result: any change fails.
+    let output = events
+        .iter()
+        .position(|event| event.kind == event_kind::TOOL_OUTPUT)
+        .unwrap();
+    let mut dropped = events.clone();
+    dropped[output].payload["result"]["memories"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert!(replay_artifact_read_turn(&dropped, &status.turn_id).is_err());
+    let mut reordered = events.clone();
+    reordered[output].payload["result"]["memories"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    assert!(replay_artifact_read_turn(&reordered, &status.turn_id).is_err());
+    let mut invented = events.clone();
+    invented[output].payload["result"]["memories"][0]["text"] = json!("My dog is called Rex");
+    assert!(replay_artifact_read_turn(&invented, &status.turn_id).is_err());
+    let mut widened = events.clone();
+    widened[output].payload["result"]["searched"] = json!(43);
+    assert!(replay_artifact_read_turn(&widened, &status.turn_id).is_err());
+    // A changed result that the next request's digest also carries: only
+    // recomputing the search catches it.
+    let mut consistent = events.clone();
+    consistent[output].payload["result"]["memories"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    let mut sent = requests[1].clone();
+    for item in &mut sent.turn.conversation {
+        if let ConversationItem::ToolResult { content, .. } = item
+            && let [ContentPart::Structured { value }] = content.as_mut_slice()
+        {
+            value["memories"].as_array_mut().unwrap().pop();
+        }
+    }
+    let second = events
+        .iter()
+        .rposition(|event| event.kind == event_kind::MODEL_REQUESTED)
+        .unwrap();
+    super::reseal_request(&mut consistent[second], &sent);
+    assert!(replay_artifact_read_turn(&consistent, &status.turn_id).is_err());
+    let requested = events
+        .iter()
+        .position(|event| event.kind == event_kind::TOOL_REQUESTED)
+        .unwrap();
+    let mut requery = events.clone();
+    requery[requested].payload["normalized"]["query"] = json!("pebbles");
+    assert!(replay_artifact_read_turn(&requery, &status.turn_id).is_err());
+}
+
+#[tokio::test]
+async fn a_search_returns_only_what_the_user_asserted() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let miso = save_memory(kernel, "personal", "My dog is called Miso", None);
+    let source = kernel
+        .record_user_input(SubmitInputCommand {
+            text: "the dog".into(),
+            session_id: Some("personal".into()),
+            task_id: None,
+        })
+        .unwrap();
+    kernel
+        .admit_context_node(TrustedContextNodeDraft::session(
+            "personal",
+            ContextNode {
+                id: "inferred".into(),
+                kind: ContextNodeKind::Claim,
+                summary: "My dog is called Rex".into(),
+                origin: ContextOrigin::User,
+                epistemic: EpistemicStatus::Inferred,
+                scope: ContextScope::Session,
+                lens: ContextLens::Personal,
+                confidence: 0.5,
+                source_event_ids: vec![source.event_id.clone()],
+                supersedes: Vec::new(),
+                valid_from: None,
+                valid_until: None,
+            },
+        ))
+        .unwrap();
+    let (status, driver) = ask(
+        kernel,
+        "What is my dog called?",
+        vec![search("dog called"), final_script(&["Miso."])],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let requests = driver.requests();
+    // The capsule carries both nodes with their epistemic status, but the
+    // search result, read as the user's own words, holds only what they said.
+    assert_eq!(context_ids(&requests[0]).len(), 2);
+    assert_eq!(
+        tool_results(&requests[1])[0]["memories"],
+        json!([{ "id": miso, "text": "My dog is called Miso" }])
+    );
+    assert_eq!(tool_results(&requests[1])[0]["searched"], json!(1));
+    kernel.shutdown_agent_runs().await.unwrap();
+    replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
+}
+
+#[tokio::test]
+async fn invalid_arguments_return_an_error_the_model_reads() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    save_memory(kernel, "personal", "I live in Seoul", None);
+    let (status, driver) = ask(
+        kernel,
+        "Where do I live?",
+        vec![search("   "), final_script(&["Seoul."])],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    assert_eq!(
+        tool_results(&driver.requests()[1])[0],
+        json!({"error": "invalid_arguments"})
+    );
+    kernel.shutdown_agent_runs().await.unwrap();
+    replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
 }
 
 #[tokio::test]
@@ -95,16 +299,13 @@ async fn ditto_remembers_a_fact_that_later_turns_see_as_its_inference() {
     assert_eq!(written.actor, EventActor::Model);
     assert_eq!(written.task_id, None);
     assert_eq!(listed[0].input_event_id, written.event_id);
-    assert_eq!(replays(&fixture, &status.turn_id).memory_writes.len(), 1);
+    assert_eq!(replays(&fixture, &status.turn_id).tool_calls.len(), 1);
 
     // A later turn receives it as an inference and finds it by search.
     let (later, driver) = ask(
         kernel,
         "What is my dog's name?",
-        vec![
-            call("memory.search", json!({ "query": "dog" })),
-            final_script(&["Miso."]),
-        ],
+        vec![search("dog"), final_script(&["Miso."])],
     )
     .await;
     assert_eq!(later.status, AgentRunStatus::Unverified, "{later:?}");
@@ -136,8 +337,12 @@ async fn replacing_and_forgetting_take_memories_out_of_use() {
         "Rex passed away; my new dog is Mochi.",
         vec![
             call(
-                "memory.remember",
-                json!({ "text": "The user's dog is called Mochi.", "replaces": rex }),
+                "memory.manage",
+                json!({
+                    "action": "remember",
+                    "text": "The user's dog is called Mochi.",
+                    "replaces": rex
+                }),
             ),
             final_script(&["I'm sorry about Rex."]),
         ],
@@ -173,9 +378,9 @@ async fn replacing_and_forgetting_take_memories_out_of_use() {
         kernel,
         "Please forget my dog.",
         vec![
-            call("memory.forget", json!({ "memory_id": bori })),
-            call("memory.forget", json!({ "memory_id": bori })),
-            call("memory.forget", json!({ "memory_id": rex })),
+            forget(&bori),
+            forget(&bori),
+            forget(&rex),
             final_script(&["Forgotten."]),
         ],
     )
@@ -205,19 +410,16 @@ async fn replacing_and_forgetting_take_memories_out_of_use() {
 }
 
 #[tokio::test]
-async fn nothing_is_remembered_after_a_file_or_page_was_read() {
+async fn nothing_is_remembered_after_a_web_call() {
     let fixture = Fixture::new();
     let kernel = &fixture.kernel;
     let (status, driver) = ask(
         kernel,
-        "Read that file and remember what it says.",
+        "Read that page and remember what it says.",
         vec![
-            call(
-                "artifact.read",
-                artifact_arguments(&format!("artifact:sha256:{}", "0".repeat(64)), 0, 16),
-            ),
+            call("web.browse", json!({ "url": "https://example.invalid/" })),
             remember("The user's bank is example.invalid."),
-            final_script(&["I can't save that from a file."]),
+            final_script(&["I can't save that from a page."]),
         ],
     )
     .await;
@@ -246,10 +448,10 @@ async fn secrets_invalid_calls_and_writes_past_the_limit_are_refused() {
         "Some facts about me.",
         vec![
             remember(&format!("The user's wifi password is {}", "hunter2")),
-            call("memory.remember", json!({ "text": "   " })),
+            remember("   "),
             call(
-                "memory.remember",
-                json!({ "text": "x", "replaces": "memory-not-an-id" }),
+                "memory.manage",
+                json!({ "action": "remember", "text": "x", "replaces": "memory-not-an-id" }),
             ),
             remember("The user lives in Seoul."),
             remember("The user works on Ditto."),
@@ -290,7 +492,7 @@ async fn replay_recomputes_every_memory_write() {
     let events = fixture.events_for_session("personal");
     replay_artifact_read_turn(&events, &status.turn_id).unwrap();
     let position = |kind: &str| events.iter().position(|event| event.kind == kind).unwrap();
-    let output = position(event_kind::AGENT_MEMORY_WRITE_OUTPUT);
+    let output = position(event_kind::TOOL_OUTPUT);
     let written = position(event_kind::MEMORY_WRITTEN);
     let rejects = |forged: Vec<EventRecord>| {
         assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
@@ -308,9 +510,9 @@ async fn replay_recomputes_every_memory_write() {
     let mut forged = events.clone();
     forged.remove(written);
     rejects(forged);
-    let requested = position(event_kind::AGENT_MEMORY_WRITE_REQUESTED);
+    let requested = position(event_kind::TOOL_REQUESTED);
     let mut forged = events.clone();
-    forged[requested].payload["write"]["text"] = json!("The user lives in Busan.");
+    forged[requested].payload["normalized"]["text"] = json!("The user lives in Busan.");
     rejects(forged);
     // A refusal recorded for a write that happened, even when the next
     // request carries it: only recomputing the rules catches it.
@@ -356,7 +558,7 @@ async fn replay_recomputes_each_refusal() {
     let mut forged = events.clone();
     let output = forged
         .iter()
-        .position(|event| event.kind == event_kind::AGENT_MEMORY_WRITE_OUTPUT)
+        .position(|event| event.kind == event_kind::TOOL_OUTPUT)
         .unwrap();
     forged[output].payload["result"]["code"] = json!("limit_reached");
     let mut sent = driver.requests()[1].clone();
@@ -376,8 +578,9 @@ async fn replay_recomputes_each_refusal() {
 }
 
 #[tokio::test]
-async fn memory_writes_need_their_packages() {
-    let fixture = Fixture::artifact_read_only();
+async fn a_tool_is_offered_only_with_its_package() {
+    // Without its package the memory tool is withdrawn, and a call to it fails.
+    let fixture = Fixture::with_packages(&["artifact-read", "web-browse"]);
     let driver = ScriptedDriver::new(vec![remember("The user drinks tea.")]);
     let command = start_command("I drink tea.");
     fixture
@@ -387,6 +590,28 @@ async fn memory_writes_need_their_packages() {
     let status = terminal(&fixture.kernel, &command).await;
     assert_eq!(status.status, AgentRunStatus::Failed);
     assert_eq!(status.failure_code.as_deref(), Some("protocol"));
+    assert_eq!(
+        driver.requests()[0]
+            .tools
+            .iter()
+            .map(|tool| tool.id.as_str())
+            .collect::<Vec<_>>(),
+        ["web.browse"]
+    );
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+    replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
+
+    // With no agent tool installed there is nothing to select.
+    let fixture = Fixture::with_packages(&["artifact-read"]);
+    let driver = ScriptedDriver::new(vec![final_script(&["Hello."])]);
+    let command = start_command("Hello.");
+    fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(status.status, AgentRunStatus::Failed);
+    assert!(driver.requests().is_empty());
     fixture.kernel.shutdown_agent_runs().await.unwrap();
     replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
 }

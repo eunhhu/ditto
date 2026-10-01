@@ -1,12 +1,12 @@
 {
   "header_version": 1,
-  "manifest_sha256": "fe046ae17e6ec01265c788e7f1d5b7615804590ace02d87c2852cbb3ece73637",
-  "id": "web.search",
+  "manifest_sha256": "cbb4675bf4ed99ba208f1afeace7d760681801eab6789ea3e5da3ba0eed05451",
+  "id": "web.browse",
   "version": "0.1.0",
   "namespace": "web",
   "kind": "tool",
   "lifecycle": "active",
-  "summary": "Search the web for current or outside information; returns the titles, links and snippets of the top results.",
+  "summary": "Search the web through the operator's search service, or read a web page whose link the user sent.",
   "placement": {
     "modes": [
       "local"
@@ -16,18 +16,18 @@
   "retrieval": {
     "intents": [
       "search the web",
-      "look up current information online"
+      "look up current information online",
+      "read a web page the user linked"
     ],
     "negative_examples": [
-      "read a page the user linked",
-      "search memories"
+      "search memories",
+      "submit a form or post to a website"
     ],
-    "complements": [
-      "web.fetch"
-    ],
+    "complements": [],
     "aliases": [
       "web search",
-      "look it up"
+      "look it up",
+      "open link"
     ]
   },
   "effects": {
@@ -44,5 +44,5 @@
       "privilege": "user"
     }
   },
-  "candidate_bytes": 265
+  "candidate_bytes": 292
 }

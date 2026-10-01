@@ -14,7 +14,7 @@ use ditto_protocol::{
     EventActor, EventQuery, EventRecord, NewEvent, SubmitInputCommand, event_kind,
 };
 use ditto_retrieval::EmbeddingProvider;
-/// The search service `web.search` uses (ADR 0033).
+/// The search service `web.browse` searches through (ADRs 0033, 0036).
 pub use ditto_web_fetch::search::SearchEndpoint;
 use serde_json::json;
 use thiserror::Error;
@@ -58,10 +58,10 @@ pub struct KernelConfig {
     pub capabilities_dir: PathBuf,
     pub event_buffer: usize,
     pub artifact_max_object_bytes: u64,
-    /// Reach of `web.fetch` for links in the user's message; `None` never
+    /// Reach of `web.browse` for links in the user's message; `None` never
     /// offers the tool (ADR 0027).
     pub web_fetch: Option<ditto_web_fetch::FetchPolicy>,
-    /// The search service `web.search` uses; `None` never offers the tool
+    /// The search service `web.browse` uses; `None` never offers searching
     /// (ADR 0033).
     pub web_search: Option<ditto_web_fetch::search::SearchEndpoint>,
 }

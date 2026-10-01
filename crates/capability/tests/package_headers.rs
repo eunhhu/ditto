@@ -280,10 +280,8 @@ fn bundled_headers_match_the_generator() {
     for name in [
         "artifact-read",
         "device-process-run",
-        "memory-search",
-        "memory-remember",
-        "memory-forget",
-        "web-search",
+        "memory-manage",
+        "web-browse",
     ] {
         let path = root.join(name);
         let expected =

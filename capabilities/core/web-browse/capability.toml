@@ -1,8 +1,8 @@
-id = "web.search"
+id = "web.browse"
 version = "0.1.0"
 namespace = "web"
 kind = "tool"
-summary = "Search the web for current or outside information; returns the titles, links and snippets of the top results."
+summary = "Search the web through the operator's search service, or read a web page whose link the user sent."
 
 [runtime]
 type = "builtin"
@@ -14,10 +14,10 @@ modes = ["local"]
 requires = []
 
 [retrieval]
-intents = ["search the web", "look up current information online"]
-negative_examples = ["read a page the user linked", "search memories"]
-aliases = ["web search", "look it up"]
-complements = ["web.fetch"]
+intents = ["search the web", "look up current information online", "read a web page the user linked"]
+negative_examples = ["search memories", "submit a form or post to a website"]
+aliases = ["web search", "look it up", "open link"]
+complements = []
 
 [effects]
 resources = ["url:{url}"]

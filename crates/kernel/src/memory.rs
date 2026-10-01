@@ -13,7 +13,7 @@ use ditto_protocol::{
 use ditto_retrieval::{RetrievalWorkBudget, SessionId};
 use ulid::Ulid;
 
-use crate::turn::memory_write::{forgotten_node, is_memory, memory_node as memory_node_written};
+use crate::turn::memory::{forgotten_node, is_memory, memory_node as memory_node_written};
 use crate::turn::{MemoryWrite, MemoryWrittenPayload};
 use crate::{DittoKernel, KernelError, TrustedContextNodeDraft};
 

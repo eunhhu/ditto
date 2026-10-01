@@ -1,24 +1,17 @@
-//! `web.search` (ADR 0033): search the web through the operator's
-//! SearXNG-compatible endpoint. The endpoint is configuration, never the
-//! model's choice, and it is the resource every call is authorized for, so a
-//! query cannot be sent anywhere else.
-use std::{collections::BTreeSet, time::Duration};
+//! Searching through the operator's SearXNG-compatible endpoint, the
+//! `query` side of `web.browse` (ADRs 0033 and 0036). The endpoint is
+//! configuration, never the model's choice, and it is the resource every
+//! search is authorized for, so a query cannot be sent anywhere else.
+use std::time::Duration;
 
-use ditto_capability::{
-    CanonicalInvocation, CanonicalResource, CapabilityDeriver, CapabilityManifest,
-    CapabilityRevision, CapabilitySchema, DerivationBudget, DeriverError, DeriverRevision,
-    EffectProfile, ResolvedPlacement, canonical_manifest_digest,
-};
+use ditto_capability::CanonicalResource;
 use ditto_model::CancellationToken;
-use ditto_policy::ExecutionClaim;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::{FetchError, FetchPolicy, UrlError, canonical_url, get_within};
+use super::{FetchPolicy, UrlError, WebError, canonical_url, get_within};
 
-pub const ID: &str = "web.search";
-pub const VERSION: &str = "0.1.0";
 pub const MAX_QUERY_CHARS: usize = 200;
 /// Results one search returns at most.
 pub const MAX_RESULTS: usize = 5;
@@ -26,59 +19,6 @@ pub const MAX_TITLE_CHARS: usize = 200;
 pub const MAX_SNIPPET_CHARS: usize = 400;
 /// Searches one turn may run.
 pub const MAX_SEARCHES: u32 = 3;
-const DERIVER_REVISION: &str = "web-search-v1";
-
-pub fn manifest() -> CapabilityManifest {
-    toml::from_str(include_str!(
-        "../../../capabilities/core/web-search/capability.toml"
-    ))
-    .expect("packaged web.search manifest is valid")
-}
-
-/// The installed package must be exactly the one this code implements.
-pub fn validate_manifest(installed: &CapabilityManifest) -> bool {
-    canonical_manifest_digest(installed) == canonical_manifest_digest(&manifest())
-}
-
-/// Reads content from the network; changes nothing.
-pub fn effect() -> EffectProfile {
-    super::effect()
-}
-
-pub fn deriver_revision() -> DeriverRevision {
-    DeriverRevision::new(DERIVER_REVISION).expect("static deriver revision is valid")
-}
-
-pub fn schema() -> CapabilitySchema {
-    CapabilitySchema {
-        id: ID.into(),
-        version: VERSION.into(),
-        summary: manifest().summary,
-        input_schema: json!({
-            "type": "object", "additionalProperties": false, "required": ["query"],
-            "properties": {
-                "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS}
-            }
-        }),
-        output_schema: json!({
-            "type": "object", "additionalProperties": false, "required": ["results"],
-            "properties": {
-                "results": {
-                    "type": "array", "maxItems": MAX_RESULTS,
-                    "items": {
-                        "type": "object", "additionalProperties": false,
-                        "required": ["title", "url", "snippet"],
-                        "properties": {
-                            "title": {"type": "string", "maxLength": MAX_TITLE_CHARS},
-                            "url": {"type": "string", "maxLength": super::MAX_URL_BYTES},
-                            "snippet": {"type": "string", "maxLength": MAX_SNIPPET_CHARS}
-                        }
-                    }
-                }
-            }
-        }),
-    }
-}
 
 /// The search service of a deployment, such as `http://127.0.0.1:8888`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +37,9 @@ impl SearchEndpoint {
     }
 
     /// The exact request a query becomes: `<base>/search?q=<query>&format=json`.
-    pub fn request_url(&self, query: &str) -> Result<String, UrlError> {
+    /// Built from a canonical endpoint, it is canonical too, whatever the
+    /// query's length.
+    pub fn request_url(&self, query: &str) -> String {
         let mut url = self.0.clone();
         let path = format!("{}/search", url.path().trim_end_matches('/'));
         url.set_path(&path);
@@ -105,7 +47,7 @@ impl SearchEndpoint {
             .clear()
             .append_pair("q", query)
             .append_pair("format", "json");
-        canonical_url(url.as_str())
+        url.into()
     }
 
     pub fn as_str(&self) -> &str {
@@ -133,78 +75,7 @@ pub fn query_of(request_url: &str) -> Option<String> {
     base.set_query(None);
     base.set_path(url.path().strip_suffix("/search")?);
     let endpoint = SearchEndpoint::new(base.as_str()).ok()?;
-    (endpoint.request_url(query).ok()? == request_url).then(|| query.clone())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SearchArguments {
-    pub query: String,
-}
-
-/// The query of schema-valid arguments, trimmed; `None` when blank.
-pub fn normalized_query(arguments: &Value) -> Option<String> {
-    let query = arguments.get("query")?.as_str()?.trim();
-    (!query.is_empty()).then(|| query.to_owned())
-}
-
-/// Derives the configured endpoint as the one resource.
-pub struct SearchDeriver {
-    endpoint: SearchEndpoint,
-    revision: DeriverRevision,
-}
-
-impl SearchDeriver {
-    pub fn new(endpoint: SearchEndpoint) -> Self {
-        Self {
-            endpoint,
-            revision: deriver_revision(),
-        }
-    }
-}
-
-impl CapabilityDeriver for SearchDeriver {
-    fn capability_id(&self) -> &str {
-        ID
-    }
-    fn revision(&self) -> &DeriverRevision {
-        &self.revision
-    }
-    fn normalize(
-        &self,
-        arguments: &Value,
-        budget: &mut DerivationBudget,
-    ) -> Result<Value, DeriverError> {
-        budget.charge(1)?;
-        let query = normalized_query(arguments)
-            .ok_or_else(|| DeriverError::new("search query is empty"))?;
-        self.endpoint
-            .request_url(&query)
-            .map_err(|error| DeriverError::new(error.to_string()))?;
-        Ok(json!(SearchArguments { query }))
-    }
-    fn derive_effect(
-        &self,
-        _: &Value,
-        budget: &mut DerivationBudget,
-    ) -> Result<EffectProfile, DeriverError> {
-        budget.charge(1)?;
-        Ok(effect())
-    }
-    fn derive_resources(
-        &self,
-        arguments: &Value,
-        budget: &mut DerivationBudget,
-    ) -> Result<BTreeSet<CanonicalResource>, DeriverError> {
-        budget.charge(1)?;
-        let _: SearchArguments = serde_json::from_value(arguments.clone())
-            .map_err(|_| DeriverError::new("invalid web.search arguments"))?;
-        let resource = self
-            .endpoint
-            .resource()
-            .map_err(|_| DeriverError::new("invalid search endpoint"))?;
-        Ok(BTreeSet::from([resource]))
-    }
+    (endpoint.request_url(query) == request_url).then(|| query.clone())
 }
 
 /// One result, as returned to the model and journaled.
@@ -264,77 +135,13 @@ impl SearchResults {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "error", rename_all = "snake_case")]
-pub enum SearchError {
-    #[error("the invocation or execution claim is invalid")]
-    Unauthorized,
-    #[error("the search service could not be reached")]
-    Connection,
-    #[error("the search timed out")]
-    Timeout,
-    #[error("the search was cancelled")]
-    Cancelled,
-    #[error("the search service answered with HTTP status {status}")]
-    HttpStatus { status: u16 },
-    #[error("the search service's answer is not a result list")]
-    InvalidResponse,
-}
-
-impl From<FetchError> for SearchError {
-    fn from(error: FetchError) -> Self {
-        match error {
-            FetchError::Unauthorized => Self::Unauthorized,
-            FetchError::Timeout => Self::Timeout,
-            FetchError::Cancelled => Self::Cancelled,
-            FetchError::HttpStatus { status } => Self::HttpStatus { status },
-            _ => Self::Connection,
-        }
-    }
-}
-
-/// Execute one authorized `web.search` invocation at `endpoint`. The claim is
-/// consumed here: it must match the invocation, whose contract, placement,
-/// effect and resource must be exactly this capability's at this endpoint.
-pub async fn execute(
-    invocation: CanonicalInvocation,
-    claim: ExecutionClaim,
-    endpoint: &SearchEndpoint,
-    cancellation: CancellationToken,
-) -> Result<SearchResults, SearchError> {
-    let now = chrono::Utc::now();
-    claim
-        .validate(&invocation, now)
-        .map_err(|_| SearchError::Unauthorized)?;
-    let revision = CapabilityRevision::from_contract(&manifest(), &schema(), deriver_revision())
-        .map_err(|_| SearchError::Unauthorized)?;
-    let arguments: SearchArguments =
-        serde_json::from_value(invocation.normalized_arguments().clone())
-            .map_err(|_| SearchError::Unauthorized)?;
-    let request_url = endpoint
-        .request_url(&arguments.query)
-        .map_err(|_| SearchError::Unauthorized)?;
-    let resource = endpoint.resource().map_err(|_| SearchError::Unauthorized)?;
-    if invocation.capability_revision() != &revision
-        || invocation.placement() != ResolvedPlacement::LocalBuiltin
-        || invocation.effect() != effect()
-        || invocation.resources() != &BTreeSet::from([resource])
-    {
-        return Err(SearchError::Unauthorized);
-    }
-    let remaining = (claim.expires_at() - now)
-        .to_std()
-        .map_err(|_| SearchError::Timeout)?;
-    search(&request_url, &cancellation, remaining).await
-}
-
 /// GET a search request URL and read its results. The operator chose the
 /// endpoint, so it may be on the local network.
 pub async fn search(
     request_url: &str,
     cancellation: &CancellationToken,
     deadline: Duration,
-) -> Result<SearchResults, SearchError> {
+) -> Result<SearchResults, WebError> {
     let response = get_within(
         request_url,
         FetchPolicy::allow_private_addresses(),
@@ -344,28 +151,29 @@ pub async fn search(
     )
     .await?;
     if response.over {
-        return Err(SearchError::InvalidResponse);
+        return Err(WebError::InvalidResponse);
     }
     let body: Value =
-        serde_json::from_slice(&response.body).map_err(|_| SearchError::InvalidResponse)?;
-    SearchResults::from_searxng(&body).ok_or(SearchError::InvalidResponse)
+        serde_json::from_slice(&response.body).map_err(|_| WebError::InvalidResponse)?;
+    SearchResults::from_searxng(&body).ok_or(WebError::InvalidResponse)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn request_urls_round_trip_and_nothing_else_does() {
         let endpoint = SearchEndpoint::new("http://127.0.0.1:8888/").unwrap();
-        let url = endpoint.request_url("rust 1.88 release & notes").unwrap();
+        let url = endpoint.request_url("rust 1.88 release & notes");
         assert_eq!(
             url,
             "http://127.0.0.1:8888/search?q=rust+1.88+release+%26+notes&format=json"
         );
         assert_eq!(query_of(&url).as_deref(), Some("rust 1.88 release & notes"));
         let nested = SearchEndpoint::new("https://example.org/searx").unwrap();
-        let url = nested.request_url("날씨").unwrap();
+        let url = nested.request_url("날씨");
         assert_eq!(query_of(&url).as_deref(), Some("날씨"));
         for other in [
             "http://127.0.0.1:8888/search?format=json&q=x",

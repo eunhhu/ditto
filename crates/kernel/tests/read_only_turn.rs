@@ -36,22 +36,18 @@ use tempfile::TempDir;
 
 #[path = "read_only_turn/agent_runs.rs"]
 mod agent_runs;
-#[path = "read_only_turn/memory_write.rs"]
-mod memory_write;
+#[path = "read_only_turn/memory.rs"]
+mod memory;
 #[path = "read_only_turn/model_sort.rs"]
 mod model_sort;
-#[path = "read_only_turn/recall.rs"]
-mod recall;
 #[path = "read_only_turn/reuse.rs"]
 mod reuse;
 #[path = "read_only_turn/sessions.rs"]
 mod sessions;
 #[path = "read_only_turn/stream.rs"]
 mod stream;
-#[path = "read_only_turn/web_fetch.rs"]
-mod web_fetch;
-#[path = "read_only_turn/web_search.rs"]
-mod web_search;
+#[path = "read_only_turn/web.rs"]
+mod web;
 
 #[derive(Clone)]
 struct ScriptedDriver {
@@ -317,20 +313,23 @@ impl Fixture {
         Self::with_capabilities(capabilities, web_fetch)
     }
 
-    /// Only `artifact.read` installed: the tool surface of every version.
-    fn artifact_read_only() -> Self {
+    /// Only the named bundled packages installed.
+    fn with_packages(names: &[&str]) -> Self {
         let installed = tempfile::tempdir().expect("capabilities directory");
-        let package = installed.path().join("core/artifact-read");
-        fs::create_dir_all(&package).expect("package directory");
-        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../capabilities/core/artifact-read");
-        for file in ["capability.toml", ditto_capability::PACKAGE_HEADER_FILENAME] {
-            fs::copy(source.join(file), package.join(file)).expect("copy package file");
+        for name in names {
+            let package = installed.path().join("core").join(name);
+            fs::create_dir_all(&package).expect("package directory");
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../capabilities/core")
+                .join(name);
+            for file in ["capability.toml", ditto_capability::PACKAGE_HEADER_FILENAME] {
+                fs::copy(source.join(file), package.join(file)).expect("copy package file");
+            }
         }
         let root = installed.path().to_owned();
         Self {
             _capabilities: Some(installed),
-            ..Self::with_capabilities(root, None)
+            ..Self::with_capabilities(root, Some(ditto_web_fetch::FetchPolicy::public_only()))
         }
     }
 
@@ -591,9 +590,9 @@ async fn run_success(
 async fn successful_two_request_continuation_persists_exact_epoch_schema_history_and_replays() {
     let fixture = Fixture::new();
     let loaded = fixture.kernel.capability_load_metrics();
-    // artifact.read, artifact.sort, device.process.run, the three memory
-    // tools, web.fetch and web.search.
-    assert_eq!(loaded.headers_read, 8);
+    // artifact.read, artifact.sort, device.process.run, memory.manage and
+    // web.browse.
+    assert_eq!(loaded.headers_read, 5);
     assert_eq!(loaded.legacy_manifests_read, 0);
     assert_eq!(loaded.manifests_paged, 0);
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));
@@ -673,7 +672,10 @@ async fn successful_two_request_continuation_persists_exact_epoch_schema_history
     let selected = replay.capabilities.as_ref().expect("selected capability");
     // Version 7 records no builtin schemas: replay derives them.
     let expected_revision = CapabilityRevision::from_contract(
-        &selected.manifest,
+        selected
+            .manifest
+            .as_ref()
+            .expect("a legacy turn selects artifact.read"),
         &capability_schema(),
         ArtifactReadDeriver::default().revision().clone(),
     )

@@ -100,11 +100,11 @@ impl ModelDriver for EchoDriver {
             }
             if question.contains("look up") {
                 let call_id = ProviderCallId::new("call-lookup").unwrap();
-                let arguments = json!({"query": "tea"});
+                let arguments = json!({"action": "search", "query": "tea"});
                 yield ModelEvent::TextDelta { text: "Looking it up.".into() };
-                yield ModelEvent::ToolCallStarted { call_id: call_id.clone(), capability_id: "memory.search".into() };
+                yield ModelEvent::ToolCallStarted { call_id: call_id.clone(), capability_id: "memory.manage".into() };
                 yield ModelEvent::ToolCallArgumentDelta { call_id: call_id.clone(), delta: arguments.to_string() };
-                yield ModelEvent::ToolCallReady { call_id, capability_id: "memory.search".into(), arguments };
+                yield ModelEvent::ToolCallReady { call_id, capability_id: "memory.manage".into(), arguments };
                 yield ModelEvent::Completed { finish_reason: FinishReason::ToolCalls, continuation: None };
                 return;
             }

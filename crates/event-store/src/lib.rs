@@ -15,7 +15,7 @@ pub mod recurrence;
 mod schedule;
 pub use schedule::{ScheduleEntry, ScheduleState};
 
-const CURRENT_SCHEMA_VERSION: i64 = 7;
+const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 thread_local! {
     static ASYNC_RUNTIME_THREAD: Cell<bool> = const { Cell::new(false) };
@@ -27,6 +27,14 @@ thread_local! {
 pub fn mark_async_runtime_thread() {
     ASYNC_RUNTIME_THREAD.with(|marked| marked.set(true));
 }
+
+/// The starts and outputs of a turn's tool calls (ADR 0036), which run
+/// status reads for a sort.
+const MIGRATION_V8: &str = r#"
+DROP INDEX IF EXISTS events_agent_sort;
+CREATE INDEX IF NOT EXISTS events_turn_tools ON events(session_id, task_id, correlation_id, seq)
+    WHERE kind IN ('tool.started', 'tool.output');
+"#;
 
 /// Conversation markers: resets bound a thread; finished turns are its history.
 const MIGRATION_V7: &str = r#"
@@ -293,9 +301,10 @@ impl EventStore {
         )?)
     }
 
-    /// A bounded projection input: one claim plus at most seven tool results.
-    /// The ninth record is a corruption sentinel, never silently truncated state.
-    pub fn agent_sort_events(
+    /// A bounded projection input: the starts and outputs of a turn's tool
+    /// calls, at most seven calls. The fifteenth record is a corruption
+    /// sentinel, never silently truncated state.
+    pub fn turn_tool_events(
         &self,
         session: &str,
         task: &str,
@@ -305,9 +314,9 @@ impl EventStore {
         let mut statement = connection.prepare(
             "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
                     payload_json, causation_id, correlation_id, span_id
-             FROM events INDEXED BY events_agent_sort
+             FROM events INDEXED BY events_turn_tools
              WHERE session_id = ?1 AND task_id = ?2 AND correlation_id = ?3
-               AND kind IN ('agent.sort.started', 'agent.sort.output') ORDER BY seq LIMIT 9",
+               AND kind IN ('tool.started', 'tool.output') ORDER BY seq LIMIT 15",
         )?;
         let rows = statement.query_map(
             params![session, task, correlation],
@@ -715,6 +724,9 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), EventStoreError> 
     if version < 7 {
         transaction.execute_batch(MIGRATION_V7)?;
     }
+    if version < 8 {
+        transaction.execute_batch(MIGRATION_V8)?;
+    }
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -836,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_four_sort_lookup_migrates_without_rewrite_and_bounds_exact_turn_work() {
+    fn schema_eight_tool_lookup_migrates_without_rewrite_and_bounds_exact_turn_work() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("state.db");
         let store = EventStore::open(&path).unwrap();
@@ -844,21 +856,37 @@ mod tests {
             .append(NewEvent::user_input("s", None, "legacy"))
             .unwrap();
         drop(store);
+        // A schema-7 store still has the sort-only index.
         let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("DROP INDEX events_agent_sort; PRAGMA user_version=3;")
-            .unwrap();
+        db.execute_batch(
+            "DROP INDEX events_turn_tools; PRAGMA user_version=7;
+             CREATE INDEX events_agent_sort ON events(session_id, task_id, correlation_id, seq)
+                 WHERE kind IN ('agent.sort.started', 'agent.sort.output');",
+        )
+        .unwrap();
         drop(db);
         let store = EventStore::open(&path).unwrap();
         assert_eq!(
             serde_json::to_value(store.get_by_event_id(&old.event_id).unwrap().unwrap()).unwrap(),
             serde_json::to_value(old).unwrap()
         );
+        let indexes = store
+            .connection()
+            .unwrap()
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name GLOB 'events_*'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(indexes.contains(&"events_turn_tools".to_owned()));
+        assert!(!indexes.contains(&"events_agent_sort".to_owned()));
         let plan=store.connection().unwrap().prepare(
-            "EXPLAIN QUERY PLAN SELECT seq FROM events INDEXED BY events_agent_sort WHERE session_id='s' AND task_id='t' AND correlation_id='turn_x' AND kind IN ('agent.sort.started','agent.sort.output') ORDER BY seq LIMIT 9"
+            "EXPLAIN QUERY PLAN SELECT seq FROM events INDEXED BY events_turn_tools WHERE session_id='s' AND task_id='t' AND correlation_id='turn_x' AND kind IN ('tool.started','tool.output') ORDER BY seq LIMIT 15"
         ).unwrap().query_map([],|row|row.get::<_,String>(3)).unwrap().collect::<Result<Vec<_>,_>>().unwrap().join(" ");
         assert!(
             plan.contains("SEARCH events USING")
-                && plan.contains("events_agent_sort")
+                && plan.contains("events_turn_tools")
                 && !plan.contains("TEMP B-TREE"),
             "{plan}"
         );
@@ -867,8 +895,8 @@ mod tests {
         for _ in 0..40 {
             store.append(draft.clone()).unwrap();
         }
-        draft.kind = event_kind::AGENT_SORT_OUTPUT.into();
-        for _ in 0..12 {
+        draft.kind = event_kind::TOOL_OUTPUT.into();
+        for _ in 0..20 {
             store.append(draft.clone()).unwrap();
         }
         draft.session_id = Some("other".into());
@@ -876,18 +904,14 @@ mod tests {
         draft.session_id = Some("s".into());
         draft.correlation_id = Some("turn_other".into());
         store.append(draft).unwrap();
-        let results = store.agent_sort_events("s", "t", "turn_x").unwrap();
-        assert_eq!(results.len(), 9);
-        assert!(
-            results
-                .iter()
-                .all(|e| e.kind == event_kind::AGENT_SORT_OUTPUT
-                    && e.session_id.as_deref() == Some("s")
-                    && e.correlation_id.as_deref() == Some("turn_x"))
-        );
+        let results = store.turn_tool_events("s", "t", "turn_x").unwrap();
+        assert_eq!(results.len(), 15);
+        assert!(results.iter().all(|e| e.kind == event_kind::TOOL_OUTPUT
+            && e.session_id.as_deref() == Some("s")
+            && e.correlation_id.as_deref() == Some("turn_x")));
         assert!(
             store
-                .agent_sort_events("s", "missing", "turn_x")
+                .turn_tool_events("s", "missing", "turn_x")
                 .unwrap()
                 .is_empty()
         );
