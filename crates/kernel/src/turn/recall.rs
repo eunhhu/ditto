@@ -159,18 +159,17 @@ pub enum RecallToolResult {
 
 impl RecallToolResult {
     /// The best matches for `query` among the memories in `space`, bounded in
-    /// count and text: the user's own assertions and, from turn payload
-    /// version 10 (ADR 0031), what Ditto inferred, marked as such. Nothing
-    /// derived by another origin may appear, since the model reads the result
-    /// as the user's memories.
-    pub(crate) fn search(query: &str, space: &[ContextNode], version: u16) -> Self {
-        let asserted = space
-            .iter()
-            .filter(|node| match (node.origin, node.epistemic) {
-                (ContextOrigin::User, EpistemicStatus::Asserted) => true,
-                (ContextOrigin::Model, EpistemicStatus::Inferred) => version >= 10,
-                _ => false,
-            });
+    /// count and text: the user's own assertions and what Ditto inferred
+    /// (ADR 0031), marked as such. Nothing derived by another origin may
+    /// appear, since the model reads the result as the user's memories.
+    pub(crate) fn search(query: &str, space: &[ContextNode]) -> Self {
+        let asserted = space.iter().filter(|node| {
+            matches!(
+                (node.origin, node.epistemic),
+                (ContextOrigin::User, EpistemicStatus::Asserted)
+                    | (ContextOrigin::Model, EpistemicStatus::Inferred)
+            )
+        });
         let searched = asserted.clone().count();
         let mut memories = Vec::new();
         let mut bytes = 0;
@@ -194,17 +193,13 @@ impl RecallToolResult {
         }
     }
 
-    /// What the model reads under the turn's payload version.
-    pub(crate) fn model_value(&self, version: u16) -> Value {
+    /// What the model reads.
+    pub(crate) fn model_value(&self) -> Value {
         match self {
             Self::Found { memories, searched } => json!({
                 "memories": memories,
                 "searched": searched,
-                "content_origin": if version >= 10 {
-                    "memories Ditto keeps for the user: what they asked Ditto to remember, and what Ditto inferred (marked inferred)"
-                } else {
-                    "what the user asked Ditto to remember"
-                },
+                "content_origin": "memories Ditto keeps for the user: what they asked Ditto to remember, and what Ditto inferred (marked inferred)",
             }),
             Self::InvalidArguments => json!({"error": "invalid_arguments"}),
         }
@@ -271,10 +266,9 @@ pub(crate) fn valid_output(
     requested: &EventRecord,
     input: &EventRecord,
     space: &[ContextNode],
-    version: u16,
 ) -> bool {
     let expected = match &request.query {
-        Some(query) => RecallToolResult::search(query, space, version),
+        Some(query) => RecallToolResult::search(query, space),
         None => RecallToolResult::InvalidArguments,
     };
     output.event_version == 1
@@ -327,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_users_own_assertions_are_searched() {
+    fn only_memories_are_searched() {
         use ContextOrigin::*;
         use EpistemicStatus::*;
         let space = [
@@ -339,11 +333,12 @@ mod tests {
             node("policy", "my dog Kit", Policy, Verified),
             node("system", "my dog Leo", System, Asserted),
         ];
-        let result = RecallToolResult::search("dog", &space, 9);
-        assert_eq!(ids(&result), ["said"]);
+        // The user's own assertions rank above what Ditto inferred.
+        let result = RecallToolResult::search("dog", &space);
+        assert_eq!(ids(&result), ["said", "model"]);
         assert!(matches!(
             result,
-            RecallToolResult::Found { searched: 1, .. }
+            RecallToolResult::Found { searched: 2, .. }
         ));
     }
 
@@ -359,7 +354,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let result = RecallToolResult::search("dog", &many, 10);
+        let result = RecallToolResult::search("dog", &many);
         assert_eq!(ids(&result).len(), MAX_RESULTS);
         assert_eq!(ids(&result)[0], "m00");
         assert!(matches!(
@@ -379,9 +374,6 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            ids(&RecallToolResult::search("dog", &large, 10)),
-            ["l0", "l1"]
-        );
+        assert_eq!(ids(&RecallToolResult::search("dog", &large)), ["l0", "l1"]);
     }
 }

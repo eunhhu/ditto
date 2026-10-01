@@ -30,7 +30,8 @@ and checks establish a new fact.
   `dev/task-029-memory-search` stack the harness design and Tasks 025–029,
   and `dev/task-030-selection-by-reference`, `dev/task-024-model-memory` and
   `dev/task-031-forget-memory` stack Tasks 030, 024 and 031, and
-  `dev/task-032-web-search` stacks Task 032. Nothing is pushed.
+  `dev/task-032-web-search` and `dev/task-033-thin-contract` stack Tasks 032
+  and 033. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -128,35 +129,18 @@ and checks establish a new fact.
   service is configured, and the three memory tools
   for agent runs while installed), runs at most eight
   model requests, journals versioned transitions before publication and
-  replays without provider, artifact or network I/O. New turns write payload
-  version 11:
-  - version 2 added typed `TurnFailureReason`s for validator-derived failures;
-  - version 3 gave agent runs the current thread's finished exchanges as
-    native messages, with their turn IDs recorded and recomputed on replay
-    (ADR 0022);
-  - version 4 (ADR 0026) added personal-assistant instructions and the local
-    time of acceptance, fixed by a recorded UTC offset;
-  - version 5 (ADR 0027) added `web.fetch`;
-  - version 6 (ADR 0028 Phase A) keeps the prompt prefix stable: a time note
-    leads the latest message, the capsule is in ID order, `web.fetch` is always
-    offered while enabled, and the history window steps by eight exchanges (at
-    most 16, 24 KiB);
-  - version 7 (Phase C) records each fact once: text in coalesced chunks (the
-    first text after a quiet 48 ms at once), each request as the SHA-256 of
-    what was sent, and no capsule or builtin schemas; replay rebuilds them;
-  - version 8 (ADR 0029) adds `memory.search`, whose results replay
-    recomputes;
-  - version 9 (ADR 0030) records the capability selection by reference:
-    each contract's digests, from which replay rebuilds the packaged
-    manifests;
-  - version 10 (ADR 0031) adds `memory.remember` and `memory.forget`, lets
-    `memory.search` read inferred memories, and rewrites the memory
-    instructions;
-  - version 11 (ADR 0033) adds `web.search` and the instruction to work on
-    its own and hand off only what needs the user.
+  replays without provider, artifact or network I/O. There is one turn
+  contract, version 11 (ADR 0034): replay rejects turns recorded under any
+  other version, while status and thread history still read their answers.
+  The contract carries typed failure reasons (ADR 0021), the thread's recent
+  exchanges as native messages in a stepped window (ADRs 0022, 0028), the
+  assistant instructions with the local time as a note in the latest
+  message (ADRs 0026, 0028), each fact recorded once (text in chunks, each
+  request as its SHA-256, the selection by contract digests; ADRs 0028,
+  0030), and the tools of ADRs 0027, 0029, 0031 and 0033, with the
+  instruction to work on its own and hand off only what needs the user.
 
-  Older versions replay under their original rules; a turn never mixes
-  versions. A run reuses its session's verified context while no context node
+  A run reuses its session's verified context while no context node
   has been committed since (sessions with task-scoped or windowed nodes are
   recompiled), keeps each session's thread between turns, and commits
   `context.compiled` and `capabilities.selected` with its first model request.
@@ -185,19 +169,19 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 032
+## Latest verified slice: Task 033
 
-- [Contract and evidence](tasks/032-web-search.md) (ADR 0033). With a
-  configured SearXNG-compatible service, Ditto searches the web on its own,
-  without per-query approval; consent is a hand-off in the answer, and no
-  turn waits for a person.
-- Its gate passed on its final tree (591 Rust tests).
+- [Contract and evidence](tasks/033-one-turn-contract.md) (ADR 0034). Replay
+  keeps one turn contract instead of eleven versions; legacy instructions,
+  selection rules, payload forms and failure grammar are gone with their
+  tests.
+- Its gate passed on its final tree (590 Rust tests).
 
-## Previous slice: Task 031
+## Previous slice: Task 032
 
-- [Contract and evidence](tasks/031-forget-memory.md): forgetting a memory
-  from the web app, the CLI or Telegram (ADR 0032). Its gate passed on its
-  final tree (584 Rust tests).
+- [Contract and evidence](tasks/032-web-search.md): web search on its own,
+  turn payload version 11 (ADR 0033). Its gate passed on its final tree (591
+  Rust tests).
 
 ## Known gaps
 
@@ -243,8 +227,6 @@ and checks establish a new fact.
   thread is not caught. Forgetting removes a memory from use and view, not
   from the append-only journal. The web app's notice of a write shows only
   live; after a reload the memory list still marks Ditto's memories.
-- Version-1 turns still replay through the frozen failure-message grammar;
-  only historical traces depend on it.
 - The scheduler sleeps on a monotonic timer and has no resume wake-up, so a
   suspended laptop may delay or miss a start window. Not reproduced.
 

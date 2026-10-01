@@ -83,7 +83,6 @@ impl ReplayProjector<'_, '_> {
             requested,
             &self.events[0],
             self.recall_space.as_deref().unwrap_or_default(),
-            self.version.unwrap_or_default(),
         ) {
             return Err(replay_invalid(
                 "memory search result differs from the searchable memories",
@@ -92,7 +91,7 @@ impl ReplayProjector<'_, '_> {
         self.conversation.push(ConversationItem::ToolResult {
             call_id: call.call_id.clone(),
             content: vec![ContentPart::Structured {
-                value: output.result.model_value(self.version.unwrap_or_default()),
+                value: output.result.model_value(),
             }],
             is_error: output.result.is_error(),
         });
