@@ -535,6 +535,14 @@ user's own assertions among the nodes the turn's compilation included and
 those it left out as irrelevant or over budget; replay rebuilds that set and
 recomputes the result exactly.
 
+Version 9 ([ADR 0030](../adr/0030-capability-selection-by-reference.md))
+records `capabilities.selected` by reference: `epoch_id` and `contracts`, each
+bound contract's revision (capability ID and version, manifest and schema
+digests, deriver revision) in page order. Manifests, cards and the working-set
+size are not recorded; every builtin equals its package, so replay rebuilds
+them and checks each digest. Version-9 turns carrying the full form, and
+earlier versions carrying the reference form, are rejected.
+
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished
 agent-run turns recorded after the latest reset. It deletes nothing and does

@@ -11,9 +11,10 @@ use std::{borrow::Borrow, collections::BTreeSet, fmt};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ditto_artifact_store::{ArtifactRef, ArtifactStore, ArtifactStoreError};
 use ditto_capability::{
-    CanonicalResource, CapabilityDeriver, CapabilityKind, CapabilityManifest, CapabilitySchema,
-    DataAccess, DerivationBudget, DeriverError, DeriverRevision, EffectProfile, Externality,
-    JSON_SCHEMA_DRAFT_2020_12_URI, Mutation, Privilege, RuntimeType,
+    CanonicalResource, CapabilityDeriver, CapabilityKind, CapabilityLifecycle, CapabilityManifest,
+    CapabilitySchema, DataAccess, DerivationBudget, DeriverError, DeriverRevision, EffectProfile,
+    Externality, JSON_SCHEMA_DRAFT_2020_12_URI, Mutation, Privilege, RuntimeType,
+    canonical_manifest_digest,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::{Value, json};
@@ -53,6 +54,14 @@ pub enum ArtifactReadManifestError {
     Mismatch { field: &'static str },
 }
 
+/// The packaged manifest this code implements.
+pub fn manifest() -> CapabilityManifest {
+    toml::from_str(include_str!(
+        "../../../capabilities/core/artifact-read/capability.toml"
+    ))
+    .expect("packaged artifact.read manifest is valid")
+}
+
 /// Validate the installed level-1 manifest against the builtin contract.
 pub fn validate_artifact_read_manifest(
     manifest: &CapabilityManifest,
@@ -70,6 +79,9 @@ pub fn validate_artifact_read_manifest(
     }
     if manifest.kind != CapabilityKind::Tool {
         return mismatch("kind");
+    }
+    if manifest.lifecycle != CapabilityLifecycle::Active {
+        return mismatch("lifecycle");
     }
     if manifest.summary != CAPABILITY_SUMMARY {
         return mismatch("summary");
@@ -131,6 +143,11 @@ pub fn validate_artifact_read_manifest(
     }
     if manifest.verification.default.as_deref() != Some(ARTIFACT_READ_VERIFICATION) {
         return mismatch("verification.default");
+    }
+    // Replay rebuilds the manifest from the package (turn payload version 9),
+    // so the installed one must be exactly it.
+    if canonical_manifest_digest(manifest) != canonical_manifest_digest(&self::manifest()) {
+        return mismatch("package");
     }
     Ok(())
 }
@@ -1447,6 +1464,17 @@ mod tests {
     #[test]
     fn canonical_manifest_is_accepted_and_contract_mutations_are_rejected() {
         assert!(validate_artifact_read_manifest(&canonical_manifest()).is_ok());
+        assert_eq!(
+            ditto_capability::canonical_manifest_digest(&super::manifest()),
+            ditto_capability::canonical_manifest_digest(&canonical_manifest())
+        );
+
+        let mut manifest = canonical_manifest();
+        manifest.lifecycle = CapabilityLifecycle::Retired;
+        assert_eq!(
+            validate_artifact_read_manifest(&manifest),
+            Err(ArtifactReadManifestError::Mismatch { field: "lifecycle" })
+        );
 
         let mut manifest = canonical_manifest();
         manifest.namespace = "other".to_owned();

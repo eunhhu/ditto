@@ -143,11 +143,10 @@ async fn a_linked_page_is_read_once_and_replays_without_network() {
     assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
     // Without the recorded selection the call is to an unknown capability.
     let mut forged = events.clone();
-    forged[position(event_kind::CAPABILITIES_SELECTED)]
-        .payload
-        .as_object_mut()
+    forged[position(event_kind::CAPABILITIES_SELECTED)].payload["contracts"]
+        .as_array_mut()
         .unwrap()
-        .remove("fetch_manifest");
+        .retain(|contract| contract["capability_id"] != "web.fetch");
     assert!(replay_artifact_read_turn(&forged, &status.turn_id).is_err());
     // A claimed fetch cannot be recorded as a denial.
     let mut forged = events.clone();

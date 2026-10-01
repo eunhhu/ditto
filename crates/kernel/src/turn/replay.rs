@@ -42,14 +42,14 @@ use super::shared::{
 };
 use super::types::{
     ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
-    CapabilitiesSelectedPayload, CapabilityRequestedPayload, ContextCompiledPayload,
-    ExecutionOutputPayload, ExecutionStartedPayload, MAX_ASSISTANT_TEXT_BYTES,
-    MAX_MODEL_EVENTS_PER_REQUEST, MAX_MODEL_OUTPUT_BYTES_PER_REQUEST, MAX_MODEL_OUTPUT_EVENT_BYTES,
-    MAX_MODEL_REQUESTS, MAX_TURN_DURATION, MAX_TURN_FAILURE_MESSAGE_BYTES,
-    MIN_TURN_PAYLOAD_VERSION, ModelOutputPayload, ModelRequestDigestPayload, ModelRequestedPayload,
-    ReplayError, ReplayedArtifactReadCall, ReplayedReadOnlyTurn, TURN_PAYLOAD_VERSION,
-    TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFailureEvidence, TurnFailureReason,
-    TurnFinishedPayload, TurnSequenceSpan,
+    CapabilitiesSelectedPayload, CapabilitiesSelectedRefPayload, CapabilityRequestedPayload,
+    ContextCompiledPayload, ExecutionOutputPayload, ExecutionStartedPayload,
+    MAX_ASSISTANT_TEXT_BYTES, MAX_MODEL_EVENTS_PER_REQUEST, MAX_MODEL_OUTPUT_BYTES_PER_REQUEST,
+    MAX_MODEL_OUTPUT_EVENT_BYTES, MAX_MODEL_REQUESTS, MAX_TURN_DURATION,
+    MAX_TURN_FAILURE_MESSAGE_BYTES, MIN_TURN_PAYLOAD_VERSION, ModelOutputPayload,
+    ModelRequestDigestPayload, ModelRequestedPayload, ReplayError, ReplayedArtifactReadCall,
+    ReplayedReadOnlyTurn, TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode,
+    TurnFailureEvidence, TurnFailureReason, TurnFinishedPayload, TurnSequenceSpan,
 };
 
 #[derive(Debug, Deserialize)]
@@ -444,7 +444,14 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             return Ok(ArtifactReadTurnReplay::Failed { failure });
         }
         let selected_event = self.take(event_kind::CAPABILITIES_SELECTED, EventActor::System)?;
-        let selected: CapabilitiesSelectedPayload = self.decode_versioned(selected_event)?;
+        let selected: CapabilitiesSelectedPayload =
+            if self.version.is_some_and(|version| version >= 9) {
+                let recorded: CapabilitiesSelectedRefPayload =
+                    self.decode_versioned(selected_event)?;
+                rebuild_selection(recorded)?
+            } else {
+                self.decode_versioned(selected_event)?
+            };
         self.require_turn_id(&selected.turn_id)?;
         if selected_event.span_id.is_some() {
             return Err(replay_invalid(
@@ -1996,6 +2003,7 @@ macro_rules! impl_payload_version {
 impl_payload_version!(
     ContextCompiledPayload,
     CapabilitiesSelectedPayload,
+    CapabilitiesSelectedRefPayload,
     ModelRequestedPayload,
     ModelRequestDigestPayload,
     ModelOutputPayload,
@@ -2005,6 +2013,53 @@ impl_payload_version!(
     TurnFinishedPayload,
     TurnFailedPayload,
 );
+
+/// Version 9 records the selection by reference (ADR 0030): rebuild it from
+/// the packaged contracts, in the recorded page order. The selection checks
+/// then compare every recorded digest with its package's.
+fn rebuild_selection(
+    recorded: CapabilitiesSelectedRefPayload,
+) -> Result<CapabilitiesSelectedPayload, ReplayError> {
+    let mut manifests = recorded
+        .contracts
+        .iter()
+        .map(|contract| match contract.capability_id() {
+            ARTIFACT_READ_ID => Ok(ditto_artifact_read::manifest()),
+            ditto_artifact_sort::ID => Ok(ditto_artifact_sort::manifest()),
+            ditto_web_fetch::ID => Ok(ditto_web_fetch::manifest()),
+            super::recall::ID => Ok(super::recall::manifest()),
+            _ => Err(replay_invalid("selected contract is not a builtin")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let cards = manifests
+        .iter()
+        .map(CapabilityCard::from)
+        .collect::<Vec<_>>();
+    let epoch = serde_json::from_value(serde_json::json!({
+        "id": recorded.epoch_id,
+        "max_working_set": cards.len(),
+        "capabilities": cards,
+        "invocation_revisions": recorded.contracts,
+    }))
+    .map_err(|error| replay_invalid(format!("selected epoch cannot be rebuilt: {error}")))?;
+    let mut take = |id: &str| {
+        manifests
+            .iter()
+            .position(|manifest| manifest.id == id)
+            .map(|index| manifests.remove(index))
+    };
+    Ok(CapabilitiesSelectedPayload {
+        event_version: recorded.event_version,
+        turn_id: recorded.turn_id,
+        manifest: take(ARTIFACT_READ_ID)
+            .ok_or_else(|| replay_invalid("artifact.read was not selected"))?,
+        sort_manifest: take(ditto_artifact_sort::ID),
+        fetch_manifest: take(ditto_web_fetch::ID),
+        memory_manifest: take(super::recall::ID),
+        epoch,
+        schemas: Vec::new(),
+    })
+}
 
 fn replay_invalid(message: impl Into<String>) -> ReplayError {
     ReplayError::Invalid(message.into())
