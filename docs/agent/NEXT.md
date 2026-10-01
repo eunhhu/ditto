@@ -5,42 +5,25 @@ file's exit criteria before moving the marker.
 
 ## Active
 
-On 2026-09-30 the user redirected the frontier: design the thinnest possible
-harness around concurrency, real-time streaming, and the timing and scope of
-context injection. The design is
-[docs/design/realtime-harness.md](../design/realtime-harness.md)
-(ADR 0028, proposed). Its measured baseline is from `scripts/measure-harness.py`.
-Implement in this order; each phase lands with tests, its ADR amendment, before
-and after numbers, and the gate:
+On 2026-10-01 the user chose the next two slices: the recommended journal fix,
+and memory that Ditto manages on its own, which reverses ADR 0015's exclusion
+of model tool invocation for memory writes. In this order:
 
-1. [025](tasks/025-cache-stable-layout.md) Phase A, cache-stable prompt
-   layout, turn payload version 6 - complete (prefix reuse 50.6 % → 96.4 %).
-2. [026](tasks/026-thin-turn-start.md) Phase B, reused session context, kept
-   threads, one-commit prelude, storage off async threads - complete
-   (before-dispatch 5–10 ms → 1 ms; writer thread and reader pool deferred
-   with measurements).
-3. [027](tasks/027-one-journal-plane.md) Phase C, coalesced durable text and
-   requests as digests, turn payload version 7 - complete (1,006 → 9 events
-   per 1,000-delta turn; journal bytes per answer byte 80–111 → 4.9–16.3,
-   short of the target of 3; live plane and blobs replaced, see the ADR).
-4. [028](tasks/028-session-parallel-runs.md) Phase D, session-parallel
-   runs - complete (three sessions at once, from one; queue, `queued` status
-   and provider lanes replaced, see the ADR).
-5. [029](tasks/029-memory-search.md) Phase E in part, read-only
-   `memory.search` and tool progress, turn payload version 8 - complete
-   (a memory the budget left out reaches the model through a search). One
-   builtin tool lifecycle and parallel read-only calls are deferred with
-   reasons in the ADR, so the design's exit criteria for those parts are not
-   met.
+1. [030](tasks/030-selection-by-reference.md) Capability selection recorded
+   by reference, turn payload version 9 - complete (`capabilities.selected`
+   4,910 → 952 bytes; a short agent turn journals 4,879 bytes instead of
+   8,837).
+2. 024 Model-managed memory: during a turn Ditto saves new lasting facts and
+   replaces outdated memories on its own, labeled as its inference, with
+   provenance, bounds and protection against injected instructions; turn
+   payload version 10.
 
-The harness phases are done except those deferred parts. The next slice waits
-for the user's choice among them and the open items below.
+The thin-harness phases of ADR 0028 (Tasks 025–029) are complete except the
+parts deferred there: one builtin tool lifecycle, parallel read-only calls,
+and the journal target of three bytes per answer byte.
 
 Still open from the earlier frontier:
 
-- 024, model-invoked memory saving, awaits the user's decision because it
-  reverses ADR 0015's exclusion of model tool invocation.
-- The daily-driver slices 018–023 are complete; see below.
 - Web search waits for per-call approval.
 - The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
   the measurement gate before any claim of parity with other assistants.
@@ -49,6 +32,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [030](tasks/030-selection-by-reference.md) Capability selection recorded
+  by reference, turn payload version 9 (ADR 0030).
 - [029](tasks/029-memory-search.md) Read-only memory search and tool
   progress, turn payload version 8 (ADR 0029; ADR 0028 Phase E in part).
 - [028](tasks/028-session-parallel-runs.md) Session-parallel runs (ADR 0028

@@ -454,6 +454,25 @@ fn attach_deadline_evidence(event: &mut EventRecord, deadline: chrono::DateTime<
     });
 }
 
+/// Version 9 records the capability selection by reference. The same turn
+/// with its selection recorded in full replays as version 8.
+fn selection_in_full(events: &[EventRecord], turn_id: &str) -> Vec<EventRecord> {
+    let replayed = replay_artifact_read_turn(events, turn_id).expect("turn replays");
+    let selection =
+        serde_json::to_value(replayed.capabilities.expect("selection")).expect("selection JSON");
+    let mut relabeled = events.to_vec();
+    for event in relabeled.iter_mut().filter(|event| {
+        event.correlation_id.as_deref() == Some(turn_id)
+            && event.payload["event_version"] == json!(TURN_PAYLOAD_VERSION)
+    }) {
+        if event.kind == event_kind::CAPABILITIES_SELECTED {
+            event.payload = selection.clone();
+        }
+        event.payload["event_version"] = json!(8);
+    }
+    relabeled
+}
+
 /// Version 7 records a request as its digest; a forged request is the digest
 /// of a different request.
 fn reseal_request(event: &mut EventRecord, request: &ModelRequest) {
@@ -3164,7 +3183,45 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
     execution_output.payload["result"]["offset"] = json!(9);
     assert!(replay_artifact_read_turn(&corrupted_result, &outcome.turn_id).is_err());
 
-    let mut corrupted_manifest = events.clone();
+    // Version 9 records each selected contract by its digests: a digest,
+    // deriver or epoch that differs from the package's is rejected.
+    fn selected(events: &mut [EventRecord]) -> &mut Value {
+        &mut events
+            .iter_mut()
+            .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
+            .expect("capabilities selected")
+            .payload
+    }
+    let mut recorded = events.clone();
+    let mut keys = selected(&mut recorded)
+        .as_object()
+        .expect("selection object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(keys, ["contracts", "epoch_id", "event_version", "turn_id"]);
+    let mut forged_digest = events.clone();
+    selected(&mut forged_digest)["contracts"][0]["manifest_digest"] = json!("0".repeat(64));
+    assert!(replay_artifact_read_turn(&forged_digest, &outcome.turn_id).is_err());
+    let mut forged_deriver = events.clone();
+    selected(&mut forged_deriver)["contracts"][0]["deriver_revision"] = json!("artifact.read/v999");
+    assert!(replay_artifact_read_turn(&forged_deriver, &outcome.turn_id).is_err());
+    let mut forged_epoch = events.clone();
+    selected(&mut forged_epoch)["epoch_id"] = json!(ulid::Ulid::new().to_string());
+    assert!(replay_artifact_read_turn(&forged_epoch, &outcome.turn_id).is_err());
+    let mut unknown_contract = events.clone();
+    selected(&mut unknown_contract)["contracts"][0]["capability_id"] = json!("device.process.run");
+    assert!(replay_artifact_read_turn(&unknown_contract, &outcome.turn_id).is_err());
+    let mut no_contracts = events.clone();
+    selected(&mut no_contracts)["contracts"] = json!([]);
+    assert!(replay_artifact_read_turn(&no_contracts, &outcome.turn_id).is_err());
+
+    // Recorded in full, the same turn replays as version 8, where every
+    // manifest field and card is checked.
+    let full = selection_in_full(&events, &outcome.turn_id);
+    replay_artifact_read_turn(&full, &outcome.turn_id).expect("full selection replays");
+    let mut corrupted_manifest = full.clone();
     corrupted_manifest
         .iter_mut()
         .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
@@ -3172,7 +3229,7 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
         .payload["manifest"]["runtime"]["lazy"] = json!(false);
     assert!(replay_artifact_read_turn(&corrupted_manifest, &outcome.turn_id).is_err());
 
-    let mut corrupted_retrieval = events.clone();
+    let mut corrupted_retrieval = full.clone();
     corrupted_retrieval
         .iter_mut()
         .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
@@ -3180,7 +3237,7 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
         .payload["manifest"]["retrieval"]["intents"] = json!(["forged"]);
     assert!(replay_artifact_read_turn(&corrupted_retrieval, &outcome.turn_id).is_err());
 
-    let mut corrupted_epoch_card = events.clone();
+    let mut corrupted_epoch_card = full.clone();
     corrupted_epoch_card
         .iter_mut()
         .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)
@@ -3188,7 +3245,7 @@ async fn durable_publication_precedes_broadcast_and_replay_rejects_corruption() 
         .payload["epoch"]["capabilities"][0]["namespace"] = json!("forged");
     assert!(replay_artifact_read_turn(&corrupted_epoch_card, &outcome.turn_id).is_err());
 
-    let mut corrupted_invocation_revision = events.clone();
+    let mut corrupted_invocation_revision = full.clone();
     corrupted_invocation_revision
         .iter_mut()
         .find(|event| event.kind == event_kind::CAPABILITIES_SELECTED)

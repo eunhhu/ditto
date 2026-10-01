@@ -50,7 +50,7 @@ use super::shared::{
     model_request, presented_context, request_sha256, system_prefix, turn_failure_code_for_model,
 };
 use super::types::{
-    ArtifactReadTurnOutcome, ArtifactReadTurnStatus, CapabilitiesSelectedPayload,
+    ArtifactReadTurnOutcome, ArtifactReadTurnStatus, CapabilitiesSelectedRefPayload,
     CapabilityRequestedPayload, ContextCompiledPayload, ExecutionOutputPayload,
     ExecutionStartedPayload, MAX_ASSISTANT_TEXT_BYTES, MAX_MODEL_EVENTS_PER_REQUEST,
     MAX_MODEL_OUTPUT_BYTES_PER_REQUEST, MAX_MODEL_OUTPUT_EVENT_BYTES, MAX_MODEL_REQUESTS,
@@ -686,27 +686,20 @@ impl DittoKernel {
                 None,
             )
         })?;
-        let manifest = binding.manifest().clone();
         let mut schemas = vec![binding.schema().clone()];
         schemas.extend(sort.map(|contract| contract.schema().clone()));
         schemas.extend(fetch.map(|contract| contract.schema().clone()));
         schemas.extend(memory.map(|contract| contract.schema().clone()));
-        let sort_manifest = sort.map(|contract| contract.manifest().clone());
-        let fetch_manifest = fetch.map(|contract| contract.manifest().clone());
-        let memory_manifest = memory.map(|contract| contract.manifest().clone());
+        // Each contract equals its package, so its digests identify it.
         self.stage_turn_event(
             run,
             EventActor::System,
             event_kind::CAPABILITIES_SELECTED,
-            &CapabilitiesSelectedPayload {
+            &CapabilitiesSelectedRefPayload {
                 event_version: TURN_PAYLOAD_VERSION,
                 turn_id: run.scope.turn_id.clone(),
-                manifest,
-                sort_manifest,
-                fetch_manifest,
-                memory_manifest,
-                epoch: live_epoch.evidence().clone(),
-                schemas: Vec::new(),
+                epoch_id: live_epoch.evidence().id().to_owned(),
+                contracts: live_epoch.evidence().invocation_revisions().to_vec(),
             },
             None,
         )?;

@@ -767,10 +767,21 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
     // legacy form.
     // Versions before 7 record what version 7 derives: the capsule, the
     // builtin schemas and each request as sent, which the driver received.
+    // Versions before 9 record the capability selection in full.
     let requests = driver.requests();
+    let selection = serde_json::to_value(
+        replay_artifact_read_turn(&events, &status.turn_id)
+            .unwrap()
+            .capabilities
+            .unwrap(),
+    )
+    .unwrap();
     let relabel = |version: u16, only_first: bool, legacy: bool| {
         let mut relabeled = events.clone();
         for event in relabeled.iter_mut().filter(|event| versioned(event)) {
+            if version < 9 && event.kind == event_kind::CAPABILITIES_SELECTED {
+                event.payload = selection.clone();
+            }
             event.payload["event_version"] = json!(version);
             if version < 7 {
                 match event.kind.as_str() {
@@ -848,6 +859,24 @@ async fn version_one_turns_replay_with_legacy_rules_and_versions_never_mix() {
         event.payload["event_version"] = json!(7);
     }
     assert!(replay_artifact_read_turn(&full_forms_as_seven, &status.turn_id).is_err());
+    // Version 9 records the selection by reference: recorded in full, the
+    // same turn replays as versions 7 and 8, and each version accepts only its
+    // own selection form.
+    replay_artifact_read_turn(&relabel(7, false, false), &status.turn_id).unwrap();
+    replay_artifact_read_turn(&relabel(8, false, false), &status.turn_id).unwrap();
+    let mut reference_as_eight = events.clone();
+    for event in reference_as_eight
+        .iter_mut()
+        .filter(|event| versioned(event))
+    {
+        event.payload["event_version"] = json!(8);
+    }
+    assert!(replay_artifact_read_turn(&reference_as_eight, &status.turn_id).is_err());
+    let mut full_as_nine = relabel(8, false, false);
+    for event in full_as_nine.iter_mut().filter(|event| versioned(event)) {
+        event.payload["event_version"] = json!(9);
+    }
+    assert!(replay_artifact_read_turn(&full_as_nine, &status.turn_id).is_err());
 }
 
 /// The frozen system instructions of turn payload versions 1 to 3.

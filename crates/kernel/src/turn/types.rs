@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use ditto_artifact_read::{ArtifactReadResource, ArtifactReadResult};
-use ditto_capability::{CapabilityManifest, CapabilitySchema, ExecutionEpochEvidence};
+use ditto_capability::{
+    CapabilityManifest, CapabilityRevision, CapabilitySchema, ExecutionEpochEvidence,
+};
 use ditto_context::{CompiledContext, ContextCapsule};
 use ditto_model::{
     ExecutionEpochId, ModelRequest, ModelRequestId, ModelStreamEvent, ProviderCallId,
@@ -18,8 +20,9 @@ use crate::KernelError;
 /// Version 7 (ADR 0028 Phase C) journals each fact once: streamed text in
 /// coalesced chunks, and requests, capsules and builtin schemas as what replay
 /// rebuilds from the rest of the journal. Version 8 (ADR 0029) offers
-/// `memory.search` to agent runs.
-pub const TURN_PAYLOAD_VERSION: u16 = 8;
+/// `memory.search` to agent runs. Version 9 (ADR 0030) records the capability
+/// selection by reference.
+pub const TURN_PAYLOAD_VERSION: u16 = 9;
 /// Oldest turn contract that replay and run status still read. Version-1
 /// turns use positive-overlap context selection and message grammar.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -49,6 +52,8 @@ pub struct ContextCompiledPayload {
     pub utc_offset_minutes: Option<i32>,
 }
 
+/// The selection in full: the durable form of versions 1 to 8, and the form
+/// replay rebuilds for version 9.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilitiesSelectedPayload {
     pub event_version: u16,
@@ -67,6 +72,18 @@ pub struct CapabilitiesSelectedPayload {
     /// manifests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<CapabilitySchema>,
+}
+
+/// Version-9 durable form of `capabilities.selected` (ADR 0030): the epoch's
+/// identity and the exact contracts it bound, each by its digests. Every
+/// builtin equals its packaged contract, so replay rebuilds the manifests,
+/// cards and schemas from code and checks each digest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapabilitiesSelectedRefPayload {
+    pub event_version: u16,
+    pub turn_id: String,
+    pub epoch_id: String,
+    pub contracts: Vec<CapabilityRevision>,
 }
 
 /// A model request as sent: the durable form of versions 1 to 6, and the form

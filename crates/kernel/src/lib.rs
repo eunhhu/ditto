@@ -40,11 +40,11 @@ pub use context_retrieval::{
 
 pub use turn::{
     ArtifactReadTurnOutcome, ArtifactReadTurnReplay, ArtifactReadTurnStatus,
-    CapabilitiesSelectedPayload, CapabilityRequestedPayload, ContextCompiledPayload,
-    ExecutionOutputPayload, ExecutionStartedPayload, ModelOutputPayload, ModelRequestedPayload,
-    ReadOnlyTurnControl, ReplayError, ReplayedArtifactReadCall, ReplayedReadOnlyTurn,
-    TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFinishedPayload, TurnRunError,
-    TurnSequenceSpan, replay_artifact_read_turn,
+    CapabilitiesSelectedPayload, CapabilitiesSelectedRefPayload, CapabilityRequestedPayload,
+    ContextCompiledPayload, ExecutionOutputPayload, ExecutionStartedPayload, ModelOutputPayload,
+    ModelRequestedPayload, ReadOnlyTurnControl, ReplayError, ReplayedArtifactReadCall,
+    ReplayedReadOnlyTurn, TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFinishedPayload,
+    TurnRunError, TurnSequenceSpan, replay_artifact_read_turn,
 };
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;

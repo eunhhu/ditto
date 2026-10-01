@@ -27,8 +27,9 @@ and checks establish a new fact.
   Tasks 019–023; `dev/design-realtime-harness`,
   `dev/task-025-cache-stable-layout`, `dev/task-026-thin-turn-start`,
   `dev/task-027-one-journal-plane`, `dev/task-028-session-parallel` and
-  `dev/task-029-memory-search` stack the harness design and Tasks 025–029.
-  Nothing is pushed.
+  `dev/task-029-memory-search` stack the harness design and Tasks 025–029,
+  and `dev/task-030-selection-by-reference` stacks Task 030. Nothing is
+  pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -111,7 +112,7 @@ and checks establish a new fact.
   agent runs while installed), runs at most eight
   model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. New turns write payload
-  version 8:
+  version 9:
   - version 2 added typed `TurnFailureReason`s for validator-derived failures;
   - version 3 gave agent runs the current thread's finished exchanges as
     native messages, with their turn IDs recorded and recomputed on replay
@@ -127,7 +128,10 @@ and checks establish a new fact.
     first text after a quiet 48 ms at once), each request as the SHA-256 of
     what was sent, and no capsule or builtin schemas; replay rebuilds them;
   - version 8 (ADR 0029) adds `memory.search`, whose results replay
-    recomputes.
+    recomputes;
+  - version 9 (ADR 0030) records the capability selection by reference:
+    each contract's digests, from which replay rebuilds the packaged
+    manifests.
 
   Older versions replay under their original rules; a turn never mixes
   versions. A run reuses its session's verified context while no context node
@@ -159,21 +163,20 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 029
+## Latest verified slice: Task 030
 
-- [Contract and evidence](tasks/029-memory-search.md) (ADR 0029, ADR 0028
-  Phase E in part). Agent runs can search the user's own memories that the
-  context budget left out, and replay recomputes every result. The web app
-  says what a running tool is doing. One tool lifecycle and parallel
-  read-only calls are deferred, so the design's Phase E exit criteria for
-  those parts are not met.
+- [Contract and evidence](tasks/030-selection-by-reference.md) (ADR 0030).
+  `capabilities.selected` records each contract by its digests instead of in
+  full: 4,910 → 952 bytes, and a short agent turn journals 4,879 bytes
+  instead of 8,837. Every builtin, now including `artifact.read`, must equal
+  its package.
 - Its gate passed on its final tree (571 Rust tests).
 
-## Previous slice: Task 028
+## Previous slice: Task 029
 
-- [Contract and evidence](tasks/028-session-parallel-runs.md): session-parallel
-  runs, up to four sessions at once (ADR 0028 Phase D). Its gate passed on its
-  final tree (564 Rust tests).
+- [Contract and evidence](tasks/029-memory-search.md): read-only
+  `memory.search` and tool progress, turn payload version 8 (ADR 0029, ADR
+  0028 Phase E in part). Its gate passed on its final tree (571 Rust tests).
 
 ## Known gaps
 
@@ -182,7 +185,8 @@ and checks establish a new fact.
   - 5–10 ms of work before dispatch (1 ms after Task 026);
   - 74–80 µs (55–60 µs after Task 026) and one SQLite transaction per
     streamed delta, 206 or 1,006 events per turn, 81–107 journal bytes per
-    answer byte (after Task 027: 8 or 9 events and 16.3 or 4.9 bytes);
+    answer byte (after Task 027: 8 or 9 events and 16.3 or 4.9 bytes; after
+    Task 030: 13.4 or 4.3 bytes, the tools of Task 029 included);
   - median prompt prefix reuse between turns of 50.6 % (96.4 % after
     Task 025);
   - one of three simultaneous sessions accepted, the others HTTP 429 (all
@@ -246,11 +250,13 @@ and checks establish a new fact.
   V2); `memory.search` reuses context V1.
 - Each builtin tool keeps its own journal events, run path and replay checks;
   ADR 0028 defers one shared lifecycle until another effectful tool is added.
-- `capabilities.selected` records every offered builtin manifest in full:
-  4,910 of the 8,837 journal bytes of a short agent turn (Task 029). Replay
-  already pins each to its bundled contract, so recording a reference would
-  cut most of it; it is the largest remaining term in the journal-bytes
-  target of ADR 0028 Phase C.
+- Journal bytes per answer byte are 13.4 (200-delta answer) and 4.3
+  (1,000-delta answer) with twelve memories, against ADR 0028's target of 3.
+  The largest remaining terms are `context.compiled`, which records each
+  included memory in full (about 480 bytes each) although its own
+  `context.node.recorded` event holds it, and `turn.finished`, which repeats
+  the answer text so status and thread history read it without reassembling
+  chunks.
 - Headerless capability packages still pay one bounded startup body read.
 - The injected embedding interface is synchronous and may make up to 513
   serial calls; a production worker needs rerank pools, batching and caching.
