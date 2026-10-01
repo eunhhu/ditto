@@ -2,7 +2,7 @@ id = "web.browse"
 version = "0.1.0"
 namespace = "web"
 kind = "tool"
-summary = "Search the web through the operator's search service, or read a web page whose link the user sent."
+summary = "Search the web through the operator's search service, or read a web page whose link the user sent or a search returned."
 
 [runtime]
 type = "builtin"
@@ -14,7 +14,7 @@ modes = ["local"]
 requires = []
 
 [retrieval]
-intents = ["search the web", "look up current information online", "read a web page the user linked"]
+intents = ["search the web", "look up current information online", "read a web page the user linked or a search found"]
 negative_examples = ["search memories", "submit a form or post to a website"]
 aliases = ["web search", "look it up", "open link"]
 complements = []

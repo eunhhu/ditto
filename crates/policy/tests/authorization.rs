@@ -218,6 +218,76 @@ fn failed_authorization_does_not_consume_and_successful_retry_consumes_once() {
 }
 
 #[test]
+fn an_extended_lease_permits_exactly_the_added_resources_within_its_budget() {
+    let now = time();
+    let mut fixture = Fixture::new();
+    let authorizer = authorizer(&mut fixture, now + Duration::hours(1));
+    let first = fixture.invocation("first", 1);
+    let second = fixture.invocation("second", 1);
+    let elsewhere = InvocationCompiler::compile(
+        fixture
+            .epoch
+            .invocable_binding("artifact.read")
+            .expect("live binding"),
+        UntrustedToolCall::new(
+            "elsewhere",
+            "artifact.read",
+            json!({
+                "reference": format!("artifact:sha256:{}", "b".repeat(64)),
+                "offset": 0,
+                "length": 1
+            }),
+        )
+        .expect("call"),
+        &fixture.deriver,
+    )
+    .expect("canonical invocation");
+    authorizer
+        .register_lease(
+            CapabilityLease::new(
+                "lease-grows",
+                now + Duration::hours(1),
+                EffectProfile::read_content(),
+                1,
+                BTreeSet::from(["artifact.read".into()]),
+                vec![],
+                ApprovalRequirement::Never,
+            )
+            .expect("lease"),
+        )
+        .expect("register");
+    assert_eq!(
+        authorizer.extend_lease_resources("lease-unknown", first.resources().iter().cloned()),
+        Err(PolicyError::UnknownLease {
+            lease_id: "lease-unknown".into()
+        })
+    );
+    assert_eq!(
+        authorizer.authorize_with_lease(&first, "lease-grows", now),
+        Err(PolicyError::MissingResourceScope)
+    );
+    // Added twice, scoped once; the budget does not grow with the scope.
+    for _ in 0..2 {
+        authorizer
+            .extend_lease_resources("lease-grows", first.resources().iter().cloned())
+            .expect("extend");
+    }
+    assert_eq!(authorizer.remaining_calls("lease-grows").expect("calls"), 1);
+    assert!(matches!(
+        authorizer.authorize_with_lease(&elsewhere, "lease-grows", now),
+        Err(PolicyError::ResourceDenied { .. })
+    ));
+    assert!(matches!(
+        authorizer.authorize_with_lease(&first, "lease-grows", now),
+        Ok(AuthorizationOutcome::Permitted(_))
+    ));
+    assert_eq!(
+        authorizer.authorize_with_lease(&second, "lease-grows", now),
+        Err(PolicyError::CallBudgetExhausted)
+    );
+}
+
+#[test]
 fn invocation_id_digest_conflict_fails_closed_inside_epoch() {
     let now = time();
     let mut fixture = Fixture::new();

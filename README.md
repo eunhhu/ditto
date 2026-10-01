@@ -65,13 +65,14 @@ The executable foundation includes:
 - a Telegram gateway (`ditto telegram`) for allowed private chats: streamed
   answers with a stop button, memory commands, and delivery of scheduled
   results, with the bot token kept out of the daemon;
-- reading links: when a message contains http(s) URLs, the model may fetch
-  those pages (and only those) as bounded text, with public addresses only and
-  every fetch journaled;
+- reading pages: the model may read the links in the user's message and the
+  pages its searches return in the same answer (and only those), at most three
+  per answer, as bounded text, with public addresses only and every read
+  journaled;
 - web search on its own through a configured SearXNG-compatible service, at
   most three queries per answer, results journaled and replayable;
 - two tools for the model in an ordinary run, `memory.manage` (search,
-  remember, forget) and `web.browse` (read a linked page, search the web),
+  remember, forget) and `web.browse` (read a page, search the web),
   on one journaled tool lifecycle;
 - explicitly requested local artifact sorting through a one-shot process lease,
   bounded pipes/lifetime, cancellation, and independent line-contract verification;

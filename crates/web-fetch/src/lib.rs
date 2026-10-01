@@ -1,8 +1,10 @@
 //! `web.browse` (ADR 0036): read the text of a web page the user linked
-//! (ADR 0027), or search through the operator's service (ADR 0033).
+//! (ADR 0027) or a search returned (ADR 0037), or search through the
+//! operator's service (ADR 0033).
 //!
-//! Only URLs that appear in the user's own message may be read, and only the
-//! configured endpoint searched, so a model cannot choose a destination.
+//! Only URLs that appear in the user's own message or in the turn's search
+//! results may be read, and only the configured endpoint searched, so a model
+//! cannot choose a destination.
 //! Every hop of a read resolves to public addresses only and connects to
 //! exactly the addresses it checked.
 use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
@@ -142,7 +144,7 @@ pub fn deriver_revision() -> DeriverRevision {
     DeriverRevision::new("web-browse-v1").expect("static deriver revision is valid")
 }
 
-/// What one call asks for: a page the user linked, or a search.
+/// What one call asks for: a page to read, or a search.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum WebRequest {
@@ -169,8 +171,8 @@ impl WebRequest {
     }
 }
 
-/// What a deployment lets `web.browse` do: read pages the user linked,
-/// search at the operator's endpoint, or both. The tool is offered only when
+/// What a deployment lets `web.browse` do: read pages the user linked or a
+/// search found, search at the operator's endpoint, or both. The tool is offered only when
 /// one of them is enabled, and its schema offers only those.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebAccess {
@@ -214,7 +216,7 @@ pub fn schema(read: bool, search: bool) -> CapabilitySchema {
     }
     let (summary, input_schema) = match (read, search) {
         (true, true) => (
-            "Search the web for current or outside information (query), or read a web page whose link the user sent in this message (url); give one of them.",
+            "Search the web for current or outside information (query), or read a web page (url) whose link the user sent in this message or a search in this turn returned; give one of them.",
             json!({"type": "object", "additionalProperties": false,
                    "minProperties": 1, "maxProperties": 1, "properties": properties}),
         ),

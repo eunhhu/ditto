@@ -4,7 +4,10 @@ Status: accepted for Task 023. Adds turn payload version 5 after ADR 0026.
 Amended by [ADR 0033](0033-autonomous-web-search.md): web search runs on its own
 at the operator's configured service, so it no longer waits for per-call
 approval; model-chosen fetch destinations remain refused. Amended by [ADR 0036](0036-two-agent-tools-one-lifecycle.md): reading a
-linked page is the `url` request of `web.browse`.
+linked page is the `url` request of `web.browse`. Amended by
+[ADR 0037](0037-reading-found-pages.md): the grant also holds the pages the
+turn's searches return, and with a search service the read lease allows
+three calls in total.
 
 ## Context
 

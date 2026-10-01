@@ -1,7 +1,7 @@
 //! `web.browse` inside a turn (ADR 0036): read a page linked in the user's own
-//! message (ADR 0027), or search at the operator's endpoint (ADR 0033). Each
-//! kind has its own lease; replay checks the recorded result without network
-//! I/O.
+//! message (ADR 0027) or found by one of the turn's searches (ADR 0037), or
+//! search at the operator's endpoint (ADR 0033). Each kind has its own lease;
+//! replay checks the recorded result without network I/O.
 use ditto_web_fetch::{
     self as web, FetchedPage, WebError, WebOutput, WebRequest,
     search::{MAX_SEARCHES, SearchHit, SearchResults, query_of},
@@ -11,25 +11,64 @@ use serde_json::{Value, json};
 
 use super::tool::ToolStarted;
 
-/// Pages one turn may read, at most one per granted URL.
-pub(crate) const MAX_READS: usize = 3;
+/// Pages one turn may read.
+pub(crate) const MAX_READS: u32 = 3;
 /// The leases that bound a turn's reads and searches.
 pub(crate) const READ_LEASE: &str = "agent-web-read";
 pub(crate) const SEARCH_LEASE: &str = "agent-web-search";
 
-/// The URLs a turn may read: those written in the user's own message.
-pub(crate) fn grant(text: &str) -> Vec<String> {
-    web::user_urls(text)
+/// The pages a turn may read: the URLs written in the user's own message,
+/// then those its searches return, and how many reads its lease allows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WebGrant {
+    urls: Vec<String>,
+    reads: u32,
 }
 
-pub(crate) fn read_budget(grant: &[String]) -> u32 {
-    grant.len().min(MAX_READS) as u32
+impl WebGrant {
+    /// The grant a turn starts with while reading is enabled. With a search
+    /// service, three reads are shared by the user's links and the pages
+    /// searches find; otherwise one per link, at most three.
+    pub(crate) fn new(text: &str, search: bool) -> Self {
+        let urls = web::user_urls(text);
+        let reads = if search {
+            MAX_READS
+        } else {
+            (urls.len() as u32).min(MAX_READS)
+        };
+        Self { urls, reads }
+    }
+
+    pub(crate) fn urls(&self) -> &[String] {
+        &self.urls
+    }
+
+    /// Calls the read lease allows; none while reading is disabled.
+    pub(crate) const fn reads(&self) -> u32 {
+        self.reads
+    }
+
+    /// Grant the pages a search returned, in its order, and return those
+    /// newly granted. A grant without reads takes none.
+    pub(crate) fn add_found(&mut self, results: &[SearchHit]) -> Vec<String> {
+        let mut added = Vec::new();
+        if self.reads == 0 {
+            return added;
+        }
+        for hit in results {
+            if !self.urls.contains(&hit.url) {
+                self.urls.push(hit.url.clone());
+                added.push(hit.url.clone());
+            }
+        }
+        added
+    }
 }
 
 /// The lease a request is authorized under, and how many calls it allows.
-pub(crate) fn lease(request: &WebRequest, grant: &[String]) -> (&'static str, u32) {
+pub(crate) fn lease(request: &WebRequest, grant: &WebGrant) -> (&'static str, u32) {
     match request {
-        WebRequest::Read { .. } => (READ_LEASE, read_budget(grant)),
+        WebRequest::Read { .. } => (READ_LEASE, grant.reads),
         WebRequest::Search { .. } => (SEARCH_LEASE, MAX_SEARCHES),
     }
 }
@@ -48,7 +87,8 @@ pub(crate) fn normalize_call(arguments: &Value, read: bool, search: bool) -> Opt
 #[serde(rename_all = "snake_case")]
 pub enum WebToolError {
     InvalidArguments,
-    /// The URL is not one the user sent in this message.
+    /// The URL is neither one the user sent in this message nor one of the
+    /// turn's search results.
     PermissionDenied,
     /// The query looks like it holds a secret, so it is never sent.
     Credential,
@@ -155,11 +195,11 @@ impl WebResult {
 }
 
 /// The refusal a call gets before it is authorized, if any: an invalid
-/// call, a URL the user did not send, or a query that looks like a secret.
-pub(crate) fn refusal(request: Option<&WebRequest>, grant: &[String]) -> Option<WebToolError> {
+/// call, a URL that is not granted, or a query that looks like a secret.
+pub(crate) fn refusal(request: Option<&WebRequest>, grant: &WebGrant) -> Option<WebToolError> {
     match request {
         None => Some(WebToolError::InvalidArguments),
-        Some(WebRequest::Read { url }) if !grant.contains(url) => {
+        Some(WebRequest::Read { url }) if !grant.urls.contains(url) => {
             Some(WebToolError::PermissionDenied)
         }
         Some(WebRequest::Search { query }) if super::memory::credential_like(query) => {
@@ -174,7 +214,7 @@ pub(crate) fn refusal(request: Option<&WebRequest>, grant: &[String]) -> Option<
 pub(crate) fn valid_start(
     start: &ToolStarted,
     request: &WebRequest,
-    grant: &[String],
+    grant: &WebGrant,
     used: u32,
 ) -> bool {
     refusal(Some(request), grant).is_none()
@@ -196,7 +236,7 @@ pub(crate) fn valid_result(
     result: &WebResult,
     request: Option<&WebRequest>,
     started: bool,
-    grant: &[String],
+    grant: &WebGrant,
     used: u32,
     after_deadline: bool,
 ) -> bool {
@@ -233,5 +273,48 @@ pub(crate) fn valid_result(
             }
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(url: &str) -> SearchHit {
+        SearchHit {
+            title: String::new(),
+            url: url.into(),
+            snippet: String::new(),
+        }
+    }
+
+    #[test]
+    fn found_pages_are_granted_once_returned_and_only_while_reading() {
+        let link = "https://linked.example/";
+        let page = "https://found.example/a";
+        let read = WebRequest::Read { url: page.into() };
+        let denied = WebResult::error(WebToolError::PermissionDenied);
+        let mut grant = WebGrant::new(&format!("see {link}"), true);
+        assert_eq!(grant.reads(), MAX_READS);
+        // Before a search returns the page, a denial is its only record...
+        assert_eq!(
+            refusal(Some(&read), &grant),
+            Some(WebToolError::PermissionDenied)
+        );
+        assert!(valid_result(&denied, Some(&read), false, &grant, 0, false));
+        assert_eq!(grant.add_found(&[hit(page), hit(link), hit(page)]), [page]);
+        assert_eq!(grant.urls(), [link, page]);
+        // ...and once it has, a denial contradicts the grant.
+        assert_eq!(refusal(Some(&read), &grant), None);
+        assert!(!valid_result(&denied, Some(&read), false, &grant, 0, false));
+        // Without a search service each link is one read; with reading
+        // disabled nothing is granted.
+        assert_eq!(WebGrant::new(&format!("see {link}"), false).reads(), 1);
+        let mut disabled = WebGrant::default();
+        assert!(disabled.add_found(&[hit(page)]).is_empty());
+        assert_eq!(
+            refusal(Some(&read), &disabled),
+            Some(WebToolError::PermissionDenied)
+        );
     }
 }

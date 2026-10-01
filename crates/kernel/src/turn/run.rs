@@ -73,8 +73,9 @@ pub(super) struct TurnScope {
     /// Whether `web.browse` is offered: part of every agent run's stable
     /// tool surface while reading or searching is enabled.
     web_offered: bool,
-    /// URLs from the user's message that `web.browse` may read.
-    web_grant: Vec<String>,
+    /// The pages `web.browse` may read: the user's links, then the pages
+    /// the turn's searches return (ADR 0037).
+    web_grant: super::web::WebGrant,
     /// Whether `memory.manage` is offered: to every agent run.
     memory_offered: bool,
     /// Prelude transitions awaiting the turn's next append, which commits
@@ -331,9 +332,9 @@ impl DittoKernel {
                 .is_none_or(|metadata| metadata.sort.is_some()),
             web_offered: agent_run.is_some() && self.web_access().enabled(),
             web_grant: if agent_run.is_some() && self.inner.web_fetch.is_some() {
-                super::web::grant(&text)
+                super::web::WebGrant::new(&text, self.inner.web_search.is_some())
             } else {
-                Vec::new()
+                super::web::WebGrant::default()
             },
             memory_offered: agent_run.is_some(),
             staged: RefCell::default(),
@@ -630,7 +631,7 @@ impl DittoKernel {
         );
         run.scope.web_offered = web.is_some();
         if web.is_none() {
-            run.scope.web_grant.clear();
+            run.scope.web_grant = super::web::WebGrant::default();
         }
         let memory = self.optional_contract(
             run.scope.memory_offered,
@@ -708,14 +709,15 @@ impl DittoKernel {
                 ],
             ));
         }
-        if run.scope.web_offered && !run.scope.web_grant.is_empty() {
+        if run.scope.web_offered && run.scope.web_grant.reads() > 0 {
             leases.push((
                 super::web::READ_LEASE,
                 ditto_web_fetch::effect(),
-                super::web::read_budget(&run.scope.web_grant),
+                run.scope.web_grant.reads(),
                 ditto_web_fetch::ID,
                 run.scope
                     .web_grant
+                    .urls()
                     .iter()
                     .map(|url| ditto_capability::CanonicalResource::url(url.clone()))
                     .collect::<Result<Vec<_>, _>>()

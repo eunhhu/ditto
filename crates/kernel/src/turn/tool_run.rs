@@ -9,7 +9,7 @@ use super::super::web::{self, WebResult, WebToolError};
 use super::*;
 use crate::TrustedContextNodeDraft;
 use ditto_artifact_sort::{self as worker, SortArguments, SortError};
-use ditto_capability::{CanonicalInvocation, InvocableCapabilityBinding};
+use ditto_capability::{CanonicalInvocation, CanonicalResource, InvocableCapabilityBinding};
 use ditto_policy::ExecutionClaim;
 use ditto_web_fetch::{WebAccess, WebRequest};
 
@@ -203,8 +203,9 @@ impl DittoKernel {
         Ok(())
     }
 
-    /// One `web.browse` call: read a page the user linked, or search at the
-    /// operator's endpoint, each under its own lease.
+    /// One `web.browse` call: read a granted page, or search at the
+    /// operator's endpoint, each under its own lease. The pages a search
+    /// returns join the grant and the read lease (ADR 0037).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_web_call(
         &self,
@@ -277,6 +278,19 @@ impl DittoKernel {
             }
         };
         self.tool_output(scope, cause, request_index, call, started, &result, None)?;
+        if let WebResult::Found { results } = &result {
+            let found = scope.web_grant.add_found(results);
+            if !found.is_empty() {
+                let resources = found
+                    .into_iter()
+                    .map(CanonicalResource::url)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| TurnRunError::Internal("invalid search result URL"))?;
+                authorizer
+                    .extend_lease_resources(web::READ_LEASE, resources)
+                    .map_err(|_| TurnRunError::Internal("web read lease is unavailable"))?;
+            }
+        }
         Ok(result)
     }
 
