@@ -127,6 +127,11 @@ pub mod event_kind {
     pub const AGENT_FETCH_OUTPUT: &str = "agent.fetch.output";
     pub const AGENT_MEMORY_REQUESTED: &str = "agent.memory.requested";
     pub const AGENT_MEMORY_OUTPUT: &str = "agent.memory.output";
+    pub const AGENT_MEMORY_WRITE_REQUESTED: &str = "agent.memory_write.requested";
+    pub const AGENT_MEMORY_WRITE_OUTPUT: &str = "agent.memory_write.output";
+    /// A memory Ditto wrote during a run: session-scoped and task-free, so the
+    /// context node it sources outlives the run (ADR 0031).
+    pub const MEMORY_WRITTEN: &str = "memory.written";
     pub const SORT_REQUESTED: &str = "sort.requested";
     pub const SORT_STARTED: &str = "sort.started";
     pub const SORT_FAILED: &str = "sort.failed";
@@ -439,8 +444,18 @@ pub struct MemoryQuery {
 pub struct UserMemory {
     pub id: String,
     pub text: String,
+    /// The event the memory came from: the user's input, or for a memory
+    /// Ditto inferred, its `memory.written` event.
     pub input_event_id: String,
     pub replaces: Option<String>,
+    /// Ditto wrote it from the conversation (ADR 0031); absent for the
+    /// user's own memories.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inferred: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

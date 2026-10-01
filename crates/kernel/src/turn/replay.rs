@@ -33,6 +33,10 @@ use super::fetch::ReplayedFetchCall;
 mod recall_replay;
 use super::recall::ReplayedRecallCall;
 
+#[path = "memory_write_replay.rs"]
+mod memory_write_replay;
+use super::memory_write::{FORGET_ID, REMEMBER_ID, ReplayedMemoryWrite};
+
 use super::run::turn_signature;
 use super::shared::{
     Checkpoint, HistoryExchange, MAX_HISTORY_CANDIDATES, ReadyCall, RequestInputs, agent_run_text,
@@ -220,6 +224,14 @@ struct ReplayProjector<'turn, 'snapshot> {
     /// search.
     recall_space: Option<Vec<ditto_context::ContextNode>>,
     recall_calls: Vec<ReplayedRecallCall>,
+    /// Version 10: whether the selection paged `memory.remember` and
+    /// `memory.forget`, whether a tool returned a web page or file content
+    /// yet, and the memory writes made (ADR 0031).
+    remember_selected: bool,
+    forget_selected: bool,
+    read_external_content: bool,
+    memory_write_count: u32,
+    memory_writes: Vec<ReplayedMemoryWrite>,
     events: &'turn [EventRecord],
     snapshot: &'snapshot [EventRecord],
     index: usize,
@@ -357,6 +369,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             memory_selected: false,
             recall_space: None,
             recall_calls: Vec::new(),
+            remember_selected: false,
+            forget_selected: false,
+            read_external_content: false,
+            memory_write_count: 0,
+            memory_writes: Vec::new(),
             events,
             snapshot,
             index: 1,
@@ -551,6 +568,35 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             expected_cards.push(CapabilityCard::from(manifest));
             self.memory_selected = true;
         }
+        for manifest in [&selected.remember_manifest, &selected.forget_manifest]
+            .into_iter()
+            .flatten()
+        {
+            // Version 10 offers the memory writes to every agent run.
+            if self.version.is_none_or(|version| version < 10)
+                || !self.agent_run
+                || !super::memory_write::validate_manifest(manifest)
+            {
+                return Err(replay_invalid(
+                    "selected memory write contradicts the turn version",
+                ));
+            }
+            let schema = super::memory_write::schema(&manifest.id);
+            expected_revisions.push(
+                CapabilityRevision::from_contract(
+                    manifest,
+                    &schema,
+                    super::memory_write::MemoryWriteDeriver::for_capability(&manifest.id)
+                        .revision()
+                        .clone(),
+                )
+                .map_err(|error| replay_invalid(error.to_string()))?,
+            );
+            expected_schemas.push(schema);
+            expected_cards.push(CapabilityCard::from(manifest));
+        }
+        self.remember_selected = selected.remember_manifest.is_some();
+        self.forget_selected = selected.forget_manifest.is_some();
         // Version 7 records no schemas: they are the builtins' own.
         let recorded_schemas = if self.version.is_some_and(|version| version >= 7) {
             selected.schemas.is_empty()
@@ -565,7 +611,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         if (!selected.epoch.invocation_revisions().is_empty()
             || self.sort.is_some()
             || self.fetch_selected
-            || self.memory_selected)
+            || self.memory_selected
+            || self.remember_selected
+            || self.forget_selected)
             && selected.epoch.invocation_revisions() != expected_revisions
         {
             return Err(replay_invalid("selected invocation revisions changed"));
@@ -766,6 +814,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                             && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
                             && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
                             && !(self.memory_selected && capability_id == super::recall::ID)
+                            && !(self.remember_selected && capability_id == REMEMBER_ID)
+                            && !(self.forget_selected && capability_id == FORGET_ID)
                         {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
@@ -817,6 +867,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                             && !(self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
                             && !(self.fetch_selected && capability_id == ditto_web_fetch::ID)
                             && !(self.memory_selected && capability_id == super::recall::ID)
+                            && !(self.remember_selected && capability_id == REMEMBER_ID)
+                            && !(self.forget_selected && capability_id == FORGET_ID)
                         {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
@@ -989,6 +1041,12 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         return Ok(ArtifactReadTurnReplay::Failed { failure });
                     }
 
+                    if call.capability_id == ditto_web_fetch::ID
+                        || call.capability_id == ditto_artifact_sort::ID
+                        || call.capability_id == ARTIFACT_READ_ID
+                    {
+                        self.read_external_content = true;
+                    }
                     if call.capability_id == ditto_web_fetch::ID {
                         if let Some(failure) = self.replay_fetch_call(request_index as u8, &call)? {
                             return Ok(ArtifactReadTurnReplay::Failed { failure });
@@ -1005,6 +1063,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                     }
                     if call.capability_id == super::recall::ID {
                         self.replay_recall_call(request_index as u8, &call)?;
+                        request_index += 1;
+                        continue;
+                    }
+                    if call.capability_id == REMEMBER_ID || call.capability_id == FORGET_ID {
+                        self.replay_memory_write(request_index as u8, &call)?;
                         request_index += 1;
                         continue;
                     }
@@ -1435,6 +1498,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             sort_calls: self.sort_calls,
             fetch_calls: self.fetch_calls,
             recall_calls: self.recall_calls,
+            memory_writes: self.memory_writes,
             terminal,
 
             sequence_span: TurnSequenceSpan {
@@ -2028,6 +2092,8 @@ fn rebuild_selection(
             ditto_artifact_sort::ID => Ok(ditto_artifact_sort::manifest()),
             ditto_web_fetch::ID => Ok(ditto_web_fetch::manifest()),
             super::recall::ID => Ok(super::recall::manifest()),
+            REMEMBER_ID => Ok(super::memory_write::remember_manifest()),
+            FORGET_ID => Ok(super::memory_write::forget_manifest()),
             _ => Err(replay_invalid("selected contract is not a builtin")),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2056,6 +2122,8 @@ fn rebuild_selection(
         sort_manifest: take(ditto_artifact_sort::ID),
         fetch_manifest: take(ditto_web_fetch::ID),
         memory_manifest: take(super::recall::ID),
+        remember_manifest: take(REMEMBER_ID),
+        forget_manifest: take(FORGET_ID),
         epoch,
         schemas: Vec::new(),
     })

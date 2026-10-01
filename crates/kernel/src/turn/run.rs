@@ -42,6 +42,9 @@ mod fetch_tool;
 #[path = "recall_run.rs"]
 mod recall_tool;
 
+#[path = "memory_write_run.rs"]
+mod memory_write_tool;
+
 use crate::{DittoKernel, KernelError, normalize_identifier, normalize_input_text};
 
 use super::shared::{
@@ -76,6 +79,10 @@ pub(super) struct TurnScope {
     fetch: Vec<String>,
     /// Whether `memory.search` is offered: from version 8, to every agent run.
     memory_offered: bool,
+    /// Whether `memory.remember` and `memory.forget` are offered: from version
+    /// 10, to every agent run (ADR 0031).
+    remember_offered: bool,
+    forget_offered: bool,
     /// Prelude transitions awaiting the turn's next append, which commits
     /// them with it in one transaction (ADR 0028 Phase B).
     staged: RefCell<Vec<(String, NewEvent)>>,
@@ -120,6 +127,11 @@ struct TurnRun<'d> {
     recall_source: Option<(CompiledContext, Arc<[ditto_context::ContextNode]>)>,
     /// The memories `memory.search` reads, gathered at the first search.
     recall_space: Option<Vec<ditto_context::ContextNode>>,
+    /// Whether the turn has called a tool that returns a web page or file
+    /// content; memory writes are refused from then on (ADR 0031).
+    read_external_content: bool,
+    /// Memory writes this turn has made.
+    memory_writes: u32,
 }
 
 /// The sealed execution epoch and the authority derived from it.
@@ -263,6 +275,8 @@ pub(crate) struct ToolContracts {
     fetch: OnceLock<InvocableContract>,
     sort: OnceLock<InvocableContract>,
     memory: OnceLock<InvocableContract>,
+    remember: OnceLock<InvocableContract>,
+    forget: OnceLock<InvocableContract>,
 }
 
 fn cached_contract<E>(
@@ -318,6 +332,8 @@ impl DittoKernel {
                 .and_then(|metadata| metadata.sort.clone()),
             fetch_offered: agent_run.is_some() && self.inner.web_fetch.is_some(),
             memory_offered: agent_run.is_some(),
+            remember_offered: agent_run.is_some(),
+            forget_offered: agent_run.is_some(),
             fetch: if agent_run.is_some() && self.inner.web_fetch.is_some() {
                 super::fetch::grant(&text)
             } else {
@@ -390,6 +406,8 @@ impl DittoKernel {
             utc_offset_minutes: 0,
             recall_source: None,
             recall_space: None,
+            read_external_content: false,
+            memory_writes: 0,
         };
 
         self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
@@ -550,34 +568,46 @@ impl DittoKernel {
             run.scope.fetch_offered = false;
             run.scope.fetch.clear();
         }
-        // An unavailable or altered memory.search package withdraws the tool.
-        let memory = if run.scope.memory_offered {
-            cached_contract(&self.inner.tool_contracts.memory, || {
-                self.inner
-                    .capabilities
-                    .page_manifest(super::recall::ID)
-                    .ok()
-                    .flatten()
-                    .filter(super::recall::validate_manifest)
-                    .and_then(|manifest| {
-                        InvocableContract::new(
-                            &manifest,
-                            &super::recall::schema(),
-                            super::recall::RecallDeriver::default().revision().clone(),
-                        )
-                        .ok()
-                    })
-                    .ok_or(())
-            })
-            .ok()
-        } else {
-            None
-        };
+        // An unavailable or altered memory package withdraws its tool.
+        let memory = self.memory_contract(
+            run.scope.memory_offered,
+            &self.inner.tool_contracts.memory,
+            super::recall::ID,
+            super::recall::validate_manifest,
+            super::recall::schema,
+            super::recall::RecallDeriver::default().revision().clone(),
+        );
         run.scope.memory_offered = memory.is_some();
+        let remember = self.memory_contract(
+            run.scope.remember_offered,
+            &self.inner.tool_contracts.remember,
+            super::memory_write::REMEMBER_ID,
+            super::memory_write::validate_manifest,
+            || super::memory_write::schema(super::memory_write::REMEMBER_ID),
+            super::memory_write::MemoryWriteDeriver::for_capability(
+                super::memory_write::REMEMBER_ID,
+            )
+            .revision()
+            .clone(),
+        );
+        run.scope.remember_offered = remember.is_some();
+        let forget = self.memory_contract(
+            run.scope.forget_offered,
+            &self.inner.tool_contracts.forget,
+            super::memory_write::FORGET_ID,
+            super::memory_write::validate_manifest,
+            || super::memory_write::schema(super::memory_write::FORGET_ID),
+            super::memory_write::MemoryWriteDeriver::for_capability(super::memory_write::FORGET_ID)
+                .revision()
+                .clone(),
+        );
+        run.scope.forget_offered = forget.is_some();
         let mut live_epoch = LiveExecutionEpoch::new(
             1 + usize::from(run.scope.sort.is_some())
                 + usize::from(fetch.is_some())
-                + usize::from(memory.is_some()),
+                + usize::from(memory.is_some())
+                + usize::from(remember.is_some())
+                + usize::from(forget.is_some()),
         );
         let paged = live_epoch.page_in_contract(read).map_err(|error| {
             self.fail_with(
@@ -657,9 +687,9 @@ impl DittoKernel {
                 TurnRunError::Internal("fetch capability could not enter the live epoch")
             })?;
         }
-        if let Some(contract) = memory {
+        for contract in [memory, remember, forget].into_iter().flatten() {
             live_epoch.page_in_contract(contract).map_err(|_| {
-                TurnRunError::Internal("memory search could not enter the live epoch")
+                TurnRunError::Internal("memory tool could not enter the live epoch")
             })?;
         }
         let authorization_ticket = live_epoch.seal_for_authorization().map_err(|error| {
@@ -690,6 +720,8 @@ impl DittoKernel {
         schemas.extend(sort.map(|contract| contract.schema().clone()));
         schemas.extend(fetch.map(|contract| contract.schema().clone()));
         schemas.extend(memory.map(|contract| contract.schema().clone()));
+        schemas.extend(remember.map(|contract| contract.schema().clone()));
+        schemas.extend(forget.map(|contract| contract.schema().clone()));
         // Each contract equals its package, so its digests identify it.
         self.stage_turn_event(
             run,
@@ -751,6 +783,27 @@ impl DittoKernel {
                 )
                 .map_err(|_| TurnRunError::Internal("fetch lease registration failed"))?;
         }
+        let writers = [remember, forget]
+            .into_iter()
+            .flatten()
+            .map(|contract| contract.manifest().id.clone())
+            .collect::<BTreeSet<_>>();
+        if !writers.is_empty() {
+            authorizer
+                .register_lease(
+                    ditto_policy::CapabilityLease::new(
+                        super::memory_write::LEASE_ID,
+                        run.deadline,
+                        super::memory_write::effect(),
+                        super::memory_write::MAX_MEMORY_WRITES,
+                        writers,
+                        Vec::new(),
+                        ditto_policy::ApprovalRequirement::Never,
+                    )
+                    .map_err(|_| TurnRunError::Internal("invalid memory lease"))?,
+                )
+                .map_err(|_| TurnRunError::Internal("memory lease registration failed"))?;
+        }
 
         Ok(TurnTools {
             live_epoch,
@@ -759,6 +812,33 @@ impl DittoKernel {
             schemas,
             authority: ArtifactReadAuthority::new(self.inner.artifacts.clone()),
         })
+    }
+
+    /// The contract of an optional memory tool, paged and validated once per
+    /// process; `None` withdraws the tool.
+    fn memory_contract<'a>(
+        &self,
+        offered: bool,
+        cell: &'a OnceLock<InvocableContract>,
+        id: &str,
+        validate: fn(&ditto_capability::CapabilityManifest) -> bool,
+        schema: impl FnOnce() -> CapabilitySchema,
+        revision: ditto_capability::DeriverRevision,
+    ) -> Option<&'a InvocableContract> {
+        if !offered {
+            return None;
+        }
+        cached_contract(cell, || {
+            self.inner
+                .capabilities
+                .page_manifest(id)
+                .ok()
+                .flatten()
+                .filter(validate)
+                .and_then(|manifest| InvocableContract::new(&manifest, &schema(), revision).ok())
+                .ok_or(())
+        })
+        .ok()
     }
 
     /// Page and validate the installed `artifact.read` contract. Every failure
@@ -1324,6 +1404,14 @@ impl DittoKernel {
             index,
             Some(call.call_id.clone()),
         )?;
+        // Web pages and file contents may carry instructions: from the first
+        // such call on, memory writes are refused (ADR 0031).
+        if call.capability_id == ditto_web_fetch::ID
+            || call.capability_id == ditto_artifact_sort::ID
+            || call.capability_id == ARTIFACT_READ_ID
+        {
+            run.read_external_content = true;
+        }
         let (value, is_error) = if call.capability_id == ditto_web_fetch::ID {
             let binding = tools
                 .live_epoch
@@ -1361,6 +1449,24 @@ impl DittoKernel {
                 binding,
                 &tools.authorizer,
                 space,
+            )?;
+            (result.model_value(TURN_PAYLOAD_VERSION), result.is_error())
+        } else if call.capability_id == super::memory_write::REMEMBER_ID
+            || call.capability_id == super::memory_write::FORGET_ID
+        {
+            let binding = tools
+                .live_epoch
+                .invocable_binding(&call.capability_id)
+                .ok_or(TurnRunError::Internal("missing memory write binding"))?;
+            let result = self.run_memory_write(
+                &run.scope,
+                &mut run.cause,
+                request_index as u8,
+                &call,
+                binding,
+                &tools.authorizer,
+                run.read_external_content,
+                &mut run.memory_writes,
             )?;
             (result.model_value(), result.is_error())
         } else if call.capability_id == ditto_artifact_sort::ID {
@@ -1677,6 +1783,8 @@ impl DittoKernel {
             || (run.scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
             || (run.scope.fetch_offered && capability_id == ditto_web_fetch::ID)
             || (run.scope.memory_offered && capability_id == super::recall::ID)
+            || (run.scope.remember_offered && capability_id == super::memory_write::REMEMBER_ID)
+            || (run.scope.forget_offered && capability_id == super::memory_write::FORGET_ID)
         {
             return Ok(());
         }

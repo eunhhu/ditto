@@ -31,7 +31,8 @@ function event(delta, finish = null) {
 
 // The mock streams a markdown reply describing what it received, so the page
 // shows which memory and how much history reached the model. Asked to recall,
-// it first calls memory.search and then answers with what the search found.
+// it first calls memory.search and then answers with what the search found;
+// told to remember, it calls memory.remember.
 function mockModel() {
   const server = http.createServer((request, response) => {
     let raw = '';
@@ -54,9 +55,18 @@ function mockModel() {
         response.end('data: [DONE]\n\n');
         return;
       }
+      if (question.includes('Remember that') && !result) {
+        const call = { index: 0, id: 'call-remember', type: 'function', function: { name: 'memory_remember', arguments: '{"text":"The user plays tennis on Sundays."}' } };
+        response.write(event({ tool_calls: [call] }));
+        response.write(event({}, 'tool_calls'));
+        response.end('data: [DONE]\n\n');
+        return;
+      }
       // Long enough for the page to show the search in progress.
       if (result) await sleep(800);
-      const reply = result
+      const reply = result && result.remembered
+        ? `saved as ${result.remembered}`
+        : result
         ? `recalled: ${result.memories.map((found) => found.text).join('; ')}`
         : `You asked: *${question}*\n\n- memory seen: **${memory}**\n- earlier messages: \`${prior}\`\n\n\`\`\`\nstreamed by a mock model\n\`\`\``;
       const delay = question.includes('slowly') ? 400 : 60;
@@ -247,6 +257,18 @@ async function main() {
     check('a running memory search shows progress', true);
     const recalled = await waitDone(page, 8);
     check('the memory search result reaches the model', recalled.text.includes('recalled: I prefer morning meetings') && recalled.foot.includes('memory.search'), recalled.text);
+
+    await send(page, 'Remember that I play tennis on Sundays');
+    const saved = await waitDone(page, 9);
+    const notice = await page.evaluate(() => {
+      const nodes = document.querySelectorAll('.msg.assistant');
+      const notices = nodes[nodes.length - 1].querySelector('.notices');
+      return notices ? notices.innerText : '';
+    });
+    check('Ditto says what it remembered', saved.text.includes('saved as memory-') && notice === 'Remembered: The user plays tennis on Sundays.', notice);
+    await page.waitForFunction(() => [...document.querySelectorAll('#memory-list li')]
+      .some((item) => item.innerText.includes('tennis on Sundays') && item.querySelector('.tag')), { timeout: 10000 });
+    check('the memory list marks what Ditto inferred', true);
 
     const inView = () => page.evaluate(() => {
       const header = document.querySelector('.chat-header').getBoundingClientRect();

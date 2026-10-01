@@ -289,7 +289,10 @@ streamed text is journaled in coalesced chunks, the first words of a burst at
 once, and each request as the SHA-256 of what was sent, which replay rebuilds
 from earlier durable events (Phase C). Agent runs can also search the
 memories their compilation saw with the read-only `memory.search` tool, which
-replay recomputes (ADR 0029).
+replay recomputes (ADR 0029), and from version 10 Ditto remembers, replaces and
+forgets memories on its own through `memory.remember` and `memory.forget`,
+labeled as its inference and never after reading a web page or file
+(ADR 0031).
 Runs, sorts and the scheduler journal from blocking threads, and daemon
 handlers run kernel calls on the blocking pool, so no async runtime thread
 waits on SQLite; debug builds reject journal access on those threads.

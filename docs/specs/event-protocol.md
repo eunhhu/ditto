@@ -543,6 +543,23 @@ size are not recorded; every builtin equals its package, so replay rebuilds
 them and checks each digest. Version-9 turns carrying the full form, and
 earlier versions carrying the reference form, are rejected.
 
+Version 10 ([ADR 0031](../adr/0031-model-managed-memory.md)) offers
+`memory.remember` (`text`, `replaces`) and `memory.forget` (`memory_id`) to
+every agent run while their packages are installed, and changes the second
+and third system segments to describe memories Ditto keeps on its own. A call
+journals `agent.memory_write.requested` (model, version 1: `capability_id`,
+`arguments` and the normalized `write`, `remember` or `forget`, or `null`) and
+`agent.memory_write.output` (capability, version 1: `result`, `remembered` or
+`forgotten` with `memory_id`, or `refused` with `code`: `invalid_arguments`,
+`untrusted_content_read`, `credential`, `memory_unavailable` or
+`limit_reached`, the first that applies in that order). A write between them
+appends `memory.written` (model, version 1: `turn_id`, `call_id`, `write`;
+session-scoped, no task, correlated to the session, caused by the request)
+and the `context.node.recorded` it sources: an inferred memory, or a disputed
+node that supersedes the forgotten one. From version 10 `memory.search` also
+reads inferred memories and marks each `inferred: true`. Replay recomputes
+every decision and checks a written result against both session records.
+
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished
 agent-run turns recorded after the latest reset. It deletes nothing and does

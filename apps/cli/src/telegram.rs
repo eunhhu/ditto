@@ -325,7 +325,10 @@ impl Gateway {
                     let list = page
                         .memories
                         .iter()
-                        .map(|memory| format!("• {}", memory.text))
+                        .map(|memory| {
+                            let by = if memory.inferred { say.by_ditto() } else { "" };
+                            format!("• {}{by}", memory.text)
+                        })
                         .collect::<Vec<_>>()
                         .join("\n");
                     if list.is_empty() {
@@ -765,6 +768,10 @@ impl Say {
     }
     fn no_memories(self) -> &'static str {
         self.pick("No memories yet.", "아직 기억이 없습니다.")
+    }
+    /// Marks a memory Ditto inferred from the conversation (ADR 0031).
+    fn by_ditto(self) -> &'static str {
+        self.pick(" (inferred by Ditto)", " (Ditto가 추론)")
     }
     fn text_only(self) -> &'static str {
         self.pick(

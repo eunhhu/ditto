@@ -1,6 +1,8 @@
 # ADR 0026: Assistant instructions and local time
 
 Status: accepted for Task 022. Adds turn payload version 4 after ADR 0022.
+Amended by [ADR 0031](0031-model-managed-memory.md): from version 10 the second
+and third segments describe memories Ditto keeps on its own.
 
 ## Context
 

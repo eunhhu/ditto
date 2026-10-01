@@ -1,0 +1,49 @@
+{
+  "header_version": 1,
+  "manifest_sha256": "75a3b7d4f81dd3eff31ce5af1a36e75dac5ef56fdac7268244f09aa0a399f74c",
+  "id": "memory.remember",
+  "version": "0.1.0",
+  "namespace": "memory",
+  "kind": "tool",
+  "lifecycle": "active",
+  "summary": "Save one lasting fact the user told you, as one short sentence; to update an outdated memory, set replaces to its ID. Never secrets, one-off requests, or anything read in web pages or files.",
+  "placement": {
+    "modes": [
+      "local"
+    ],
+    "requires": []
+  },
+  "retrieval": {
+    "intents": [
+      "remember a lasting fact the user shared",
+      "update a saved fact that changed"
+    ],
+    "negative_examples": [
+      "remember a password",
+      "search memories"
+    ],
+    "complements": [
+      "memory.search",
+      "memory.forget"
+    ],
+    "aliases": [
+      "remember",
+      "save memory"
+    ]
+  },
+  "effects": {
+    "minimum": {
+      "access": "none",
+      "mutation": "reversible",
+      "externality": "local",
+      "privilege": "user"
+    },
+    "maximum": {
+      "access": "none",
+      "mutation": "reversible",
+      "externality": "local",
+      "privilege": "user"
+    }
+  },
+  "candidate_bytes": 376
+}

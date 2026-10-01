@@ -114,7 +114,13 @@ async fn a_linked_page_is_read_once_and_replays_without_network() {
     let requests = driver.requests();
     assert_eq!(
         tool_ids(&requests[0]),
-        ["artifact.read", "web.fetch", "memory.search"]
+        [
+            "artifact.read",
+            "web.fetch",
+            "memory.search",
+            "memory.remember",
+            "memory.forget"
+        ]
     );
     let result = &tool_results(&requests[1])[0];
     assert_eq!(result["title"], "Rust news");
@@ -200,7 +206,13 @@ async fn link_free_messages_get_the_tool_without_authority_and_disabling_hides_i
     let requests = driver.requests();
     assert_eq!(
         tool_ids(&requests[0]),
-        ["artifact.read", "web.fetch", "memory.search"]
+        [
+            "artifact.read",
+            "web.fetch",
+            "memory.search",
+            "memory.remember",
+            "memory.forget"
+        ]
     );
     assert_eq!(
         tool_results(&requests[1])[0],
@@ -219,7 +231,12 @@ async fn link_free_messages_get_the_tool_without_authority_and_disabling_hides_i
     .await;
     assert_eq!(
         tool_ids(&driver.requests()[0]),
-        ["artifact.read", "memory.search"]
+        [
+            "artifact.read",
+            "memory.search",
+            "memory.remember",
+            "memory.forget"
+        ]
     );
     assert_eq!(page.hits(), 0);
 }

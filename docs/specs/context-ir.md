@@ -159,6 +159,14 @@ user-memory command promotes exact existing user input through kernel-owned
 construction and the same admission boundary; clients cannot supply node fields
 or mutate history or compiler authority. See ADR 0015.
 
+From turn payload version 10 Ditto also writes memories during agent runs
+([ADR 0031](../adr/0031-model-managed-memory.md)). Each is a kernel-built node
+sourced by a session-scoped, task-free `memory.written` event: a remembered
+fact has origin `model` and status `inferred` (confidence 0.8), so it ranks
+below the user's own assertions and the capsule shows it as an inference; a
+forgotten memory is superseded by a `disputed` node, which is never active.
+The model chooses only the text and the memory it replaces or forgets.
+
 When a turn persists compiled context, it captures a provenance high-water
 sequence. The kernel resolves every included source within the same trusted
 session/task snapshot and rechecks validity at model-request admission; later

@@ -13,6 +13,8 @@ use ditto_protocol::{
 use ditto_retrieval::{RetrievalWorkBudget, SessionId};
 use ulid::Ulid;
 
+use crate::turn::memory_write::memory_node as memory_node_written;
+use crate::turn::{MemoryWrite, MemoryWrittenPayload};
 use crate::{DittoKernel, KernelError, TrustedContextNodeDraft};
 
 impl DittoKernel {
@@ -149,7 +151,9 @@ impl DittoKernel {
         })
     }
 
-    fn memory_snapshot_locked(
+    /// The session's verified active context; callers hold the context
+    /// admission gate.
+    pub(crate) fn memory_snapshot_locked(
         &self,
         session: &str,
         high_water: i64,
@@ -178,6 +182,9 @@ impl DittoKernel {
             .events
             .get_by_event_id(&input_id)?
             .ok_or_else(|| invalid("memory source input is unavailable in this session"))?;
+        if source.kind == event_kind::MEMORY_WRITTEN {
+            return inferred_memory(node, &source, session);
+        }
         let text = source_text(&source, session)?;
         let replaces = match node.supersedes.as_slice() {
             [] => None,
@@ -195,8 +202,38 @@ impl DittoKernel {
             text: text.to_owned(),
             input_event_id: input_id,
             replaces,
+            inferred: false,
         })
     }
+}
+
+/// A memory Ditto wrote during a run (ADR 0031), checked against the
+/// `memory.written` event that sources it.
+fn inferred_memory(
+    node: &ContextNode,
+    source: &EventRecord,
+    session: &str,
+) -> Result<UserMemory, KernelError> {
+    let payload: MemoryWrittenPayload = serde_json::from_value(source.payload.clone())
+        .map_err(|_| invalid("memory source is not a memory Ditto wrote"))?;
+    let MemoryWrite::Remember { text, replaces } = &payload.write else {
+        return Err(invalid("memory source forgets a memory"));
+    };
+    if source.actor != EventActor::Model
+        || source.session_id.as_deref() != Some(session)
+        || source.task_id.is_some()
+        || payload.event_version != 1
+        || *node != memory_node_written(&source.event_id, &payload.write)
+    {
+        return Err(invalid("stored memory does not match what Ditto wrote"));
+    }
+    Ok(UserMemory {
+        id: node.id.clone(),
+        text: text.clone(),
+        input_event_id: source.event_id.clone(),
+        replaces: replaces.clone(),
+        inferred: true,
+    })
 }
 
 fn memory_node(input_id: &str, text: &str, replaces: Option<String>) -> ContextNode {

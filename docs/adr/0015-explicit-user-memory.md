@@ -2,7 +2,11 @@
 
 ## Status and context
 
-Accepted for Task 008. Tasks 006 and 007 are merged into main. The next product
+Accepted for Task 008. Amended by [ADR 0031](0031-model-managed-memory.md):
+from turn payload version 10 Ditto also writes memories during agent runs,
+labeled as its inference; this endpoint remains the user's own path.
+
+Tasks 006 and 007 are merged into main. The next product
 slice connects durable context to an explicit user workflow before adding a
 production embedding worker or another background subsystem. Existing context
 admission already owns provenance, supersession, persistence, and recovery;

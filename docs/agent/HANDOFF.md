@@ -28,13 +28,14 @@ and checks establish a new fact.
   `dev/task-025-cache-stable-layout`, `dev/task-026-thin-turn-start`,
   `dev/task-027-one-journal-plane`, `dev/task-028-session-parallel` and
   `dev/task-029-memory-search` stack the harness design and Tasks 025–029,
-  and `dev/task-030-selection-by-reference` stacks Task 030. Nothing is
-  pushed.
+  and `dev/task-030-selection-by-reference` and `dev/task-024-model-memory`
+  stack Tasks 030 and 024. Nothing is pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
-  are done. Model-invoked memory saving (024) awaits the user's decision
-  because it reverses ADR 0015's exclusion of model tool invocation.
+  are done. On 2026-10-01 the user approved memory that Ditto manages on its
+  own (Task 024, ADR 0031), reversing ADR 0015's exclusion of model-invoked
+  memory writes, and the recommended journal fix (Task 030).
 - Still on 2026-09-30 the user asked for the thinnest harness designed around
   concurrency, real-time streaming and context injection timing and scope. The
   design is [realtime-harness](../design/realtime-harness.md) and ADR 0028.
@@ -80,10 +81,15 @@ and checks establish a new fact.
   compile the verified active session/task snapshot with the complete-set
   contract (ADR 0021): the whole current set when it fits the budget (default
   900 estimated tokens, about twelve short memories), otherwise positive
-  lexical overlap without function words. Agent runs can search the user's
-  own memories their compilation saw, including those it left out, with the
-  read-only `memory.search` (ADR 0029). There is no transcript injection,
-  cross-session memory or production semantic retrieval.
+  lexical overlap without function words. Agent runs can search the
+  memories their compilation saw, including those it left out, with the
+  read-only `memory.search` (ADR 0029), and Ditto remembers, replaces and
+  forgets memories on its own during agent runs (ADR 0031): each is a node
+  sourced by a session-scoped `memory.written` event, labeled origin `model`,
+  status `inferred`, refused after the turn read a web page or file, for
+  credential-shaped facts and past three writes per turn. There is no
+  transcript injection, cross-session memory or production semantic
+  retrieval.
   The separate V2 joint working-set query is lexical in production with an
   injected embedding seam for tests.
 - **Web links.** `ditto-web-fetch` (ADR 0027) reads pages linked in the user's
@@ -99,7 +105,8 @@ and checks establish a new fact.
   resource and placement. One affine ticket per epoch creates one expiring
   ledger. `artifact.read` and `memory.search` use static no-approval permits;
   `artifact.sort` consumes a one-shot `ExecutionClaim` under an
-  exact-resource, one-call lease.
+  exact-resource, one-call lease, and memory writes share one three-call lease
+  without resources.
 - **Model and turns.** `ditto-model` owns the provider-neutral request/stream
   contract. `ditto-model-openai` holds two drivers on one request lifecycle:
   the closed `gpt-5.6` Responses profile (ephemeral storage) and an
@@ -108,11 +115,11 @@ and checks establish a new fact.
   optional key only from `DITTO_MODEL_API_KEY`). Keys are redacted and
   transport-only. The daemon defaults to a disabled provider. The kernel turn
   loop compiles context, pages `artifact.read` (plus `artifact.sort` only for a
-  permitted attachment, `web.fetch` while enabled and `memory.search` for
-  agent runs while installed), runs at most eight
+  permitted attachment, `web.fetch` while enabled and the three memory tools
+  for agent runs while installed), runs at most eight
   model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. New turns write payload
-  version 9:
+  version 10:
   - version 2 added typed `TurnFailureReason`s for validator-derived failures;
   - version 3 gave agent runs the current thread's finished exchanges as
     native messages, with their turn IDs recorded and recomputed on replay
@@ -131,7 +138,10 @@ and checks establish a new fact.
     recomputes;
   - version 9 (ADR 0030) records the capability selection by reference:
     each contract's digests, from which replay rebuilds the packaged
-    manifests.
+    manifests;
+  - version 10 (ADR 0031) adds `memory.remember` and `memory.forget`, lets
+    `memory.search` read inferred memories, and rewrites the memory
+    instructions.
 
   Older versions replay under their original rules; a turn never mixes
   versions. A run reuses its session's verified context while no context node
@@ -163,20 +173,19 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 030
+## Latest verified slice: Task 024
 
-- [Contract and evidence](tasks/030-selection-by-reference.md) (ADR 0030).
-  `capabilities.selected` records each contract by its digests instead of in
-  full: 4,910 → 952 bytes, and a short agent turn journals 4,879 bytes
-  instead of 8,837. Every builtin, now including `artifact.read`, must equal
-  its package.
-- Its gate passed on its final tree (571 Rust tests).
+- [Contract and evidence](tasks/024-model-managed-memory.md) (ADR 0031). Ditto
+  remembers lasting facts, replaces outdated memories and forgets on request
+  during agent runs, labeled as its inference; the user sees each write in
+  the web app and the memory list and corrects it like any memory.
+- Its gate passed on its final tree (582 Rust tests).
 
-## Previous slice: Task 029
+## Previous slice: Task 030
 
-- [Contract and evidence](tasks/029-memory-search.md): read-only
-  `memory.search` and tool progress, turn payload version 8 (ADR 0029, ADR
-  0028 Phase E in part). Its gate passed on its final tree (571 Rust tests).
+- [Contract and evidence](tasks/030-selection-by-reference.md): the capability
+  selection recorded by reference, turn payload version 9 (ADR 0030). Its
+  gate passed on its final tree (571 Rust tests).
 
 ## Known gaps
 
@@ -214,6 +223,13 @@ and checks establish a new fact.
   left-out memories in its own words (Task 029), but that search is lexical
   too and runs only when the model chooses. Semantic retrieval (deferred) or a
   larger budget (a cost decision for the user) would close it.
+- Memories Ditto infers can be wrong, and its credential check is a
+  heuristic. Writes are refused after a web page or file is read in the same
+  turn, but injected text that reached Ditto's own earlier answers in the
+  thread is not caught. Forgetting removes a memory from use and view, not
+  from the append-only journal; users cannot yet forget a memory without
+  asking Ditto. The web app's notice of a write shows only live; after a
+  reload the memory list still marks Ditto's memories.
 - Version-1 turns still replay through the frozen failure-message grammar;
   only historical traces depend on it.
 - The scheduler sleeps on a monotonic timer and has no resume wake-up, so a
