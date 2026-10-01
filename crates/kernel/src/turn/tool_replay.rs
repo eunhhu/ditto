@@ -141,7 +141,8 @@ impl<'turn> ReplayProjector<'turn, '_> {
     }
 
     /// Replay one `web.browse` call: a read of a granted URL or a search,
-    /// each counted against its own lease.
+    /// each counted against its own lease. A search's recorded results join
+    /// the grant, as they did when it ran (ADR 0037).
     pub(super) fn replay_web_call(
         &mut self,
         request_index: u8,
@@ -187,6 +188,9 @@ impl<'turn> ReplayProjector<'turn, '_> {
             (Some(WebRequest::Read { .. }), true) => self.web_reads += 1,
             (Some(WebRequest::Search { .. }), true) => self.web_searches += 1,
             _ => {}
+        }
+        if let WebResult::Found { results } = &result {
+            self.web_grant.add_found(results);
         }
         let record = ReplayedToolCall {
             requested: request,

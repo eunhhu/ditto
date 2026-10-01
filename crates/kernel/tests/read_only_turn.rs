@@ -342,10 +342,18 @@ impl Fixture {
 
     /// The bundled packages with a search service at `endpoint` (ADR 0033).
     fn with_web_search(endpoint: &str) -> Self {
+        Self::with_web(endpoint, ditto_web_fetch::FetchPolicy::public_only())
+    }
+
+    /// A search service at `endpoint`, and reads under `read`.
+    fn with_web(endpoint: &str, read: ditto_web_fetch::FetchPolicy) -> Self {
         let capabilities =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../capabilities");
         let endpoint = ditto_kernel::SearchEndpoint::new(endpoint).expect("search endpoint");
-        Self::configured(capabilities, |config| config.web_search = Some(endpoint))
+        Self::configured(capabilities, |config| {
+            config.web_search = Some(endpoint);
+            config.web_fetch = Some(read);
+        })
     }
 
     fn configured(

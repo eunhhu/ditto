@@ -198,8 +198,9 @@ struct ReplayProjector<'turn, 'snapshot> {
     read_selected: bool,
     /// The `web.browse` schema the selection offered: (read, search).
     web: Option<(bool, bool)>,
-    /// URLs the user's message grants to `web.browse`, recomputed from it.
-    web_grant: Vec<String>,
+    /// The pages `web.browse` may read, recomputed from the user's message
+    /// and the recorded search results (ADR 0037).
+    web_grant: super::web::WebGrant,
     web_reads: u32,
     web_searches: u32,
     /// Whether the recorded selection paged `memory.manage`.
@@ -339,11 +340,6 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         let sort = input.agent_run.and_then(|metadata| metadata.sort);
         let input_text = input.text;
         let conversation = super::sort::initial_conversation(input_text.clone(), sort.as_ref());
-        let web_grant = if agent_run {
-            super::web::grant(&input_text)
-        } else {
-            Vec::new()
-        };
         Ok(Self {
             version: None,
             agent_run,
@@ -352,7 +348,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             sort_claimed: false,
             read_selected: false,
             web: None,
-            web_grant,
+            web_grant: super::web::WebGrant::default(),
             web_reads: 0,
             web_searches: 0,
             memory_selected: false,
@@ -526,11 +522,9 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 ditto_web_fetch::deriver_revision(),
             )?;
             self.web = Some((read, search));
-            if !read {
-                self.web_grant.clear();
+            if read {
+                self.web_grant = super::web::WebGrant::new(&self.input_text, search);
             }
-        } else {
-            self.web_grant.clear();
         }
         if let Some(manifest) = &selected.memory_manifest {
             // Offered to every agent run.

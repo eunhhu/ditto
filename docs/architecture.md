@@ -293,7 +293,8 @@ remembers, replaces and forgets memories on its own, labeled as its inference
 and never after reading a web page or file (ADR 0031). With a configured
 search service, agent runs search the web on their own (ADR 0033). From
 version 13 an ordinary run has two tools, `memory.manage` and `web.browse`,
-and every agent tool call journals one `tool.*` lifecycle (ADR 0036).
+and every agent tool call journals one `tool.*` lifecycle (ADR 0036); from
+version 14 it may read the pages its searches return (ADR 0037).
 Runs, sorts and the scheduler journal from blocking threads, and daemon
 handlers run kernel calls on the blocking pool, so no async runtime thread
 waits on SQLite; debug builds reject journal access on those threads.

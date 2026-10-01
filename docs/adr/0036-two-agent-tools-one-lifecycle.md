@@ -7,7 +7,8 @@ as [ADR 0034](0034-one-turn-contract.md) requires). Merges the tools of
 [ADR 0033](0033-autonomous-web-search.md), and moves `artifact.sort`
 ([ADR 0018](0018-user-scoped-model-sort.md)) onto the shared lifecycle; completes
 the "one builtin tool lifecycle" that [ADR 0028](0028-thin-realtime-harness.md)
-deferred.
+deferred. Amended by [ADR 0037](0037-reading-found-pages.md): `web.browse`
+may also read the pages the turn's searches return (turn contract 14).
 
 ## Context
 

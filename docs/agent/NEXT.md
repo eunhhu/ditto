@@ -45,14 +45,18 @@ assistant to message by state and spend nothing on acknowledgments:
    `web.browse` replace five tools, every agent tool call journals
    `tool.*`, a minimal request 4,538 → 3,571 bytes).
 
+The user then asked to carry on with the remaining work ("마저 작업 ㄱㄱ"):
+
+8. [036](tasks/036-reading-found-pages.md) Reading the pages a search found,
+   turn contract 14 - complete (ADR 0037; a search's result pages join the
+   turn's read grant, three reads shared with the user's links).
+
 The thin-harness phases of ADR 0028 (Tasks 025–029, with Task 035's tool
 lifecycle) are complete except the parts deferred there: parallel read-only
 calls and the journal target of three bytes per answer byte.
 
 Still open from the earlier frontier:
 
-- Reading the pages a search returned (today only links the user sends are
-  fetched).
 - The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
   the measurement gate before any claim of parity with other assistants.
 
@@ -60,6 +64,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [036](tasks/036-reading-found-pages.md) Reading the pages a search found,
+  turn contract 14 (ADR 0037).
 - [035](tasks/035-two-agent-tools.md) Two agent tools and one tool
   lifecycle, turn contract 13 (ADR 0036).
 - [034](tasks/034-chat-as-a-bridge.md) The chat as a bridge, turn contract

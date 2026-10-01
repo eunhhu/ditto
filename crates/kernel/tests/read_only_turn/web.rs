@@ -1,7 +1,8 @@
 //! `web.browse` in agent runs (ADR 0036): pages linked in the user's message
-//! (ADR 0027) and searches at the configured service (ADR 0033), each under
-//! its own bounded lease, never a secret sent, no private addresses in
-//! production, and replay without network I/O.
+//! (ADR 0027) or found by the turn's searches (ADR 0037), and searches at the
+//! configured service (ADR 0033), each under its own bounded lease, never a
+//! secret sent, no private addresses in production, and replay without
+//! network I/O.
 use super::agent_runs::{start_command, terminal};
 use super::*;
 use ditto_kernel::turn::WebResult;
@@ -106,6 +107,15 @@ fn results(count: usize) -> String {
                 "content": format!("Rust 2.{index} was released."),
             })
         })
+        .collect::<Vec<_>>();
+    json!({ "query": "rust", "results": results }).to_string()
+}
+
+/// A SearXNG body whose results link to `urls`.
+fn found(urls: &[&str]) -> String {
+    let results = urls
+        .iter()
+        .map(|url| json!({"url": url, "title": "Rust news", "content": "Rust 2.0 is out."}))
         .collect::<Vec<_>>();
     json!({ "query": "rust", "results": results }).to_string()
 }
@@ -351,6 +361,75 @@ async fn the_production_policy_never_reaches_private_links() {
         json!({"error": "blocked_address"})
     );
     replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
+
+    // Nor through a search service that returns a link into the network.
+    let service = serve_search(200, found(&[&page.url]));
+    let fixture = Fixture::with_web_search(&service.endpoint);
+    let (status, driver) = ask(
+        &fixture,
+        "What is new in Rust?",
+        vec![
+            search("rust news"),
+            read("read-found", &page.url),
+            final_script(&["It is private."]),
+        ],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    assert_eq!(page.hits(), 0);
+    assert_eq!(
+        tool_results(&driver.requests()[2])[1],
+        json!({"error": "blocked_address"})
+    );
+    replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
+}
+
+#[tokio::test]
+async fn pages_a_search_found_are_read_within_the_shared_budget() {
+    let linked = serve_page(ARTICLE);
+    let first = serve_page(ARTICLE);
+    let second = serve_page(ARTICLE);
+    let unlisted = serve_page(ARTICLE);
+    let service = serve_search(200, found(&[&first.url, &second.url]));
+    let fixture = Fixture::with_web(&service.endpoint, FetchPolicy::allow_private_addresses());
+    let (status, driver) = ask(
+        &fixture,
+        &format!("Compare {} with what the web says.", linked.url),
+        vec![
+            read("read-early", &first.url),
+            search("rust news"),
+            read("read-first", &first.url),
+            read("read-unlisted", &unlisted.url),
+            read("read-linked", &linked.url),
+            read("read-second", &second.url),
+            read("read-again", &first.url),
+            final_script(&["Both say Rust 2.0 is out."]),
+        ],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let results = tool_results(&driver.requests()[7]);
+    // A result is readable only once its search returned it, and only what
+    // the user or the search named; three reads in all.
+    assert_eq!(results[0], json!({"error": "permission_denied"}));
+    assert_eq!(results[1]["results"].as_array().unwrap().len(), 2);
+    assert_eq!(results[2]["title"], "Rust news");
+    assert_eq!(results[3], json!({"error": "permission_denied"}));
+    assert_eq!(results[4]["content_origin"], "untrusted web page");
+    assert_eq!(results[5]["text"], "Release\n\nRust 2.0 is out.");
+    assert_eq!(results[6], json!({"error": "lease_exhausted"}));
+    assert_eq!(
+        [&first, &second, &linked, &unlisted].map(|page| page.hits()),
+        [1, 1, 1, 0]
+    );
+
+    // Replay grows the grant in the same order: the early read stays a
+    // denial and the later one a read.
+    let events = fixture.events_for_session("personal");
+    let replay = replay_artifact_read_turn(&events, &status.turn_id).unwrap();
+    assert_eq!(replay.tool_calls.len(), 7);
+    assert_eq!(service.targets().len(), 1, "replay must not search");
+    assert_eq!(first.hits(), 1, "replay must not fetch");
 }
 
 #[tokio::test]

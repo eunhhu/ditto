@@ -20,8 +20,11 @@ and checks establish a new fact.
 - On 2026-10-01 the user asked for everything to be merged and pushed. main
   now holds Tasks 016.1 through 035 as one linear commit per slice on top of
   `58b2b02` (Task 016, PR #21), fast-forwarded from the stacked `dev/task-*`
-  branches, which are deleted locally, and is pushed to `origin`. The
-  [Task 017](tasks/017-evaluation-outcomes.md) draft is part of it.
+  branches, which are deleted locally, and is pushed to `origin`, which
+  keeps only `main` and the tag `archive/codex-scaffold` for the unmerged
+  early scaffold. The [Task 017](tasks/017-evaluation-outcomes.md) draft is
+  part of it. Task 036 is committed on `dev/task-036-found-pages` on top of
+  `main`, not yet merged or pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -92,10 +95,14 @@ and checks establish a new fact.
   bounds, text extraction) and, with `--search-url`, searches on its own
   through a SearXNG-compatible service (ADR 0033: the endpoint is the only
   resource a three-call lease allows, credential-shaped queries are refused,
-  at most five bounded results). Its schema offers only what the deployment
-  enables; results return as untrusted content and replay uses the journaled
-  ones. The instructions tell the model to work on its own and to hand off
-  only what needs the user, ending its answer with the question.
+  at most five bounded results), and reads the pages its searches return
+  (ADR 0037: from each search's output on, its results' exact URLs join the
+  turn's read grant and lease; with a search service three reads per turn
+  are shared by the user's links and found pages). Its schema offers only
+  what the deployment enables; results return as untrusted content and
+  replay uses the journaled ones. The instructions tell the model to work
+  on its own and to hand off only what needs the user, ending its answer
+  with the question.
 - **Capabilities.** Generated package headers keep full manifests out of
   startup and search; a selected manifest is paged after digest and projection
   checks. Live invocation uses the closed Invocation Schema Profile V1 through a
@@ -106,7 +113,9 @@ and checks establish a new fact.
   ledger. `artifact.read` and memory searches use static no-approval permits;
   `artifact.sort`, web reads and web searches each consume one-shot
   `ExecutionClaim`s under their own exact-resource leases, and memory writes
-  share one three-call lease without resources.
+  share one three-call lease without resources. The kernel adds exact
+  resources to a registered lease, keeping its budget and expiry, only for
+  the pages a search returned.
 - **Model and turns.** `ditto-model` owns the provider-neutral request/stream
   contract. `ditto-model-openai` holds two drivers on one request lifecycle:
   the closed `gpt-5.6` Responses profile (ephemeral storage) and an
@@ -121,7 +130,7 @@ and checks establish a new fact.
   eight model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. Agent tool calls share
   one `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
-  There is one turn contract, version 13 (ADR 0034): replay rejects turns
+  There is one turn contract, version 14 (ADR 0034): replay rejects turns
   recorded under any other version, while status and thread history still
   read their answers.
   The contract carries typed failure reasons (ADR 0021), the thread's recent
@@ -163,22 +172,23 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 035
+## Latest verified slice: Task 036
 
-- [Contract and evidence](tasks/035-two-agent-tools.md) (ADR 0036), turn
-  contract 13. An ordinary run offers two tools, `memory.manage` and
-  `web.browse`, instead of five or six; `artifact.read` comes only with an
-  attachment; every agent tool call journals one `tool.*` lifecycle, and
-  fourteen per-tool modules became five. A minimal request shrank from 4,538
-  to 3,571 bytes and the turn module from 8,989 to 7,731 lines.
-- Its gate passed on its final tree (592 Rust tests).
+- [Contract and evidence](tasks/036-reading-found-pages.md) (ADR 0037), turn
+  contract 14. `web.browse` reads the pages the turn's searches returned as
+  well as the user's links, under one read lease whose exact resources grow
+  with each search's results; no event or payload changes.
+- Its gate passed on its final code (595 Rust tests; only documents changed
+  afterwards, and the canary passed again); the browser end-to-end check
+  passed 34 of 34, and resident memory stayed at 11.6 MB idle and at most
+  17.2 MB with four runs at once.
 
-## Previous slice: Task 034
+## Previous slice: Task 035
 
-- [Contract and evidence](tasks/034-chat-as-a-bridge.md) (ADR 0035): four
-  answers at once even in one session, the in-flight note, free
-  acknowledgments and per-state messages. Its gate passed on its final tree
-  (593 Rust tests).
+- [Contract and evidence](tasks/035-two-agent-tools.md) (ADR 0036): two
+  agent tools, `memory.manage` and `web.browse`, on one `tool.*` lifecycle;
+  a minimal request shrank from 4,538 to 3,571 bytes. Its gate passed on its
+  final tree (592 Rust tests).
 
 ## Known gaps
 
@@ -212,8 +222,11 @@ and checks establish a new fact.
 - `web.browse` decodes pages as UTF-8 and runs no JavaScript, so pages in
   legacy charsets or rendered by scripts yield garbled or little text.
 - Web search needs a SearXNG-compatible service the operator runs or trusts;
-  that service sees each query. Ditto reads results' snippets but cannot open
-  a result page unless the user sends its link.
+  that service sees each query. Ditto reads at most three pages per answer,
+  from the user's links and its searches' results; links inside a read page
+  are not followed. A page that injects instructions could steer a later
+  query and choose which returned result Ditto opens, a narrow channel ADR
+  0037 accepts.
 
 - Answer quality and tool-use reliability with local or hosted
   OpenAI-compatible models are unmeasured; tools need a model with function

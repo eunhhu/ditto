@@ -463,6 +463,33 @@ impl InvocationAuthorizer {
         Ok(())
     }
 
+    /// Add exact resources to a registered lease's scope, keeping its call
+    /// budget and expiry. A turn's read lease grows this way as its searches
+    /// return pages (ADR 0037).
+    pub fn extend_lease_resources(
+        &self,
+        lease_id: &str,
+        resources: impl IntoIterator<Item = CanonicalResource>,
+    ) -> Result<(), PolicyError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| PolicyError::StatePoisoned)?;
+        let lease = state
+            .leases
+            .get_mut(lease_id)
+            .ok_or_else(|| PolicyError::UnknownLease {
+                lease_id: lease_id.into(),
+            })?;
+        for scope in resources.into_iter().map(ResourceScope::Exact) {
+            if !lease.resource_scopes.contains(&scope) {
+                lease.resource_scopes.push(scope);
+            }
+        }
+        Ok(())
+    }
+
     pub fn remaining_calls(&self, lease_id: &str) -> Result<u32, PolicyError> {
         let state = self
             .inner

@@ -465,15 +465,18 @@ Replay projects the calls as `tool_calls`. A call to `web.browse` or
 
 Agent runs are offered `web.browse` while reading or searching is enabled.
 Its schema offers only what the deployment enables: `{ url }` to read a page
-whose link is in the user's message, `{ query }` to search through the
-configured service, or one of the two; replay recognizes the variant from the
-recorded contract digest.
+whose link is in the user's message or was returned by one of the turn's
+searches, `{ query }` to search through the configured service, or one of the
+two; replay recognizes the variant from the recorded contract digest.
 
 - An agent run's message grants the canonical form of up to five of its http(s)
-  URLs. A read lease allows min(links, 3) calls, each on an exact `url:`
-  resource from the grant; any other URL is `permission_denied` without
-  network I/O. Reads reach only globally routable addresses, and
-  `--disable-web-fetch` turns reading off.
+  URLs, and each search's results grant their URLs from its `tool.output` on
+  ([ADR 0037](../adr/0037-reading-found-pages.md)). A read lease allows three
+  calls with a search service and min(links, 3) without one, each on an exact
+  `url:` resource from the grant, which grows with the results; any other URL
+  is `permission_denied` without network I/O. Reads reach only globally
+  routable addresses, and `--disable-web-fetch` turns reading off and grants
+  nothing.
 - A search lease allows three calls on the endpoint's resource; the request is
   `<endpoint>/search?q=<query>&format=json`, recorded as `request_url`. A
   credential-shaped query is `credential` and never sent.
@@ -483,8 +486,9 @@ recorded contract digest.
   status?}` with a closed snake_case code. The model receives pages and
   results labeled as untrusted content, and replay continues from the
   recorded result without network I/O. See ADRs
-  [0027](../adr/0027-web-fetch-for-user-links.md) and
-  [0033](../adr/0033-autonomous-web-search.md).
+  [0027](../adr/0027-web-fetch-for-user-links.md),
+  [0033](../adr/0033-autonomous-web-search.md) and
+  [0037](../adr/0037-reading-found-pages.md).
 
 ## Kernel artifact-read turns
 
@@ -637,6 +641,11 @@ replaces `web.fetch` and `web.search` with `web.browse`, and `memory.search`,
 or `refused` as before), all on the `tool.*` lifecycle with `artifact.sort`.
 `capabilities.selected` rebuilds `web_manifest` and `memory_manifest`, and
 `artifact.read` is selected for an agent run only with an attachment.
+
+Version 14 ([ADR 0037](../adr/0037-reading-found-pages.md)) lets `web.browse`
+read the pages the turn's earlier searches returned, under one read lease of
+three calls shared with the user's links while a search service is
+configured. No event or payload changes.
 
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished

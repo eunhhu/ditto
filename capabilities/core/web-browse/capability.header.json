@@ -1,12 +1,12 @@
 {
   "header_version": 1,
-  "manifest_sha256": "cbb4675bf4ed99ba208f1afeace7d760681801eab6789ea3e5da3ba0eed05451",
+  "manifest_sha256": "befbf5e0a088aed29ccc11f669bdf00ae13ef201a7305076074215b42c566073",
   "id": "web.browse",
   "version": "0.1.0",
   "namespace": "web",
   "kind": "tool",
   "lifecycle": "active",
-  "summary": "Search the web through the operator's search service, or read a web page whose link the user sent.",
+  "summary": "Search the web through the operator's search service, or read a web page whose link the user sent or a search returned.",
   "placement": {
     "modes": [
       "local"
@@ -17,7 +17,7 @@
     "intents": [
       "search the web",
       "look up current information online",
-      "read a web page the user linked"
+      "read a web page the user linked or a search found"
     ],
     "negative_examples": [
       "search memories",
@@ -44,5 +44,5 @@
       "privilege": "user"
     }
   },
-  "candidate_bytes": 292
+  "candidate_bytes": 331
 }
