@@ -147,9 +147,22 @@ input evidence, not a claimed saved memory. `memory from-input INPUT_ID` support
 explicit recovery with the same session/replacement options. There is no
 automatic HTTP retry.
 
+`POST /v1/commands/memory/forget` ([ADR 0032](../adr/0032-forgetting-a-memory.md))
+accepts only `{ "session_id", "memory_id" }`. The memory must be an active
+memory of the session, the user's own or one Ditto inferred; otherwise HTTP 409,
+and a malformed ID is HTTP 400. The kernel appends a task-free
+`memory.forgotten` event (user, `{ event_version: 1, memory_id }`) and a
+disputed `context.node.recorded` node it sources, origin `user`, summary
+`forgotten`, superseding the memory; neither is ever active. The response has
+the forgotten `memory_id`, the node's `event_id` and `event_seq`, and
+`outcome`: HTTP 200/`recorded` or 202/`committed_but_projection_unavailable`.
+Forgetting it again is a conflict.
+
 `GET /v1/memories?session_id=personal&limit=20` reads a source-verified active
-snapshot. Each item contains `id`, exact `text`, `input_event_id`, and optional
-`replaces`. The response includes `through_seq` and `next_after_id`; use that ID
+snapshot. Each item contains `id`, exact `text`, `input_event_id` (the source:
+the user's input, or for a memory Ditto wrote its `memory.written` event),
+optional `replaces`, and `inferred: true` for a memory Ditto wrote
+([ADR 0031](../adr/0031-model-managed-memory.md)). The response includes `through_seq` and `next_after_id`; use that ID
 as `after_id` on the next request. IDs are ordered lexically, page limits are
 1 through 100 without clamping, and every returned item is compared to its exact
 source input. Each page has its own high-water, so pagination across concurrent
@@ -158,8 +171,8 @@ and cumulative snapshot byte limits still apply, including other active context
 in that session. Listing adds no event and invokes no model/embedding provider.
 
 `personal` is the CLI's default session name, not a new global scope. Other
-sessions remain isolated. Deletion, automatic extraction, cross-session recall,
-and model-driven memory housekeeping remain deferred. [ADR 0015](../adr/0015-explicit-user-memory.md)
+sessions remain isolated. Background extraction and cross-session recall remain
+deferred; Ditto writes memories only within a run, through its memory tools. [ADR 0015](../adr/0015-explicit-user-memory.md)
 owns this command and retry contract.
 
 ## Explicit agent runs

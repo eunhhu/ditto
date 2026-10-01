@@ -7,7 +7,8 @@ use axum::{
 };
 use ditto_kernel::KernelError;
 use ditto_protocol::{
-    MemoryPage, MemoryQuery, MemoryWriteOutcome, RememberInputCommand, RememberInputResponse,
+    ForgetMemoryCommand, ForgetMemoryResponse, MemoryPage, MemoryQuery, MemoryWriteOutcome,
+    RememberInputCommand, RememberInputResponse,
 };
 
 use super::{AppState, blocking};
@@ -15,6 +16,7 @@ use super::{AppState, blocking};
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/commands/memory", post(remember))
+        .route("/v1/commands/memory/forget", post(forget))
         .route("/v1/memories", get(list))
 }
 
@@ -27,6 +29,19 @@ async fn remember(
         MemoryWriteOutcome::Recorded => StatusCode::CREATED,
         MemoryWriteOutcome::AlreadyRecorded => StatusCode::OK,
         MemoryWriteOutcome::CommittedButProjectionUnavailable => StatusCode::ACCEPTED,
+    };
+    Ok((status, Json(response)))
+}
+
+/// Forget one active memory (ADR 0032); forgetting it again is a conflict.
+async fn forget(
+    State(state): State<AppState>,
+    Json(command): Json<ForgetMemoryCommand>,
+) -> Result<(StatusCode, Json<ForgetMemoryResponse>), MemoryApiError> {
+    let response = blocking(&state.kernel, move |kernel| kernel.forget_memory(command)).await?;
+    let status = match response.outcome {
+        MemoryWriteOutcome::CommittedButProjectionUnavailable => StatusCode::ACCEPTED,
+        MemoryWriteOutcome::Recorded | MemoryWriteOutcome::AlreadyRecorded => StatusCode::OK,
     };
     Ok((status, Json(response)))
 }
@@ -173,6 +188,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(page.memories[0].text, "HTTP memory");
+
+        // Forgetting rejects unknown fields and malformed IDs, forgets once,
+        // and answers a second forget with a conflict.
+        let forget = json!({"session_id": "personal", "memory_id": recorded.memory_id});
+        let mut forged = forget.clone();
+        forged["actor"] = json!("system");
+        let post = |body: serde_json::Value| {
+            client
+                .post(format!("{api}/v1/commands/memory/forget"))
+                .json(&body)
+                .send()
+        };
+        assert_eq!(
+            post(forged).await.unwrap().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            post(json!({"session_id": "personal", "memory_id": "memory-1"}))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let forgotten = post(forget.clone()).await.unwrap();
+        assert_eq!(forgotten.status(), StatusCode::OK);
+        let forgotten: ForgetMemoryResponse = forgotten.json().await.unwrap();
+        assert_eq!(forgotten.memory_id, recorded.memory_id);
+        assert_eq!(forgotten.outcome, MemoryWriteOutcome::Recorded);
+        assert_eq!(post(forget).await.unwrap().status(), StatusCode::CONFLICT);
+        let page: MemoryPage = client
+            .get(format!("{api}/v1/memories?session_id=personal"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(page.memories.is_empty());
 
         let source = kernel
             .record_user_input(SubmitInputCommand {

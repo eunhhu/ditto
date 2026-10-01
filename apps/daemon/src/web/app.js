@@ -17,7 +17,7 @@ const STRINGS = {
     inputPlaceholder: 'Message Ditto…',
     whyTitle: 'Why this answer', online: 'live', offline: 'reconnecting…', unverified: 'unverified',
     unverifiedHint: 'Model answers are not verified task completion.',
-    why: 'Why?', correct: 'Correct', newDivider: 'new conversation',
+    why: 'Why?', correct: 'Correct', forget: 'Forget', forgetConfirm: 'Forget it?', newDivider: 'new conversation',
     noMemories: 'No memories yet.', noSchedules: 'Nothing scheduled.',
     disabled: 'No model is configured. Start the daemon with --provider openai-compatible (for example a local Ollama model) or --provider openai.',
     busy: 'Ditto is still answering another request; try again in a moment.',
@@ -51,7 +51,7 @@ const STRINGS = {
     inputPlaceholder: 'Ditto에게 메시지…',
     whyTitle: '이 답변의 근거', online: '연결됨', offline: '재연결 중…', unverified: '미검증',
     unverifiedHint: '모델 답변은 검증된 작업 완료가 아닙니다.',
-    why: '근거', correct: '수정', newDivider: '새 대화',
+    why: '근거', correct: '수정', forget: '지우기', forgetConfirm: '정말 지울까요?', newDivider: '새 대화',
     noMemories: '아직 기억이 없습니다.', noSchedules: '예약된 일이 없습니다.',
     disabled: '모델이 설정되지 않았습니다. 데몬을 --provider openai-compatible(예: 로컬 Ollama 모델) 또는 --provider openai로 시작하세요.',
     busy: '다른 요청에 답하는 중입니다. 잠시 후 다시 시도하세요.',
@@ -460,6 +460,23 @@ async function refreshMemories(append = false) {
       $('memory-text').focus();
     });
     meta.appendChild(fix);
+    // A second click within a few seconds forgets it (ADR 0032); no dialog.
+    const forget = document.createElement('button');
+    forget.className = 'link';
+    forget.textContent = t('forget');
+    forget.addEventListener('click', () => {
+      if (!forget.dataset.armed) {
+        forget.dataset.armed = 'yes';
+        forget.textContent = t('forgetConfirm');
+        setTimeout(() => { delete forget.dataset.armed; forget.textContent = t('forget'); }, 4000);
+        return;
+      }
+      forgetMemory(memory.id).catch((error) => {
+        banner(error.message);
+        refreshMemories().catch(() => {});
+      });
+    });
+    meta.appendChild(forget);
     item.appendChild(meta);
     list.appendChild(item);
   }
@@ -471,6 +488,11 @@ async function refreshMemories(append = false) {
   }
   memoryCursor = page.next_after_id;
   $('memory-more').classList.toggle('hidden', !memoryCursor);
+}
+async function forgetMemory(id) {
+  await api('POST', '/v1/commands/memory/forget', { session_id: SESSION, memory_id: id });
+  banner('');
+  await refreshMemories();
 }
 async function remember(text, replaces) {
   if (!text) return;

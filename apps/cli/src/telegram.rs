@@ -16,9 +16,9 @@ use std::{
 
 use anyhow::{Context, bail};
 use ditto_protocol::{
-    AgentRunQuery, AgentRunResponse, AgentRunStatus, HealthResponse, MemoryPage,
-    RememberInputCommand, ResetConversationCommand, StartAgentRunCommand, SubmitInputCommand,
-    SubmitInputResponse,
+    AgentRunQuery, AgentRunResponse, AgentRunStatus, ForgetMemoryCommand, HealthResponse,
+    MemoryPage, RememberInputCommand, ResetConversationCommand, StartAgentRunCommand,
+    SubmitInputCommand, SubmitInputResponse, UserMemory,
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -152,6 +152,7 @@ enum Command<'a> {
     New,
     Remember(&'a str),
     Memories,
+    Forget(&'a str),
     Stop,
     Ask(&'a str),
 }
@@ -168,6 +169,7 @@ fn command(text: &str) -> Command<'_> {
         "new" => Command::New,
         "remember" => Command::Remember(argument.trim()),
         "memories" => Command::Memories,
+        "forget" => Command::Forget(argument.trim()),
         "stop" => Command::Stop,
         _ => Command::Ask(text),
     }
@@ -313,17 +315,9 @@ impl Gateway {
                     say.saved().to_owned()
                 }
                 Command::Memories => {
-                    let page: MemoryPage = self
-                        .client
-                        .get(format!("{}/v1/memories", self.api))
-                        .query(&[("session_id", self.session.as_str()), ("limit", "100")])
-                        .send()
+                    let list = self
+                        .memories(false)
                         .await?
-                        .error_for_status()?
-                        .json()
-                        .await?;
-                    let list = page
-                        .memories
                         .iter()
                         .map(|memory| {
                             let by = if memory.inferred { say.by_ditto() } else { "" };
@@ -337,6 +331,8 @@ impl Gateway {
                         list
                     }
                 }
+                Command::Forget("") => say.forget_usage().to_owned(),
+                Command::Forget(words) => self.forget(words, say).await?,
                 Command::Ask(question) => return self.ask(incoming, question).await,
             },
         };
@@ -647,6 +643,72 @@ impl Gateway {
             .await?)
     }
 
+    /// The session's memories: the first page, or every page.
+    async fn memories(&self, every: bool) -> anyhow::Result<Vec<UserMemory>> {
+        let mut memories = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut query = vec![
+                ("session_id", self.session.clone()),
+                ("limit", "100".into()),
+            ];
+            if let Some(after) = &after {
+                query.push(("after_id", after.clone()));
+            }
+            let page: MemoryPage = self
+                .client
+                .get(format!("{}/v1/memories", self.api))
+                .query(&query)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            memories.extend(page.memories);
+            match page.next_after_id {
+                Some(next) if every => after = Some(next),
+                _ => return Ok(memories),
+            }
+        }
+    }
+
+    /// `/forget <words>` (ADR 0032): forget the one memory whose text holds
+    /// the words. A number could name another memory once Ditto writes, so
+    /// several matches are listed instead.
+    async fn forget(&self, words: &str, say: Say) -> anyhow::Result<String> {
+        let memories = self.memories(true).await?;
+        let found = matching(&memories, words);
+        let [memory] = found.as_slice() else {
+            return Ok(if found.is_empty() {
+                say.no_matching_memory().to_owned()
+            } else {
+                let list = found
+                    .iter()
+                    .map(|memory| format!("• {}", memory.text))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{}\n{list}", say.several_memories_match())
+            });
+        };
+        let forget = ForgetMemoryCommand {
+            session_id: self.session.clone(),
+            memory_id: memory.id.clone(),
+        };
+        let response = self
+            .client
+            .post(format!("{}/v1/commands/memory/forget", self.api))
+            .timeout(Duration::from_secs(30))
+            .json(&forget)
+            .send()
+            .await?;
+        // Forgotten meanwhile, by Ditto or another client.
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Ok(say.no_matching_memory().to_owned());
+        }
+        response.error_for_status()?;
+        Ok(format!("{}{}", say.forgot(), memory.text))
+    }
+
     async fn post(&self, path: &str, body: Value) -> anyhow::Result<reqwest::Response> {
         let response = self
             .client
@@ -743,6 +805,15 @@ fn save_cursor(path: &Path, seq: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The memories whose text holds `words`, ignoring case.
+fn matching<'a>(memories: &'a [UserMemory], words: &str) -> Vec<&'a UserMemory> {
+    let words = words.to_lowercase();
+    memories
+        .iter()
+        .filter(|memory| memory.text.to_lowercase().contains(&words))
+        .collect()
+}
+
 /// Fixed replies in the user's Telegram language (Korean or English).
 #[derive(Clone, Copy)]
 struct Say(bool);
@@ -753,8 +824,8 @@ impl Say {
     }
     fn help(self) -> &'static str {
         self.pick(
-            "Hi, I'm Ditto. Send a message to ask.\n/new starts a new conversation\n/remember <fact> saves a memory\n/memories lists memories\n/stop cancels the current answer",
-            "안녕하세요, Ditto입니다. 메시지를 보내 질문하세요.\n/new 새 대화 시작\n/remember <내용> 기억 저장\n/memories 기억 목록\n/stop 현재 답변 중단",
+            "Hi, I'm Ditto. Send a message to ask.\n/new starts a new conversation\n/remember <fact> saves a memory\n/memories lists memories\n/forget <words> forgets the memory that holds them\n/stop cancels the current answer",
+            "안녕하세요, Ditto입니다. 메시지를 보내 질문하세요.\n/new 새 대화 시작\n/remember <내용> 기억 저장\n/memories 기억 목록\n/forget <단어> 그 단어가 든 기억 지우기\n/stop 현재 답변 중단",
         )
     }
     fn new_thread(self) -> &'static str {
@@ -768,6 +839,27 @@ impl Say {
     }
     fn no_memories(self) -> &'static str {
         self.pick("No memories yet.", "아직 기억이 없습니다.")
+    }
+    fn forget_usage(self) -> &'static str {
+        self.pick(
+            "Usage: /forget <words from the memory>",
+            "사용법: /forget <기억에 있는 단어>",
+        )
+    }
+    fn no_matching_memory(self) -> &'static str {
+        self.pick(
+            "No memory holds those words.",
+            "그 단어가 든 기억이 없습니다.",
+        )
+    }
+    fn several_memories_match(self) -> &'static str {
+        self.pick(
+            "Several memories hold those words; send more of one:",
+            "그 단어가 든 기억이 여럿입니다. 하나를 더 길게 보내 주세요:",
+        )
+    }
+    fn forgot(self) -> &'static str {
+        self.pick("Forgot: ", "잊었습니다: ")
     }
     /// Marks a memory Ditto inferred from the conversation (ADR 0031).
     fn by_ditto(self) -> &'static str {

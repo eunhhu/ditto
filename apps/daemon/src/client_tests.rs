@@ -118,6 +118,13 @@ async fn bot_api(
         }
         "getUpdates" => {
             let offset = body["offset"].as_i64().unwrap_or(0);
+            // Telegram confirms every update below the offset asked for, and
+            // never delivers it again, even to a restarted gateway.
+            telegram
+                .updates
+                .lock()
+                .unwrap()
+                .retain(|update| update["update_id"].as_i64().unwrap() >= offset);
             let mut ready = Vec::new();
             for _ in 0..10 {
                 ready = telegram
@@ -429,6 +436,26 @@ async fn built_cli_telegram_gateway_relays_allowed_chats_and_scheduled_results()
             .count(),
         1
     );
+
+    // `/forget` forgets the one memory that holds the words, ignoring case.
+    let replies = sent(&telegram, 42).len();
+    push(private(9, 15, 42, "en", "/forget GREEN tea"));
+    wait_for("the forget reply", || sent(&telegram, 42).len() > replies).await;
+    assert_eq!(
+        sent(&telegram, 42).last().unwrap()["text"],
+        "Forgot: I like green tea"
+    );
+    assert!(
+        kernel
+            .list_memories(MemoryQuery {
+                session_id: "personal".into(),
+                after_id: None,
+                limit: None,
+            })
+            .unwrap()
+            .memories
+            .is_empty()
+    );
     child.kill().unwrap();
     child.wait().unwrap();
 
@@ -458,10 +485,11 @@ async fn built_cli_chat_threads_remembers_and_resets() {
     let echo = Arc::new(EchoDriver::new());
     let (kernel, api, shutdown, scheduler) = daemon(root.path(), echo.clone()).await;
     let input = "hello\n/remember I like green tea\nsecond\n/new\nthird\n/exit\n";
+    let chat_api = api.clone();
     let output = tokio::task::spawn_blocking(move || {
         use std::io::Write;
         let mut child = std::process::Command::new(built_cli())
-            .args(["--api", &api, "chat"])
+            .args(["--api", &chat_api, "chat"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -510,6 +538,35 @@ async fn built_cli_chat_threads_remembers_and_resets() {
         })
         .unwrap();
     assert_eq!(memories.memories.len(), 1);
+
+    // `ditto memory forget` forgets it once; a second time is a conflict.
+    let forget = |api: String, memory_id: String| {
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new(built_cli())
+                .args(["--api", &api, "memory", "forget", &memory_id])
+                .output()
+                .unwrap()
+        })
+    };
+    let memory_id = memories.memories[0].id.clone();
+    let forgotten = forget(api.clone(), memory_id.clone()).await.unwrap();
+    let stdout = String::from_utf8_lossy(&forgotten.stdout);
+    assert!(forgotten.status.success(), "{stdout}");
+    assert!(stdout.contains(&memory_id), "{stdout}");
+    let again = forget(api, memory_id).await.unwrap();
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("not an active memory"));
+    assert!(
+        kernel
+            .list_memories(MemoryQuery {
+                session_id: "personal".into(),
+                after_id: None,
+                limit: None,
+            })
+            .unwrap()
+            .memories
+            .is_empty()
+    );
     shutdown.cancel();
     kernel.shutdown_agent_runs().await.unwrap();
     let _ = scheduler.await;

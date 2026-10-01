@@ -28,8 +28,9 @@ and checks establish a new fact.
   `dev/task-025-cache-stable-layout`, `dev/task-026-thin-turn-start`,
   `dev/task-027-one-journal-plane`, `dev/task-028-session-parallel` and
   `dev/task-029-memory-search` stack the harness design and Tasks 025–029,
-  and `dev/task-030-selection-by-reference` and `dev/task-024-model-memory`
-  stack Tasks 030 and 024. Nothing is pushed.
+  and `dev/task-030-selection-by-reference`, `dev/task-024-model-memory` and
+  `dev/task-031-forget-memory` stack Tasks 030, 024 and 031. Nothing is
+  pushed.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
@@ -64,7 +65,8 @@ and checks establish a new fact.
   blocking threads: daemon handlers use the blocking pool, and runs, sorts and
   the scheduler journal from blocking threads. Debug builds reject journal
   access on threads that drive async tasks.
-- **Ingress.** Typed commands only: record-only input, memory save/list/correct,
+- **Ingress.** Typed commands only: record-only input, memory
+  save/list/correct/forget,
   run/status/cancel, conversation reset and view, and loopback-only sort,
   schedule and repeat. The daemon also serves the embedded web app (ADR 0024)
   under a same-origin-only content security policy. While bound to loopback,
@@ -173,19 +175,20 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
-## Latest verified slice: Task 024
+## Latest verified slice: Task 031
 
-- [Contract and evidence](tasks/024-model-managed-memory.md) (ADR 0031). Ditto
-  remembers lasting facts, replaces outdated memories and forgets on request
-  during agent runs, labeled as its inference; the user sees each write in
-  the web app and the memory list and corrects it like any memory.
-- Its gate passed on its final tree (582 Rust tests).
+- [Contract and evidence](tasks/031-forget-memory.md) (ADR 0032). The user
+  forgets any memory, theirs or Ditto's, from the web memory list (with a
+  second, in-place confirmation), `ditto memory forget ID` or Telegram's
+  `/forget <words>`, which forgets only when exactly one memory holds the
+  words.
+- Its gate passed on its final tree (584 Rust tests).
 
-## Previous slice: Task 030
+## Previous slice: Task 024
 
-- [Contract and evidence](tasks/030-selection-by-reference.md): the capability
-  selection recorded by reference, turn payload version 9 (ADR 0030). Its
-  gate passed on its final tree (571 Rust tests).
+- [Contract and evidence](tasks/024-model-managed-memory.md): memory that
+  Ditto manages on its own, turn payload version 10 (ADR 0031). Its gate
+  passed on its final tree (582 Rust tests).
 
 ## Known gaps
 
@@ -227,9 +230,8 @@ and checks establish a new fact.
   heuristic. Writes are refused after a web page or file is read in the same
   turn, but injected text that reached Ditto's own earlier answers in the
   thread is not caught. Forgetting removes a memory from use and view, not
-  from the append-only journal; users cannot yet forget a memory without
-  asking Ditto. The web app's notice of a write shows only live; after a
-  reload the memory list still marks Ditto's memories.
+  from the append-only journal. The web app's notice of a write shows only
+  live; after a reload the memory list still marks Ditto's memories.
 - Version-1 turns still replay through the frozen failure-message grammar;
   only historical traces depend on it.
 - The scheduler sleeps on a monotonic timer and has no resume wake-up, so a

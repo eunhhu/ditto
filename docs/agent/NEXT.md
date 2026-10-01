@@ -18,8 +18,12 @@ of model tool invocation for memory writes. In this order:
    memories on its own, labeled as its inference, refused after reading a
    page or file; ADR 0031).
 
-Both slices are done; the next waits for the user's choice among the open
-items below.
+The user then chose memory management first:
+
+3. [031](tasks/031-forget-memory.md) Forgetting a memory directly from the
+   web memory list, the CLI or Telegram - complete (ADR 0032).
+
+The next slice waits for the user's choice among the open items below.
 
 The thin-harness phases of ADR 0028 (Tasks 025–029) are complete except the
 parts deferred there: one builtin tool lifecycle, parallel read-only calls,
@@ -27,8 +31,6 @@ and the journal target of three bytes per answer byte.
 
 Still open from the earlier frontier:
 
-- Forgetting a memory directly from the memory list, CLI or Telegram (today
-  the user asks Ditto or replaces it).
 - Web search waits for per-call approval.
 - The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
   the measurement gate before any claim of parity with other assistants.
@@ -37,6 +39,8 @@ Still open from the earlier frontier:
 
 One line per slice; each task file and its evidence hold the details.
 
+- [031](tasks/031-forget-memory.md) Forgetting a memory from the web app,
+  CLI or Telegram (ADR 0032).
 - [024](tasks/024-model-managed-memory.md) Memory that Ditto manages, turn
   payload version 10 (ADR 0031).
 - [030](tasks/030-selection-by-reference.md) Capability selection recorded

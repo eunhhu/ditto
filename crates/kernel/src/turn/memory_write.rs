@@ -356,31 +356,50 @@ pub struct ReplayedMemoryWrite {
 /// The context node a `memory.written` event sources: an inferred memory,
 /// or a disputed node that supersedes the forgotten one so neither is active.
 pub(crate) fn memory_node(source_event_id: &str, write: &MemoryWrite) -> ContextNode {
-    let (summary, epistemic, confidence, supersedes) = match write {
-        MemoryWrite::Remember { text, replaces } => (
-            text.clone(),
-            EpistemicStatus::Inferred,
-            INFERRED_CONFIDENCE,
-            replaces.iter().cloned().collect(),
-        ),
-        MemoryWrite::Forget { memory_id } => (
-            FORGOTTEN_SUMMARY.to_owned(),
-            EpistemicStatus::Disputed,
-            0.0,
-            vec![memory_id.clone()],
-        ),
-    };
+    match write {
+        MemoryWrite::Remember { text, replaces } => ContextNode {
+            summary: text.clone(),
+            epistemic: EpistemicStatus::Inferred,
+            confidence: INFERRED_CONFIDENCE,
+            supersedes: replaces.iter().cloned().collect(),
+            ..sourced_node(source_event_id, ContextOrigin::Model)
+        },
+        MemoryWrite::Forget { memory_id } => {
+            forgotten_node(source_event_id, memory_id, ContextOrigin::Model)
+        }
+    }
+}
+
+/// The disputed node that forgets `memory_id`, attested by the model
+/// (ADR 0031) or the user (ADR 0032) through its source event.
+pub(crate) fn forgotten_node(
+    source_event_id: &str,
+    memory_id: &str,
+    origin: ContextOrigin,
+) -> ContextNode {
+    ContextNode {
+        summary: FORGOTTEN_SUMMARY.to_owned(),
+        epistemic: EpistemicStatus::Disputed,
+        confidence: 0.0,
+        supersedes: vec![memory_id.to_owned()],
+        ..sourced_node(source_event_id, origin)
+    }
+}
+
+/// The fields every memory node shares: its ID and provenance from one
+/// session-scoped source event.
+fn sourced_node(source_event_id: &str, origin: ContextOrigin) -> ContextNode {
     ContextNode {
         id: format!("memory-{}", source_event_id.to_ascii_lowercase()),
         kind: ContextNodeKind::Claim,
-        summary,
-        origin: ContextOrigin::Model,
-        epistemic,
+        summary: String::new(),
+        origin,
+        epistemic: EpistemicStatus::Inferred,
         scope: ContextScope::Session,
         lens: ContextLens::Personal,
-        confidence,
+        confidence: 0.0,
         source_event_ids: vec![source_event_id.to_owned()],
-        supersedes,
+        supersedes: Vec::new(),
         valid_from: None,
         valid_until: None,
     }
