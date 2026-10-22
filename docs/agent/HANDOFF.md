@@ -17,14 +17,13 @@ and checks establish a new fact.
 
 ## Repository state
 
-- On 2026-10-01 the user asked for everything to be merged and pushed. main
-  now holds Tasks 016.1 through 035 as one linear commit per slice on top of
-  `58b2b02` (Task 016, PR #21), fast-forwarded from the stacked `dev/task-*`
-  branches, which are deleted locally, and is pushed to `origin`, which
-  keeps only `main` and the tag `archive/codex-scaffold` for the unmerged
-  early scaffold. The [Task 017](tasks/017-evaluation-outcomes.md) draft is
-  part of it. Task 036 is committed on `dev/task-036-found-pages` on top of
-  `main`, not yet merged or pushed.
+- On 2026-10-01 the user asked for everything to be merged and pushed, and on
+  2026-10-22 merged Task 036 as well. main now holds Tasks 016.1 through 036
+  as one linear commit per slice on top of `58b2b02` (Task 016, PR #21),
+  fast-forwarded from the stacked `dev/task-*` branches, which are deleted
+  locally, and is pushed to `origin`, which keeps only `main` and the tag
+  `archive/codex-scaffold` for the unmerged early scaffold. The
+  [Task 017](tasks/017-evaluation-outcomes.md) draft is part of it.
 - Later on 2026-09-30 the user redirected the frontier to a daily-driver
   assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
   [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
