@@ -1,5 +1,7 @@
 # Ditto
 
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/eunhhu/badge.svg)](https://hub.xerj.org/contributors/eunhhu)
+
 A local-first personal AI agent built as a Rust "semantic microkernel": the model owns intent and judgment, the runtime owns context, capabilities, side effects, persistence and long-lived execution.
 
 **Status:** Prototype — the daemon, CLI, web app, Telegram gateway, memory, scheduling and bounded tools work end to end; calendar cron, general effectful tools, SSH, a production embedding worker, authenticated remote access and the improvement compiler are still deferred and are not faked.
