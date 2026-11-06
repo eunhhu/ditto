@@ -135,6 +135,21 @@ class CompareTest(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("gate safety", buffer.getvalue())
 
+    def test_recall_regression_exits_one_even_when_answers_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self.write(Path(tmp) / "base", [attempt("P3", True, (2, 2), "0.01", 100)], {"safety": "pass"})
+            variant = self.write(Path(tmp) / "variant", [attempt("P3", True, (1, 2), "0.01", 100)],
+                                 {"safety": "pass"})
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(probe.compare(base, variant), 1)
+
+    def test_compare_accepts_a_run_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self.write(Path(tmp) / "base", [attempt("P3", False, (0, 1), "0.01", 100)], {"safety": "pass"})
+            self.write(Path(tmp) / "variant", [attempt("P3", True, (1, 1), "0.01", 100)], {"safety": "pass"})
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(probe.compare(base.parent, Path(tmp) / "variant"), 0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

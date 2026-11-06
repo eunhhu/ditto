@@ -162,7 +162,7 @@ def case_stats(report_path: Path) -> dict:
 
 
 def gates(report_path: Path) -> dict:
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = json.loads(report_of(report_path).read_text(encoding="utf-8"))
     summary = report.get("gates") or report.get("summary") or {}
     if isinstance(summary, dict):
         return {name: (value.get("state") if isinstance(value, dict) else value)
@@ -170,8 +170,12 @@ def gates(report_path: Path) -> dict:
     return {}
 
 
+def report_of(path: Path) -> Path:
+    return path / "report.json" if path.is_dir() else path
+
+
 def compare(base: Path, variant: Path) -> int:
-    left, right = case_stats(base), case_stats(variant)
+    left, right = case_stats(report_of(base)), case_stats(report_of(variant))
     print(f"{'case':6} {'base':>10} {'variant':>10} {'delta':>7}   recall      usd")
     failed = False
     for case_id in sorted(set(left["by_case"]) | set(right["by_case"])):
@@ -184,6 +188,8 @@ def compare(base: Path, variant: Path) -> int:
             failed = True
         ra = f"{a['recall'][0]}/{a['recall'][1]}" if a["recall"][1] else "-"
         rb = f"{b['recall'][0]}/{b['recall'][1]}" if b["recall"][1] else "-"
+        if a["recall"][1] and b["recall"][1] and b["recall"][0] * a["recall"][1] < a["recall"][0] * b["recall"][1]:
+            failed = True
         print(f"{case_id:6} {pa:>10} {pb:>10} {delta:+7d}   {ra} -> {rb}   "
               f"${b['usd']:.4f}")
     base_gates, variant_gates = gates(base), gates(variant)
@@ -269,8 +275,7 @@ def main() -> int:
         print("reverted")
         return 0
     if args.command == "compare":
-        return compare(Path(args.base).expanduser() / "report.json",
-                       Path(args.variant).expanduser() / "report.json")
+        return compare(Path(args.base).expanduser(), Path(args.variant).expanduser())
     return round_variant(args)
 
 
