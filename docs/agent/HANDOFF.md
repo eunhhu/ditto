@@ -65,6 +65,16 @@ and checks establish a new fact.
   gate measures, and one store's daemon failed to start inside its 60 s window.
   Its report is kept in scratch as evidence for that diagnosis; the readiness
   number has to come from a clean run.
+- Campaign 2 (130 attempts) is **also invalid, for a worse reason**: it measured
+  a binary that predated the tree. `capabilities.selected` shows only
+  `web.browse` in every memory attempt, so the model answered "I don't have a
+  memory search available in this session" and Recall@5 collapsed to 0.500 while
+  the answers looked fine. A clean rebuild restored `memory.manage` selection
+  and memory calls in all five attempts of the case. The runner now builds the
+  daemon itself (`--no-build` exists for tests) and exits when the binary's
+  mtime is older than the newest Rust or capability source.
+- Campaign 3 is therefore the first readiness candidate: built by the runner,
+  with `--agent-check-exit 0` and the frozen budget.
 - First harness probes (Task 042) on the memory two-hop case: base 10/10 answers
   with Recall@5 18/20; the pointer-as-stopping-rule variant 10/10 and 17/20; the
   retrieval-hint variant 10/10 and 15/20 (safety gate flagged unused body

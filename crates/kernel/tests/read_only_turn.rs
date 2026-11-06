@@ -1936,10 +1936,13 @@ async fn a_held_provider_cannot_cross_the_model_output_deadline() {
         .run_artifact_read_turn(
             command("session-1", "task-1"),
             Vec::new(),
-            &DelayedDriver::new(std::time::Duration::from_secs(2)),
+            &DelayedDriver::new(std::time::Duration::from_secs(10)),
             CancellationToken::new(),
             ReadOnlyTurnControl {
-                deadline: Some(Utc::now() + ChronoDuration::seconds(1)),
+                // Building the request takes a moment on a loaded machine; a
+                // one-second deadline could expire before the request went out,
+                // which tests a different failure than the one under test.
+                deadline: Some(Utc::now() + ChronoDuration::seconds(3)),
             },
         )
         .await

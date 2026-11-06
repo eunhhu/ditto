@@ -345,6 +345,21 @@ def capabilities_dir(work: Path, profile: dict) -> Path:
 
 # ------------------------------------------------------------------ daemon harness
 
+def newest_source_mtime() -> float:
+    newest = 0.0
+    for pattern in ("crates/**/*.rs", "crates/**/*.toml", "apps/**/*.rs", "capabilities/**/*.toml",
+                    "Cargo.toml", "Cargo.lock"):
+        for path in ROOT.glob(pattern):
+            newest = max(newest, path.stat().st_mtime)
+    return newest
+
+
+def build_daemon(profile: str) -> None:
+    """Build the binary under test so it cannot predate the source tree."""
+    subprocess.run(["cargo", "build", "--locked", "-q", "--profile", profile, "-p", "ditto-daemon"],
+                   cwd=ROOT, check=True)
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -767,6 +782,11 @@ class Campaign:
         self.work.mkdir()
         self.evidence = Evidence(self.run_dir)
         self.binary = Path(args.daemon).resolve()
+        if not args.dry_run:
+            if not args.no_build:
+                build_daemon(args.build_profile)
+            if self.binary.stat().st_mtime < newest_source_mtime():
+                raise SystemExit(f"{self.binary} predates the source tree; refusing to measure a stale binary")
         self.trace = shutil.which("strace") is not None and not args.no_trace
         self.attempts, self.controls = [], []
         self.grading_items = []
@@ -1933,6 +1953,8 @@ def main(argv=None) -> int:
     run.add_argument("--budgets")
     run.add_argument("--calibration", action="store_true")
     run.add_argument("--agent-check-exit", type=int, default=None)
+    run.add_argument("--no-build", action="store_true",
+                     help="use the binary as it is (tests and dry runs only)")
     run.add_argument("--cases", nargs="*")
     run.add_argument("--no-trace", action="store_true")
     run.add_argument("--keep-work", action="store_true")

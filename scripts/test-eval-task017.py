@@ -160,6 +160,15 @@ class CaseThreshold(unittest.TestCase):
         self.assertEqual(ev.case_threshold(40, 0.90), 0.90)
 
 
+class StaleBinary(unittest.TestCase):
+    """A campaign refuses to measure a binary that predates the source tree."""
+
+    def test_staleness_check_covers_rust_and_capability_sources(self):
+        newest = ev.newest_source_mtime()
+        self.assertGreater(newest, 0)
+        self.assertGreaterEqual(newest, (ev.ROOT / "Cargo.toml").stat().st_mtime)
+
+
 class FailureLog(unittest.TestCase):
     """A store that fails to start must leave its daemon log in the run."""
 

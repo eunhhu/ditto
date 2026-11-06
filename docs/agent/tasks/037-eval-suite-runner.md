@@ -48,6 +48,12 @@ asked to finish Ditto quickly so it can replace the current assistant
 - Cost is priced at the metered list rate of the model actually used, even
   when calls ride a subscription, so efficiency compares across assistants.
   Usage carries no cached-token split, so all input is priced uncached.
+- The runner builds the daemon it measures (`cargo build --locked --profile
+  <build-profile> -p ditto-daemon`) and refuses to start when the binary's mtime
+  is older than the newest Rust or capability source. Campaign 2 proved the need:
+  a stale binary silently dropped `memory.manage` from capability selection, so
+  every memory attempt answered "I don't have a memory search available in this
+  session" and Recall@5 read 0.500 with no code defect behind it.
 - A per-case rate threshold needs enough attempts to mean anything. The suite
   asks five repetitions per case, where a 3/5 and a 5/5 are two coin flips
   apart — observed directly on `X1`/`long_use`, which scored 3/5 in one run and
