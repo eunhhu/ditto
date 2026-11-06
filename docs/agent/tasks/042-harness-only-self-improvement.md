@@ -167,7 +167,21 @@ Measured facts, with the runs that produced them:
   it as "stop unless the memory points at something else" raised `P2`/`long_use`
   to 6.2 requests and 21.2 s (base 5.2 / 11.4 s) and left `P3`/`long_use` recall
   at 7/10, so the round failed `semantic` outright. Both D and E are `KEEP_BASE`.
-- **What the three rounds actually teach.** Prose that adds a *condition* makes
+- **The harness, not the prose, now bounds the loop.** A turn makes at most
+  three memory searches and a fourth returns `limit_reached` (ADR 0029). The
+  cap is replayable, keeps the tool on the surface so the prompt prefix is
+  unchanged, and fires only after the model has had the fact, a pointer and one
+  rewording. Measured on `P2`/`P3`, five attempts per profile: a cap of two lost
+  a fact a third query would have found (`P2`/`long_use` recall 5/5 -> 4/5, the
+  model searching `reading group get-together`, `reading group meeting place`,
+  then refused on `book club` and answering honestly that it had nothing); a cap
+  of three restored recall to 5/5 with 4.8 requests and a 10.7 s median against
+  the pre-cap 5.2 and 11.4 s. That is inside the noise of five attempts, so this
+  is recorded as a **bound, not a measured gain**: the loop it prevents
+  (`P2`/`long_use`#2, seven searches, `bound_exceeded`) did not reproduce in any
+  later round, and the honest claim is that the pathology can no longer consume
+  the request budget.
+- **What the four rounds actually teach.** Prose that adds a *condition* makes
   the model search more; prose that adds a *stop* makes it stop too early on the
   chained case. Wording is saturated. The next lever is deterministic: a
   per-turn cap on memory searches that the kernel enforces and states in the
