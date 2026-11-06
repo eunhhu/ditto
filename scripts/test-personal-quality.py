@@ -307,12 +307,15 @@ class AssessmentTests(unittest.TestCase):
         script = str(Path(self.quality.__file__))
         for args in (["--history-size", "0"], ["--history-size", "5001"],
                      ["--samples", "1"], ["--samples", "101"]):
+            # The assertion is the exit code and the message, not wall time: a
+            # five second cap turns interpreter start-up under load into a
+            # spurious failure.
             result = subprocess.run([sys.executable, script, "--output", "unused.json", *args],
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("history-size must be", result.stderr)
         result = subprocess.run([sys.executable, "-O", script, "--output", "unused.json"],
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("without -O", result.stderr)
 
