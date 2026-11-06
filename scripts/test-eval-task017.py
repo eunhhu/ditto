@@ -147,6 +147,21 @@ class DryRunBoundary(unittest.TestCase):
         self.assertTrue(self.errors(run))
 
 
+class BudgetCheck(unittest.TestCase):
+    """A p95 ceiling describes the group, not every single attempt."""
+
+    def test_one_attempt_over_a_p95_ceiling_is_not_a_failure(self):
+        values = [700, 760, 800, 810, 830, 850, 900, 910, 920, 930, 940, 950, 960, 970, 980, 990,
+                  1000, 1100, 1200, 1400]
+        p95, runaways = ev.budget_check(values, 1394)
+        self.assertLessEqual(p95, 1394)
+        self.assertEqual(runaways, [])
+
+    def test_a_three_times_runaway_still_fails_alone(self):
+        p95, runaways = ev.budget_check([700, 800, 900, 1000, 4200], 1394)
+        self.assertEqual(runaways, [4200])
+
+
 class CaseThreshold(unittest.TestCase):
     """A five-attempt case cannot carry a 0.80 threshold."""
 

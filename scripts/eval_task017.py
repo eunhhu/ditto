@@ -1405,6 +1405,18 @@ def import_grades(run_dir: Path, grades_path: Path):
 
 # ------------------------------------------------------------------ gates
 
+def budget_check(values: list, ceiling) -> tuple:
+    """Return (p95, runaways) for one resource field.
+
+    A ceiling frozen from a p95 describes the group; applying it to every sample
+    would fail roughly five percent of attempts by construction. A single attempt
+    above three times the ceiling is a runaway and still fails on its own.
+    """
+    p95 = nearest_rank(values, 0.95)
+    runaways = [v for v in values if v > 3 * ceiling]
+    return p95, runaways
+
+
 def case_threshold(repetitions: int, standard: float) -> float | None:
     """A per-case threshold needs enough attempts to mean anything.
 
@@ -1621,18 +1633,32 @@ def compute_gates(report: dict, suite: dict, get, manifest: dict) -> list[tuple[
             elif p95 > budget[ceiling]:
                 fails.append(f"{fp} {field} p95 {p95:.0f} > {budget[ceiling]}")
         from decimal import Decimal
-        for a in group:
-            r = a["resources"]
-            for field, ceiling in (("model_calls", "max_model_calls"), ("tool_calls", "max_tool_calls"),
-                                   ("input_tokens", "max_input_tokens"), ("output_tokens", "max_output_tokens")):
-                if r[field] is None or budget[ceiling] is None:
-                    blocks.append(f"{key(a)} {field} or ceiling missing")
-                elif r[field] > budget[ceiling]:
-                    fails.append(f"{key(a)} {field} {r[field]} > {budget[ceiling]}")
-            if r["external_provider_usd"] is None or budget["max_external_provider_usd"] is None:
-                blocks.append(f"{key(a)} usd or ceiling missing")
-            elif Decimal(r["external_provider_usd"]) > Decimal(budget["max_external_provider_usd"]):
-                fails.append(f"{key(a)} usd over ceiling")
+        # The ceilings were frozen from a p95, so they describe the shape of the
+        # group, not the worst single attempt: applying a p95 ceiling to every
+        # sample fails about five percent of attempts by construction. Compare
+        # the group's p95, and keep a three-times runaway guard on single tries.
+        for field, ceiling in (("model_calls", "max_model_calls"), ("tool_calls", "max_tool_calls"),
+                               ("input_tokens", "max_input_tokens"), ("output_tokens", "max_output_tokens")):
+            values = [a["resources"][field] for a in group]
+            if None in values or budget[ceiling] is None:
+                blocks.append(f"{fp} {field} or ceiling missing")
+                continue
+            p95, runaways = budget_check(values, budget[ceiling])
+            stats[f"{fp[0]}/{fp[1]}/{field}"] = {"p50": nearest_rank(values, 0.5), "p95": p95, "n": len(values)}
+            if p95 > budget[ceiling]:
+                fails.append(f"{fp} {field} p95 {p95:g} > {budget[ceiling]:g}")
+            fails += [f"{fp} {field} {v:g} > 3x {budget[ceiling]:g}" for v in runaways]
+        usd = [Decimal(str(a["resources"]["external_provider_usd"])) for a in group
+               if a["resources"]["external_provider_usd"] is not None]
+        if len(usd) != len(group) or budget["max_external_provider_usd"] is None:
+            blocks.append(f"{fp} usd or ceiling missing")
+        else:
+            ceiling_usd = Decimal(budget["max_external_provider_usd"])
+            p95_usd = sorted(usd)[max(0, math.ceil(0.95 * len(usd)) - 1)]
+            if p95_usd > ceiling_usd:
+                fails.append(f"{fp} usd p95 {p95_usd} > {ceiling_usd}")
+            fails += [f"{key(a)} usd over 3x ceiling" for a in group
+                      if Decimal(str(a["resources"]["external_provider_usd"])) > 3 * ceiling_usd]
     done("cost_latency", fails, blocks, {"stats": stats})
 
     # resource
