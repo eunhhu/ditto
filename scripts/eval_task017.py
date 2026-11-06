@@ -803,6 +803,12 @@ class Campaign:
                                "--include-usage"]
             self.model_id = args.model
         self.budget_bytes = Path(args.budgets).read_bytes() if args.budgets else None
+        self.failure_logs: list[Path] = []
+
+    def keep_failure_log(self, daemon) -> None:
+        """A store that failed must leave its daemon log behind for the report."""
+        if daemon.log.is_file() and daemon.log not in self.failure_logs:
+            self.failure_logs.append(daemon.log)
 
     def model_session(self, name: str):
         if self.proxy_port:
@@ -867,6 +873,7 @@ class Campaign:
         except Exception as error:  # the store's remaining attempts become unavailable, never dropped
             notes["error"] = repr(error)
             print(f"   store error: {error!r}", flush=True)
+            self.keep_failure_log(daemon)
         finally:
             if daemon.proc:
                 daemon.stop()
@@ -1242,6 +1249,10 @@ class Campaign:
         (self.run_dir / "run-manifest.sha256").write_text(manifest_sha + "\n")
         write_grading_sheet(self.run_dir, self.grading_items, self.evidence)
         finalize_report(self.run_dir, report, manifest_sha)
+        for log in self.failure_logs:
+            target = self.run_dir / "failures" / log.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(log.read_bytes())
         shutil.rmtree(self.work, ignore_errors=True) if not self.args.keep_work else None
 
 

@@ -45,6 +45,27 @@ and checks establish a new fact.
   retrievable with `git show 58b2b02:docs/agent/tasks/<report>.json`; their
   evidence files record the digests. The canary rejects tracked
   `docs/**/*.json` and any tracked file above 1 MiB.
+- On 2026-11-06 the user asked for a comparison with Hermes, OpenMausBot and
+  Harness² and for the improvements to be specified. The mechanism comparison is
+  [design/comparison-2026-11.md](../design/comparison-2026-11.md); Tasks 038,
+  039, 040 and 041 are drafted specs and **no part of them is implemented**.
+  The same day's measured facts: calibration 3 over 130 attempts recorded
+  128/130 verified turns, Recall@5 45/45 clean and 43/45 with 1,000 distractor
+  memories, and `eval/task017/budgets-v1.json` is frozen from it (Task 037).
+- [Task 042](tasks/042-harness-only-self-improvement.md) owns harness-only
+  self-improvement at post-training scale. Implemented so far: only
+  `scripts/probe_variant.py` with `scripts/test-probe-variant.py` (apply a
+  variant, run its cases, compare against a base run, revert byte-exactly). Two
+  candidate variants are written down in `eval/variants/` and **neither has been
+  probed yet**.
+- The eval runner now keeps a store's daemon log under `<out>/failures/` when a
+  store fails, because campaign 1 lost the only log of its own failure.
+- Campaign 1 (130 attempts, 123 verified) is **not a valid readiness run**: an
+  `agent-check.sh` build ran during it, which loaded the CPU that the latency
+  gate measures, and one store's daemon failed to start inside its 60 s window.
+  Its report is kept in scratch as evidence for that diagnosis; the readiness
+  number has to come from a clean run.
+
 
 ## Current system
 

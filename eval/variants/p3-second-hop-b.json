@@ -1,0 +1,12 @@
+{
+  "name": "p3-second-hop-b",
+  "note": "Task 042 candidate B: make the object-to-location pattern a retrieval hint of the capability, so the second search is chosen instead of instructed.",
+  "edits": [
+    {
+      "file": "capabilities/core/memory-manage/capability.toml",
+      "find": "intents = [\"recall something the user asked Ditto to remember\", \"remember a lasting fact the user shared\", \"forget a memory\"]",
+      "replace": "intents = [\"recall something the user asked Ditto to remember\", \"remember a lasting fact the user shared\", \"forget a memory\", \"find where an object the user named is kept when a memory points at it\"]"
+    }
+  ],
+  "cases": ["P3"]
+}

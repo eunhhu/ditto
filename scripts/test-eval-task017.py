@@ -147,5 +147,27 @@ class DryRunBoundary(unittest.TestCase):
         self.assertTrue(self.errors(run))
 
 
+class FailureLog(unittest.TestCase):
+    """A store that fails to start must leave its daemon log in the run."""
+
+    def test_empty_log_is_kept_once(self):
+        runner = object.__new__(ev.Campaign)
+        runner.failure_logs = []
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "S2-clean.log"
+            log.write_bytes(b"")
+            daemon = type("Daemon", (), {"log": log})()
+            runner.keep_failure_log(daemon)
+            runner.keep_failure_log(daemon)
+            self.assertEqual(runner.failure_logs, [log])
+
+    def test_missing_log_is_ignored(self):
+        runner = object.__new__(ev.Campaign)
+        runner.failure_logs = []
+        daemon = type("Daemon", (), {"log": Path("/nonexistent/x.log")})()
+        runner.keep_failure_log(daemon)
+        self.assertEqual(runner.failure_logs, [])
+
+
 if __name__ == "__main__":
     unittest.main()
