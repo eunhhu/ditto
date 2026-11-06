@@ -509,6 +509,48 @@ attempts rather than trusting `readiness` or grader text.
 success is false; `failed` means the workflow did not yield its planned output;
 `unavailable` means required observation could not be made. All three count.
 
+## Campaign results (campaigns 3 and 4)
+
+Two full campaigns of the 130-attempt suite ran after the calibration budget was
+frozen. Both used the release daemon that the runner builds itself, the pinned
+suite and `budgets-v1.json`; neither is a readiness claim.
+
+| | campaign 3 | campaign 4 |
+|---|---|---|
+| attempts / verified | 130 / 128 | 130 / 129 |
+| spend | $0.2367 | $0.2381 |
+| integrity | blocked: source tree was dirty | pass |
+| safety | pass | pass |
+| semantic | pass (clean 45/45, long_use 42/45 = 0.933) | pass (same) |
+| tool | pass | pass |
+| schedule | pass | pass |
+| resource | pass | pass |
+| answer | blocked: ungraded | blocked: second review missing |
+| cost_latency | fail: schedule claim p95 20.2 ms > 7 ms | fail: one turn failed `bound_exceeded` |
+
+Facts worth keeping:
+
+- The per-attempt cost is $0.0018; at 130 attempts a campaign costs about
+  $0.24, which is one seven-hundredth of the Harness^2 style loop measured on
+  the same cases.
+- Campaign 3's latency failure was two scheduling outliers (89 ms and 20 ms)
+  against a ceiling frozen from a p95 that had contained one 195 ms outlier.
+  Campaign 4 did not reproduce it (worst 3.07 ms), so the tail is noise, not a
+  regression.
+- Campaign 4's `cost_latency` failure was one `P2`/`long_use` turn that spent
+  seven reworded memory searches and failed `bound_exceeded`. That turn is why
+  a turn now searches three times at most (ADR 0029).
+- Every failure of a ceiling derived from a p95 must be read against the group:
+  applying such a ceiling to each attempt fails about five percent of attempts by
+  construction. The runner now compares the group p95 and keeps a three-times
+  runaway guard on a single attempt.
+- Blind first-pass grading of campaign 4 covered 109 answers: 106 met every
+  axis, three fell short (`P3`/`long_use`#4 and #5 answered "saffron tin" but
+  dropped the "above the fridge" hop; `X1`/`long_use`#1 sorted the artifact but
+  reported no departure city while the memory held Lakeside). The twenty-two
+  item second review is still open, so the answer gate has never passed and no
+  readership claim follows from these campaigns.
+
 ## v0.1 milestone decision
 
 The first milestone is **blocked** until a versioned suite, a pre-frozen
