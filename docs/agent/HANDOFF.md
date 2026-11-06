@@ -65,6 +65,15 @@ and checks establish a new fact.
   gate measures, and one store's daemon failed to start inside its 60 s window.
   Its report is kept in scratch as evidence for that diagnosis; the readiness
   number has to come from a clean run.
+- First harness probes (Task 042) on the memory two-hop case: base 10/10 answers
+  with Recall@5 18/20; the pointer-as-stopping-rule variant 10/10 and 17/20; the
+  retrieval-hint variant 10/10 and 15/20 (safety gate flagged unused body
+  loads). Both are `KEEP_BASE`. The case's answers were never wrong — only its
+  recall — so the family is saturated for wording edits.
+- Case-level gates now need ten repetitions to apply their 0.80/0.90 rate;
+  below that they block only under 0.40 (`case_threshold` in
+  `scripts/eval_task017.py`), because `X1`/`long_use` scored 3/5 and then 5/5 on
+  consecutive runs of the same binary.
 
 
 ## Current system

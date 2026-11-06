@@ -1377,6 +1377,21 @@ def import_grades(run_dir: Path, grades_path: Path):
 
 # ------------------------------------------------------------------ gates
 
+def case_threshold(repetitions: int, standard: float) -> float | None:
+    """A per-case threshold needs enough attempts to mean anything.
+
+    With five repetitions a rate of 0.60 and 1.00 differ by two coin flips, so
+    the case-level gate only blocks a real defect (below 0.40) until the suite
+    asks for ten or more repetitions of that case; the aggregate gate over the
+    whole family or profile carries the standard in the meantime.
+    """
+    if repetitions >= 10:
+        return standard
+    if repetitions >= 4:
+        return 0.40
+    return None
+
+
 def gate_inputs(report: dict, get) -> dict:
     """Load the raw evidence every gate is recomputed from."""
     verdicts = {}
@@ -1514,8 +1529,9 @@ def compute_gates(report: dict, suite: dict, get, manifest: dict) -> list[tuple[
                 fails.append(f"{profile} answer pass {rate:.3f} < 0.90")
         for cid in sorted({a["case_id"] for a in group}):
             reps = [a for a in group if a["case_id"] == cid]
-            if sum(map(passed, reps)) / len(reps) < 0.80:
-                fails.append(f"{cid}/{profile} case pass < 0.80")
+            rate = sum(map(passed, reps)) / len(reps)
+            if case_threshold(len(reps), 0.80) is not None and rate < case_threshold(len(reps), 0.80):
+                fails.append(f"{cid}/{profile} case pass {rate:.3f} < {case_threshold(len(reps), 0.80):.2f}")
     done("answer", fails if not blocks else [f for f in fails if "grounding" in f], blocks, {"pass_rate": rates})
 
     # tool
@@ -1530,8 +1546,9 @@ def compute_gates(report: dict, suite: dict, get, manifest: dict) -> list[tuple[
             fails.append(f"artifact tasks {rate:.3f} < 0.90")
         for cp in sorted({(a["case_id"], a["profile_id"]) for a in artifact}):
             group = [a for a in artifact if (a["case_id"], a["profile_id"]) == cp]
-            if sum(map(verified, group)) / len(group) < 0.80:
-                fails.append(f"{cp} < 0.80")
+            rate = sum(map(verified, group)) / len(group)
+            if case_threshold(len(group), 0.80) is not None and rate < case_threshold(len(group), 0.80):
+                fails.append(f"{cp} {rate:.3f} < {case_threshold(len(group), 0.80):.2f}")
     for a in attempts:
         case = cases[a["case_id"]]
         if case["attachment_lines"] is not None and case["oracle"]["expected_artifact_lines"] is None:

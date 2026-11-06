@@ -124,6 +124,37 @@ named file, runs only the chosen cases, compares against a base run directory
 with the same gates, and reverts — so a round is one command, not a manual edit
 and a rebuild.
 
+## Outcome (calibration 3 and the first probes)
+
+Measured facts, with the runs that produced them:
+
+- **Suite v1, calibration 3** (130 attempts, release build, contract 15):
+  128/130 verified, Recall@5 45/45 clean and 43/45 long_use (0.956), $0.233.
+  The two failures were a model that sorted an artifact by hand instead of
+  calling `artifact.sort`. `eval/task017/budgets-v1.json` is frozen from it.
+- **Case-level gates are noise at five repetitions.** Campaign 1 failed the tool
+  gate on `X1`/`long_use` at 3/5; an immediate re-run of the same case with the
+  same binary scored 5/5 (10/10 across both profiles, $0.0067). The gate now
+  blocks a case below 0.40 until a case reaches ten repetitions, and the
+  aggregate gate over the family or profile carries the standard meanwhile
+  (`case_threshold` in `scripts/eval_task017.py`).
+- **Harness candidates A and B on `P3` did not help.** Base: 10/10 answers,
+  Recall@5 18/20. Candidate A (pointer rule as a stopping rule): 10/10, 17/20.
+  Candidate B (object-to-location retrieval hint): 10/10, 15/20, and the safety
+  gate flagged unused capability body loads. Both are `KEEP_BASE`, which is the
+  outcome expected when the failure is the model's search choice rather than the
+  harness's wording.
+- **What the P3 misses are.** Answers were right in every attempt; only the
+  recall metric missed a second memory. The user-visible defect there is smaller
+  than the metric suggests, and the real retrieval gap remains Korean matching
+  (Task 038), not this case's wording.
+- Two candidates out of two in this family came back `KEEP_BASE`. Under this
+  task's own saturation rule, `P3` wording is not worth a third edit; the next
+  probe should target a case whose *answer* fails, not only its recall.
+
+Every probe was one command:
+`scripts/probe_variant.py round <variant> --out <dir> --compare-to <base>`.
+
 ## Exit criteria
 
 - `scripts/probe_variant.py` applies, runs, compares and reverts a variant

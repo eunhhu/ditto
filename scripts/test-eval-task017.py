@@ -147,6 +147,19 @@ class DryRunBoundary(unittest.TestCase):
         self.assertTrue(self.errors(run))
 
 
+class CaseThreshold(unittest.TestCase):
+    """A five-attempt case cannot carry a 0.80 threshold."""
+
+    def test_small_denominators_only_block_a_real_defect(self):
+        self.assertEqual(ev.case_threshold(5, 0.80), 0.40)
+        self.assertEqual(ev.case_threshold(4, 0.80), 0.40)
+        self.assertIsNone(ev.case_threshold(3, 0.80))
+
+    def test_ten_attempts_carry_the_standard(self):
+        self.assertEqual(ev.case_threshold(10, 0.80), 0.80)
+        self.assertEqual(ev.case_threshold(40, 0.90), 0.90)
+
+
 class FailureLog(unittest.TestCase):
     """A store that fails to start must leave its daemon log in the run."""
 

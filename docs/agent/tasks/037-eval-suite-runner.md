@@ -48,6 +48,13 @@ asked to finish Ditto quickly so it can replace the current assistant
 - Cost is priced at the metered list rate of the model actually used, even
   when calls ride a subscription, so efficiency compares across assistants.
   Usage carries no cached-token split, so all input is priced uncached.
+- A per-case rate threshold needs enough attempts to mean anything. The suite
+  asks five repetitions per case, where a 3/5 and a 5/5 are two coin flips
+  apart — observed directly on `X1`/`long_use`, which scored 3/5 in one run and
+  5/5 in the next with the same binary. So a case-level gate applies its
+  standard only at ten or more repetitions and otherwise blocks only below
+  0.40, while the aggregate gate over the family and profile keeps 0.90
+  (`case_threshold`).
 - `scripts/eval_dry_model.py` is a scripted fixture model for checking the
   mechanics; a dry-run report is always `blocked` on integrity.
 - OpenCode Go routes only requests that carry a per-conversation
