@@ -151,6 +151,21 @@ Measured facts, with the runs that produced them:
 - Two candidates out of two in this family came back `KEEP_BASE`. Under this
   task's own saturation rule, `P3` wording is not worth a third edit; the next
   probe should target a case whose *answer* fails, not only its recall.
+- **Candidate D did target a real answer failure.** Campaign 4 failed
+  `P2`/`long_use`#2 with `bound_exceeded`: the model spent all eight requests on
+  seven reworded memory searches (`reading group`, `book club`, `Birch Room`,
+  `get-together venue`, `party venue pub restaurant`, `reading`, `gathering place
+  meeting`) and never answered. The guidance told it to search and never said
+  when to stop. Base `P2`: 10/10 answers, Recall@5 10/10, mean 5.0 requests and
+  a 11.4 s median on `long_use` (requests 7, 6, 4, 5, 3). Candidate D adds a stop
+  rule ("two searches are usually enough; once a search returns the memory that
+  answers the request, answer instead of rephrasing"): 10/10 answers, Recall
+  10/10, mean **4.4** requests and **9.3 s** median on `long_use`, $0.0212 →
+  $0.0191 per case. The `clean` profile nudged the other way (mean 2.2 → 2.6
+  requests) on five samples each, so this is a promising direction, not a
+  demonstrated gain: the next probe repeats it with ten repetitions per profile
+  and adds a second case from the same family.
+
 
 Every probe was one command:
 `scripts/probe_variant.py round <variant> --out <dir> --compare-to <base>`.
