@@ -346,10 +346,18 @@ def capabilities_dir(work: Path, profile: dict) -> Path:
 # ------------------------------------------------------------------ daemon harness
 
 def newest_source_mtime() -> float:
+    """Newest source that the measured binary is built from.
+
+    Test and bench sources are excluded: a release daemon never contains them, so
+    editing one must not make the binary look stale.
+    """
     newest = 0.0
     for pattern in ("crates/**/*.rs", "crates/**/*.toml", "apps/**/*.rs", "capabilities/**/*.toml",
                     "Cargo.toml", "Cargo.lock"):
         for path in ROOT.glob(pattern):
+            parts = set(path.parts)
+            if "tests" in parts or "benches" in parts or "examples" in parts:
+                continue
             newest = max(newest, path.stat().st_mtime)
     return newest
 
