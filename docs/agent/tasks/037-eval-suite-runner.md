@@ -88,3 +88,15 @@ asked to finish Ditto quickly so it can replace the current assistant
 - The seed stalls are most likely SQLite WAL checkpoints (`synchronous=NORMAL`
   syncs only there) on the SD card, the Pi's only disk (unconfirmed); seeding
   is setup outside every measured attempt.
+- Calibration 2 (contract 15, ready calls in order, memory guidance): one
+  turn failure in 130 (none from batched calls); long_use Recall@5 0.775.
+  Remaining misses: a lexical search for "flight" did not find "flights", and
+  a turn stopped after the first hop. Two sort attempts sorted by hand after
+  `artifact.read`, one asked for duplicate removal it was not granted.
+- Calibration 3 (plural folding in memory search, ADR 0038): $0.233 for 130
+  attempts at the list price; 128/130 verified; Recall@5 clean 45/45,
+  long_use 43/45 (two P3 second hops); semantic, tool, schedule, safety and
+  resource gates pass. Median completion: memory 2.8 s clean / 5.8 s
+  long_use, schedule 1.8 s, sort 11.1 s, mixed 11.8 s / 18.3 s. Budgets in
+  `eval/task017/budgets-v1.json` are frozen from this run; answer grading is
+  still open.

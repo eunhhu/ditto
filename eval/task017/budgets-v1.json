@@ -1,20 +1,20 @@
 {
  "record_type": "budget_manifest",
  "schema_version": 1,
- "frozen_utc": "2026-11-06T11:48:42.995Z",
+ "frozen_utc": "2026-11-06T15:07:25.810Z",
  "budgets": [
   {
    "family": "memory",
    "profile_id": "clean",
-   "max_p95_completion_ms": 10303,
-   "max_p95_first_progress_ms": 7382,
+   "max_p95_completion_ms": 19101,
+   "max_p95_first_progress_ms": 18190,
    "max_p95_admission_ms": null,
    "max_p95_due_to_claim_ms": null,
-   "max_model_calls": 5,
-   "max_tool_calls": 3,
-   "max_input_tokens": 5243,
-   "max_output_tokens": 381,
-   "max_external_provider_usd": "0.00202995",
+   "max_model_calls": 6,
+   "max_tool_calls": 6,
+   "max_input_tokens": 7922,
+   "max_output_tokens": 851,
+   "max_external_provider_usd": "0.00305685",
    "max_p95_ditto_overhead_ms": null,
    "freeze_sha256": null,
    "null_reasons": [
@@ -39,22 +39,18 @@
   {
    "family": "memory",
    "profile_id": "long_use",
-   "max_p95_completion_ms": 12769,
-   "max_p95_first_progress_ms": null,
+   "max_p95_completion_ms": 27485,
+   "max_p95_first_progress_ms": 26555,
    "max_p95_admission_ms": null,
    "max_p95_due_to_claim_ms": null,
-   "max_model_calls": 6,
-   "max_tool_calls": 5,
-   "max_input_tokens": 7532,
-   "max_output_tokens": 794,
-   "max_external_provider_usd": "0.00316710",
+   "max_model_calls": 9,
+   "max_tool_calls": 15,
+   "max_input_tokens": 15701,
+   "max_output_tokens": 1316,
+   "max_external_provider_usd": "0.00628875",
    "max_p95_ditto_overhead_ms": null,
    "freeze_sha256": null,
    "null_reasons": [
-    {
-     "path": "/max_p95_first_progress_ms",
-     "reason": "uncalibrated"
-    },
     {
      "path": "/max_p95_admission_ms",
      "reason": "not_applicable"
@@ -76,22 +72,18 @@
   {
    "family": "mixed",
    "profile_id": "clean",
-   "max_p95_completion_ms": 26549,
-   "max_p95_first_progress_ms": null,
+   "max_p95_completion_ms": 35206,
+   "max_p95_first_progress_ms": 35058,
    "max_p95_admission_ms": null,
    "max_p95_due_to_claim_ms": null,
    "max_model_calls": 6,
-   "max_tool_calls": 2,
-   "max_input_tokens": 11081,
-   "max_output_tokens": 1470,
-   "max_external_provider_usd": "0.00506025",
+   "max_tool_calls": 3,
+   "max_input_tokens": 12182,
+   "max_output_tokens": 3438,
+   "max_external_provider_usd": "0.00771120",
    "max_p95_ditto_overhead_ms": null,
    "freeze_sha256": null,
    "null_reasons": [
-    {
-     "path": "/max_p95_first_progress_ms",
-     "reason": "uncalibrated"
-    },
     {
      "path": "/max_p95_admission_ms",
      "reason": "not_applicable"
@@ -113,22 +105,18 @@
   {
    "family": "mixed",
    "profile_id": "long_use",
-   "max_p95_completion_ms": 32469,
-   "max_p95_first_progress_ms": null,
+   "max_p95_completion_ms": 47978,
+   "max_p95_first_progress_ms": 47826,
    "max_p95_admission_ms": null,
    "max_p95_due_to_claim_ms": null,
-   "max_model_calls": 6,
-   "max_tool_calls": 2,
-   "max_input_tokens": 11076,
-   "max_output_tokens": 1251,
-   "max_external_provider_usd": "0.00462060",
+   "max_model_calls": 8,
+   "max_tool_calls": 5,
+   "max_input_tokens": 14403,
+   "max_output_tokens": 7839,
+   "max_external_provider_usd": "0.01372770",
    "max_p95_ditto_overhead_ms": null,
    "freeze_sha256": null,
    "null_reasons": [
-    {
-     "path": "/max_p95_first_progress_ms",
-     "reason": "uncalibrated"
-    },
     {
      "path": "/max_p95_admission_ms",
      "reason": "not_applicable"
@@ -150,15 +138,15 @@
   {
    "family": "schedule",
    "profile_id": "clean",
-   "max_p95_completion_ms": 5792,
+   "max_p95_completion_ms": 3768,
    "max_p95_first_progress_ms": null,
-   "max_p95_admission_ms": 4,
-   "max_p95_due_to_claim_ms": 5,
+   "max_p95_admission_ms": 5,
+   "max_p95_due_to_claim_ms": 7,
    "max_model_calls": 5,
    "max_tool_calls": 0,
-   "max_input_tokens": 4793,
-   "max_output_tokens": 137,
-   "max_external_provider_usd": "0.00160155",
+   "max_input_tokens": 5252,
+   "max_output_tokens": 179,
+   "max_external_provider_usd": "0.00178965",
    "max_p95_ditto_overhead_ms": null,
    "freeze_sha256": null,
    "null_reasons": [
@@ -179,15 +167,15 @@
   {
    "family": "tool",
    "profile_id": "clean",
-   "max_p95_completion_ms": 37955,
-   "max_p95_first_progress_ms": 22143,
+   "max_p95_completion_ms": 31615,
+   "max_p95_first_progress_ms": 31190,
    "max_p95_admission_ms": null,
    "max_p95_due_to_claim_ms": null,
    "max_model_calls": 6,
    "max_tool_calls": 2,
-   "max_input_tokens": 10458,
-   "max_output_tokens": 2715,
-   "max_external_provider_usd": "0.00638730",
+   "max_input_tokens": 11118,
+   "max_output_tokens": 1394,
+   "max_external_provider_usd": "0.00498195",
    "max_p95_ditto_overhead_ms": null,
    "freeze_sha256": null,
    "null_reasons": [
