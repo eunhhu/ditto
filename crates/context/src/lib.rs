@@ -2215,11 +2215,18 @@ fn relevance_score(
     query_tokens: &HashSet<String>,
     selection: ContextSelection,
 ) -> f32 {
-    let node_tokens = selection.tokens(&node.summary);
+    recall_score(node, query_tokens, &selection.tokens(&node.summary))
+}
+
+fn recall_score(
+    node: &ContextNode,
+    query_tokens: &HashSet<String>,
+    node_tokens: &HashSet<String>,
+) -> f32 {
     let overlap = if query_tokens.is_empty() {
         0.0
     } else {
-        query_tokens.intersection(&node_tokens).count() as f32 / query_tokens.len() as f32
+        query_tokens.intersection(node_tokens).count() as f32 / query_tokens.len() as f32
     };
 
     if overlap == 0.0 {
@@ -2246,10 +2253,13 @@ pub fn lexical_recall<'a>(
     nodes: impl IntoIterator<Item = &'a ContextNode>,
 ) -> Vec<&'a ContextNode> {
     let selection = ContextSelection::CompleteSet;
-    let query_tokens = selection.tokens(query);
+    let query_tokens = singular_tokens(selection.tokens(query));
     let mut scored = nodes
         .into_iter()
-        .map(|node| (relevance_score(node, &query_tokens, selection), node))
+        .map(|node| {
+            let node_tokens = singular_tokens(selection.tokens(&node.summary));
+            (recall_score(node, &query_tokens, &node_tokens), node)
+        })
         .filter(|(score, _)| *score > 0.0)
         .collect::<Vec<_>>();
     scored.sort_by(|(left_score, left), (right_score, right)| {
@@ -2350,6 +2360,37 @@ fn tokenize(input: &str) -> HashSet<String> {
         .filter(|token| token.chars().count() > 1)
         .map(str::to_lowercase)
         .collect()
+}
+
+/// Memory search matches a word and its plural: "flight" finds "My flights
+/// originate in Lakeside". Only regular English plural endings are folded,
+/// so a search never matches a different word; the context compiler keeps
+/// exact words, since its selection is part of the complete-set contract.
+fn singular_tokens(tokens: HashSet<String>) -> HashSet<String> {
+    tokens.into_iter().map(|token| singular(&token)).collect()
+}
+
+fn singular(token: &str) -> String {
+    let length = token.chars().count();
+    if length > 4 && token.ends_with("ies") {
+        return format!("{}y", &token[..token.len() - 3]);
+    }
+    if length > 4
+        && ["ches", "shes", "sses", "xes", "zes"]
+            .iter()
+            .any(|ending| token.ends_with(ending))
+    {
+        return token[..token.len() - 2].to_owned();
+    }
+    if length > 3
+        && token.ends_with('s')
+        && !["ss", "us", "is"]
+            .iter()
+            .any(|ending| token.ends_with(ending))
+    {
+        return token[..token.len() - 1].to_owned();
+    }
+    token.to_owned()
 }
 
 /// English function words that identify no fact. Spatial, temporal and
@@ -2507,6 +2548,19 @@ mod tests {
         assert!(ids("what is the").is_empty());
         assert_eq!(ids("Miso?"), ["b-miso"]);
         assert!(ids("").is_empty());
+        // A word finds its regular plural and the plural finds the word.
+        assert_eq!(ids("dogs"), ["a-mochi", "b-miso", "c-dog"]);
+        assert_eq!(ids("parks"), ["c-dog"]);
+        let flights = [node("x-flight", "My flights originate in Lakeside.")];
+        let found = |query: &str| lexical_recall(query, &flights).len();
+        assert_eq!(found("departure city flight travel"), 1);
+        assert_eq!(found("which city do I depart from"), 0);
+        // Words that only look plural stay themselves.
+        assert_eq!(super::singular("bus"), "bus");
+        assert_eq!(super::singular("glass"), "glass");
+        assert_eq!(super::singular("boxes"), "box");
+        assert_eq!(super::singular("cities"), "city");
+        assert_eq!(super::singular("is"), "is");
     }
 
     fn node(id: &str, summary: &str) -> ContextNode {

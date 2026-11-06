@@ -47,6 +47,12 @@ for replay, the cost ADR 0028 declined.
   memory search is lexical. Contract 15's instructions say so and ask the
   model to search before saying it does not know, to try the words a memory
   may use, and to follow a memory that points to another place or object.
+- **Plural folding in memory search.** Calibration 2 still missed a memory
+  because "flight" did not find "My flights originate in Lakeside". Memory
+  search now folds regular English plural endings on both the query and the
+  memory before matching. The context compiler keeps exact words, so its
+  complete-set selection is unchanged. Memory search is recomputed on replay,
+  so this belongs to contract 15.
 - Replay rebuilds the same sequence from the recorded calls. Turns recorded
   under contract 14 stay readable but replay rejects them (ADR 0034).
 
