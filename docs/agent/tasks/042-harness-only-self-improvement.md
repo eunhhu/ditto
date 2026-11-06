@@ -156,15 +156,23 @@ Measured facts, with the runs that produced them:
   seven reworded memory searches (`reading group`, `book club`, `Birch Room`,
   `get-together venue`, `party venue pub restaurant`, `reading`, `gathering place
   meeting`) and never answered. The guidance told it to search and never said
-  when to stop. Base `P2`: 10/10 answers, Recall@5 10/10, mean 5.0 requests and
-  a 11.4 s median on `long_use` (requests 7, 6, 4, 5, 3). Candidate D adds a stop
-  rule ("two searches are usually enough; once a search returns the memory that
-  answers the request, answer instead of rephrasing"): 10/10 answers, Recall
-  10/10, mean **4.4** requests and **9.3 s** median on `long_use`, $0.0212 →
-  $0.0191 per case. The `clean` profile nudged the other way (mean 2.2 → 2.6
-  requests) on five samples each, so this is a promising direction, not a
-  demonstrated gain: the next probe repeats it with ten repetitions per profile
-  and adds a second case from the same family.
+  when to stop. D adds a plain stop rule ("two searches are usually enough;
+  once a search returns the memory that answers the request, answer instead of
+  rephrasing"). Two rounds of `P2`, ten attempts per profile: answers 10/10 and
+  Recall@5 10/10 on both sides; `long_use` mean requests **5.10 -> 3.90**,
+  median completion **11.4 s -> 6.7 s**, spend **$0.0311 -> $0.0211**; `clean`
+  drifted the other way (2.30 -> 2.50 requests). Pointed at `P3`, the same rule
+  cost recall (17/20 -> 15/20) because it also stopped before the second hop.
+- **Candidate E tried to keep the pointer hop and lost on both counts.** Wording
+  it as "stop unless the memory points at something else" raised `P2`/`long_use`
+  to 6.2 requests and 21.2 s (base 5.2 / 11.4 s) and left `P3`/`long_use` recall
+  at 7/10, so the round failed `semantic` outright. Both D and E are `KEEP_BASE`.
+- **What the three rounds actually teach.** Prose that adds a *condition* makes
+  the model search more; prose that adds a *stop* makes it stop too early on the
+  chained case. Wording is saturated. The next lever is deterministic: a
+  per-turn cap on memory searches that the kernel enforces and states in the
+  tool result ("two searches used; answer with what you have"), which needs no
+  model call and cannot be argued away by the model.
 
 
 Every probe was one command:

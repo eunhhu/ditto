@@ -1,0 +1,15 @@
+{
+  "name": "p2p3-pointer-aware-stop-e",
+  "note": "The plain stop rule cut P2 search loops (5.1 to 3.9 requests) but lowered P3 recall (17/20 to 15/20) because it also stopped before following a pointer. This version stops only when the returned memory answers the request outright, and keeps following when that memory points at a place, an object or a person.",
+  "edits": [
+    {
+      "file": "crates/kernel/src/turn/shared.rs",
+      "find": "and when a memory points to something else, such as a place or an object, search for that too.",
+      "replace": "and when a memory points to something else, such as a place or an object, search for that too. Stop searching once a search returns the memory that answers the request, unless that memory points at something else: follow the pointer once, then answer rather than rephrasing the same search."
+    }
+  ],
+  "cases": [
+    "P2",
+    "P3"
+  ]
+}
