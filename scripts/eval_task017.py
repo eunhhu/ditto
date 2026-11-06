@@ -19,6 +19,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+from decimal import Decimal
 import os
 import platform
 import random
@@ -1500,7 +1501,7 @@ def compute_gates(report: dict, suite: dict, get, manifest: dict) -> list[tuple[
             rates[profile] = rate
             if rate < 0.90:
                 fails.append(f"{profile} answer pass {rate:.3f} < 0.90")
-        for cid in {a["case_id"] for a in group}:
+        for cid in sorted({a["case_id"] for a in group}):
             reps = [a for a in group if a["case_id"] == cid]
             if sum(map(passed, reps)) / len(reps) < 0.80:
                 fails.append(f"{cid}/{profile} case pass < 0.80")
@@ -1516,7 +1517,7 @@ def compute_gates(report: dict, suite: dict, get, manifest: dict) -> list[tuple[
         rate = sum(map(verified, artifact)) / len(artifact)
         if rate < 0.90:
             fails.append(f"artifact tasks {rate:.3f} < 0.90")
-        for cp in {(a["case_id"], a["profile_id"]) for a in artifact}:
+        for cp in sorted({(a["case_id"], a["profile_id"]) for a in artifact}):
             group = [a for a in artifact if (a["case_id"], a["profile_id"]) == cp]
             if sum(map(verified, group)) / len(group) < 0.80:
                 fails.append(f"{cp} < 0.80")
@@ -1848,12 +1849,15 @@ def freeze_budgets(calibration: Path, out: Path, headroom: float):
         groups.setdefault((family[a["case_id"]], a["profile_id"]), []).append(a["resources"])
     budgets = []
     for (fam, profile), rs in sorted(groups.items()):
+        # Unobserved samples (a failed or unavailable attempt) carry a null reason in the
+        # calibration report and are excluded; a p95 ceiling still needs 20 observed samples.
         def ceil_p95(field):
-            values = [r[field] for r in rs]
-            return None if None in values or not values else math.ceil(nearest_rank(values, 0.95) * headroom)
+            values = [r[field] for r in rs if r[field] is not None]
+            return math.ceil(nearest_rank(values, 0.95) * headroom) if len(values) >= 20 else None
         def ceil_max(field):
-            values = [r[field] for r in rs]
-            return None if None in values else math.ceil(max(values) * headroom)
+            values = [r[field] for r in rs if r[field] is not None]
+            return math.ceil(max(values) * headroom) if values else None
+        usd = [Decimal(r["external_provider_usd"]) for r in rs if r["external_provider_usd"] is not None]
         schedule = fam == "schedule"
         b = {"family": fam, "profile_id": profile,
              "max_p95_completion_ms": ceil_p95("completion_ms"),
@@ -1862,7 +1866,7 @@ def freeze_budgets(calibration: Path, out: Path, headroom: float):
              "max_p95_due_to_claim_ms": ceil_p95("due_to_claim_ms") if schedule else None,
              "max_model_calls": ceil_max("model_calls"), "max_tool_calls": ceil_max("tool_calls"),
              "max_input_tokens": ceil_max("input_tokens"), "max_output_tokens": ceil_max("output_tokens"),
-             "max_external_provider_usd": "0" if all(r["external_provider_usd"] == "0" for r in rs) else None,
+             "max_external_provider_usd": format(max(usd) * Decimal(str(headroom)), "f") if usd else None,
              "max_p95_ditto_overhead_ms": None, "freeze_sha256": None}
         reasons = []
         for k in BUDGET_NULLABLE:
