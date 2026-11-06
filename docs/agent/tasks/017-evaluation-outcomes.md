@@ -549,7 +549,7 @@ Facts worth keeping:
   dropped the "above the fridge" hop; `X1`/`long_use`#1 sorted the artifact but
   reported no departure city while the memory held Lakeside). The twenty-two
   item second review is still open, so the answer gate has never passed and no
-  readership claim follows from these campaigns.
+  readiness claim follows from these campaigns.
 
 ## v0.1 milestone decision
 

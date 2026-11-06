@@ -212,6 +212,28 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
+## Latest work: Task 042, a harness-side search budget
+
+- A turn makes at most three `memory.search` calls; a fourth returns
+  `limit_reached` without searching ([ADR 0029](../adr/0029-memory-search-tool.md)).
+  The tool stays on the surface, so the prompt prefix and the stable-surface
+  invariant are unchanged, and replay recomputes both the search and the
+  refusal. The turn-scoped counter lives in `TurnScope.memory_searches`, and
+  `tool_replay` carries `memory_search_count` so journals recorded before the
+  budget still replay.
+- Why: one `P2`/`long_use` turn in campaign 4 spent seven reworded searches
+  (`reading group`, `book club`, `Birch Room`, `get-together venue`, `party
+  venue pub restaurant`, `reading`, `gathering place meeting`) after it had
+  already read the fact, and failed `bound_exceeded` with no answer.
+- Measured against the alternative: prompt edits asking the model to stop cut
+  that loop but also stopped a legitimate pointer hop (`P3` recall 17/20 to
+  15/20), and a pointer-aware wording raised requests from 5.2 to 6.2. Two
+  searches lost a fact a third query would have found (recall 5/5 to 4/5);
+  three restored it at 4.8 requests and a 10.7 s median against 5.2 and 11.4 s.
+  Five attempts per profile, so this is recorded as a bound, not a gain; the
+  loop did not reproduce in any later round.
+- Kernel tests: 101 in `read_only_turn`, `agent-check.sh` exit 0.
+
 ## Latest verified slice: Task 036
 
 - [Contract and evidence](tasks/036-reading-found-pages.md) (ADR 0037), turn
