@@ -551,6 +551,33 @@ Facts worth keeping:
   item second review is still open, so the answer gate has never passed and no
   readiness claim follows from these campaigns.
 
+## Campaign 5 (the search budget in place)
+
+130 attempts, 130 verified, $0.2296. `integrity`, `safety`, `tool`,
+`schedule` and `resource` pass; `semantic` fails at long-use recall 0.889 and
+`cost_latency` fails; `answer` stays ungraded.
+
+- The semantic failure is one case, `P3`/`long_use` at 5 of 10. Its misses are
+  not the search budget: those turns made one model call, searched nothing, and
+  answered "You keep the spare key inside the saffron tin" - the capsule held
+  the first memory of a two-hop pair and not the second, and the model answered
+  without following the pointer. A repeat round measured 6 of 10, so the case
+  sits at five or six of ten, not at ten.
+- The cause is selection, not wording. `recall_score` scores a node by the words
+  it shares with the request; "the saffron tin is above the fridge" shares none
+  with "where is the spare key", so the complete set excludes it as irrelevant
+  and the pointer is left to the model. Half the time the model does not take it.
+- `cost_latency` misses by 15 percent on `memory`/`long_use` (completion p95
+  31.6 s against 27.5 s) in an hour when even a `P2`/`clean` turn took 18.6 s
+  against its usual 2.5 s, and by one millisecond on `schedule`/`clean`
+  admission (6 ms against 5 ms). No failed turn this time, and no refusal of a
+  memory search anywhere in the run.
+- Next slice: one-hop pointer closure in the capsule. A memory that names an
+  object a second memory places should bring that second memory with it, chosen
+  by a word rare among the candidates, at most two nodes, without a model call.
+  It is a compiler contract change - a new receipt reason and score rule, and a
+  turn contract version - so it needs its own documentation before code.
+
 ## v0.1 milestone decision
 
 The first milestone is **blocked** until a versioned suite, a pre-frozen
