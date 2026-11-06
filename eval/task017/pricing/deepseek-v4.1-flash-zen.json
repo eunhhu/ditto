@@ -1,0 +1,11 @@
+{
+  "basis": "OpenCode Zen pay-as-you-go list price for DeepSeek V4.1 Flash (https://opencode.ai/v2/docs/console/models/). The run uses the OpenCode Go subscription, but cost is priced at the metered list rate so efficiency stays comparable across assistants. Cached-read tokens are not separated in usage, so every input token is priced as uncached (conservative upper bound).",
+  "dated": "2026-11-06",
+  "model": "deepseek-v4.1-flash",
+  "provider": "opencode-zen",
+  "usd_per_input_token": "0.0000003",
+  "usd_per_output_token": "0.0000012",
+  "reference_usd_per_cached_input_token": "0.000000006",
+  "reference_deepseek_official_peak": {"input": "0.0000003", "output": "0.0000012"},
+  "reference_deepseek_official_off_peak": {"input": "0.00000015", "output": "0.0000006"}
+}

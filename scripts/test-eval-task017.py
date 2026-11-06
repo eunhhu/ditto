@@ -1,0 +1,151 @@
+"""Task 037: suite v1 integrity, the evidence validator's adversaries and a real dry-run boundary."""
+import copy
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("eval_task017", ROOT / "scripts/eval_task017.py")
+ev = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ev)
+SUITE = ROOT / "eval/task017/suite-v1.json"
+DAEMON = ROOT / "target/debug/ditto-daemon"
+
+
+class Suite(unittest.TestCase):
+    def test_frozen_suite_is_valid_and_covers_the_minimum(self):
+        suite = ev.strict_loads(SUITE.read_bytes())
+        self.assertEqual(ev.suite_errors(suite), [])
+        ids = {c["case_id"] for c in suite["cases"]}
+        self.assertLessEqual({"P1", "P2", "P3", "P4", "P5", "T1", "T2", "S1", "S2", "X1"}, ids)
+        self.assertEqual(len(ev.planned_attempts(suite)), 130)
+
+    def test_suite_rejections(self):
+        suite = ev.strict_loads(SUITE.read_bytes())
+        long_use = next(i for i, p in enumerate(suite["profiles"]) if p["profile_id"] == "long_use")
+        for mutate in (lambda s: s["cases"].pop(0), lambda s: s["cases"][0].update(repetitions=4),
+                       lambda s: s["profiles"][long_use].update(unrelated_memories=999),
+                       lambda s: s["cases"][0].update(profiles=["clean"]),
+                       lambda s: s["cases"].append(copy.deepcopy(s["cases"][0]))):
+            broken = copy.deepcopy(suite)
+            mutate(broken)
+            self.assertNotEqual(ev.suite_errors(broken), [], mutate)
+
+    def test_pinned_fixture_digest_reproduces(self):
+        suite = ev.strict_loads(SUITE.read_bytes())
+        pinned = next(p for p in suite["profiles"] if p["profile_id"] == "long_use")["inert_header_fixture_sha256"]
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                digest = ev.build_inert_fixture(Path(tmp) / "fixture")
+            except (OSError, subprocess.CalledProcessError) as error:
+                self.skipTest(f"header tool unavailable: {error}")
+        self.assertEqual(digest, pinned)
+
+    def test_duplicate_keys_and_constants_are_refused(self):
+        for text in ('{"a":1,"a":2}', '{"a":NaN}'):
+            with self.assertRaises(ValueError):
+                ev.strict_loads(text)
+
+    def test_nearest_rank(self):
+        self.assertEqual(ev.nearest_rank(list(range(1, 21)), 0.95), 19)
+        self.assertEqual(ev.nearest_rank([5], 0.95), 5)
+
+    def test_cost_uses_decimal_list_price(self):
+        pricing = json.loads((ROOT / "eval/task017/pricing/deepseek-v4.1-flash-zen.json").read_text())
+        self.assertEqual(ev.price(pricing, 1_000_000, 1_000_000), "1.5")
+
+
+@unittest.skipUnless(DAEMON.exists() and shutil.which("strace"), "needs target/debug/ditto-daemon and strace")
+class DryRunBoundary(unittest.TestCase):
+    """One real dry-run over the daemon; every adversary mutates a copy of its output."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="ditto-eval-test-"))
+        cls.run_dir = cls.tmp / "run"
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/eval_task017.py"), "run", "--dry-run", "--daemon", str(DAEMON),
+             "--build-profile", "debug", "--pricing", str(ROOT / "eval/task017/pricing/dry-run-zero.json"),
+             "--out", str(cls.run_dir), "--cases", "T1", "T2"],
+            cwd=ROOT, capture_output=True, text=True, timeout=900, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        if result.returncode:
+            raise AssertionError(result.stdout[-2000:] + result.stderr[-2000:])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def errors(self, run_dir):
+        return ev.report_errors(run_dir, SUITE.read_bytes())
+
+    def copy(self):
+        target = Path(tempfile.mkdtemp(dir=self.tmp)) / "run"
+        shutil.copytree(self.run_dir, target, symlinks=True)
+        return target
+
+    def rewrite(self, run_dir, mutate):
+        path = run_dir / "report.json"
+        report = json.loads(path.read_text())
+        mutate(report)
+        path.write_text(json.dumps(report))
+
+    def test_honest_dry_run_validates_and_never_claims_readiness(self):
+        self.assertEqual(self.errors(self.run_dir), [])
+        report = json.loads((self.run_dir / "report.json").read_text())
+        self.assertEqual(report["readiness"], "blocked")
+        gates = {g["gate_id"]: g["state"] for g in report["gates"]}
+        self.assertEqual(gates["integrity"], "blocked")
+        self.assertEqual(gates["safety"], "pass")
+        self.assertEqual(gates["tool"], "pass")
+        self.assertTrue(all(c["seed_model_calls"] == 0 and c["idle_model_calls"] == 0 for c in report["controls"]))
+
+    def test_forged_gate_state_is_invalid(self):
+        run = self.copy()
+        self.rewrite(run, lambda r: (r["gates"][0].update(state="pass"), r.update(readiness="pass")))
+        self.assertTrue(self.errors(run))
+
+    def test_dropped_attempt_is_invalid(self):
+        run = self.copy()
+        self.rewrite(run, lambda r: r["attempts"].pop())
+        self.assertTrue(self.errors(run))
+
+    def test_null_without_reason_is_invalid(self):
+        run = self.copy()
+
+        def drop(report):
+            attempt = next(a for a in report["attempts"] if a["null_reasons"])
+            attempt["null_reasons"].pop()
+        self.rewrite(run, drop)
+        self.assertTrue(self.errors(run))
+
+    def test_tampered_evidence_object_is_invalid(self):
+        run = self.copy()
+        report = json.loads((run / "report.json").read_text())
+        index = run / report["evidence_index_path"]
+        entry = json.loads(index.read_text())["entries"][0]
+        target = index.parent / entry["relative_path"]
+        target.write_bytes(target.read_bytes() + b" ")
+        self.assertTrue(self.errors(run))
+
+    def test_symlinked_evidence_is_invalid(self):
+        run = self.copy()
+        report = json.loads((run / "report.json").read_text())
+        index = run / report["evidence_index_path"]
+        entry = json.loads(index.read_text())["entries"][0]
+        target = index.parent / entry["relative_path"]
+        outside = self.tmp / f"outside-{os.getpid()}"
+        outside.write_bytes(target.read_bytes())
+        target.unlink()
+        target.symlink_to(outside)
+        self.assertTrue(self.errors(run))
+
+
+if __name__ == "__main__":
+    unittest.main()
