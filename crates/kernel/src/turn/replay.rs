@@ -211,6 +211,8 @@ struct ReplayProjector<'turn, 'snapshot> {
     /// memory writes made (ADR 0031).
     read_external_content: bool,
     memory_write_count: u32,
+    /// Searches a turn has replayed, against the per-turn budget.
+    memory_search_count: u32,
     /// The agent tool calls replayed, in order (ADR 0036).
     tool_calls: Vec<ReplayedToolCall>,
     events: &'turn [EventRecord],
@@ -355,6 +357,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             recall_space: None,
             read_external_content: false,
             memory_write_count: 0,
+            memory_search_count: 0,
             tool_calls: Vec::new(),
             events,
             snapshot,

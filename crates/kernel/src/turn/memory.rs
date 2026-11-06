@@ -35,6 +35,11 @@ const MAX_QUERY_CHARS: usize = 200;
 pub const MAX_MEMORY_TEXT_CHARS: usize = 500;
 /// Memory writes one turn may make.
 pub const MAX_MEMORY_WRITES: u32 = 3;
+/// Memory searches one turn may make. A second search is what follows a pointer
+/// from the first; past that the model is rephrasing a query it already asked,
+/// and a turn that keeps doing so spends its whole request budget without
+/// answering (ADR 0029, per-turn search budget).
+pub const MAX_MEMORY_SEARCHES: u32 = 2;
 /// The lease that bounds a turn's memory writes.
 pub(crate) const LEASE_ID: &str = "agent-memory";
 /// A memory Ditto inferred is likely, not asserted by the user.

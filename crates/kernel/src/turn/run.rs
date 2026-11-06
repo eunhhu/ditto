@@ -78,6 +78,8 @@ pub(super) struct TurnScope {
     web_grant: super::web::WebGrant,
     /// Whether `memory.manage` is offered: to every agent run.
     memory_offered: bool,
+    /// Searches this turn has made against the per-turn budget.
+    memory_searches: Cell<u8>,
     /// Prelude transitions awaiting the turn's next append, which commits
     /// them with it in one transaction (ADR 0028 Phase B).
     staged: RefCell<Vec<(String, NewEvent)>>,
@@ -337,6 +339,7 @@ impl DittoKernel {
                 super::web::WebGrant::default()
             },
             memory_offered: agent_run.is_some(),
+            memory_searches: Cell::new(0),
             staged: RefCell::default(),
             pending_text: RefCell::default(),
         };

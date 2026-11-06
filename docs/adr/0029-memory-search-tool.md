@@ -52,6 +52,19 @@ Agent runs are offered a builtin `memory.search` tool:
 - **Surface.** From turn payload version 8 the tool is part of every agent
   run's stable tool surface while its package is installed; a missing or
   altered package withdraws it. Legacy artifact turns never see it.
+- **Budget.** A turn makes at most two searches: the first for the fact, the
+  second to follow a pointer that fact named. A third and later search returns
+  `limit_reached` without searching, and the tool stays on the surface so the
+  prompt prefix is unchanged. The budget exists because a turn that keeps
+  rephrasing a query it already asked spends its whole eight-request budget
+  without answering: in the Task 017 suite one `long_use` turn spent seven
+  requests on `reading group`, `book club`, `Birch Room`, `get-together venue`,
+  `party venue pub restaurant`, `reading` and `gathering place meeting`, then
+  failed `bound_exceeded`. Prose that asks the model to stop was measured
+  against this and lost: a plain stop rule cut the rephrasing on that case but
+  also stopped the pointer hop (recall 17/20 to 15/20), and a pointer-aware
+  version raised requests from 5.2 to 6.2. The budget is enforced by the
+  harness, not requested in the prompt.
 - **Cost.** A turn keeps its compilation and a shared reference to the
   session snapshot it chose from; the searchable memories are gathered only
   at the first search, and replay rebuilds them only for a turn that

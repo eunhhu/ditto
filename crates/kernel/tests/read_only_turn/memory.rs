@@ -197,6 +197,33 @@ async fn a_search_finds_a_memory_the_context_budget_left_out() {
 }
 
 #[tokio::test]
+async fn a_third_search_in_one_turn_is_refused() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    save_memory(kernel, "personal", "The reading group meets at the Birch Room", None);
+    let (status, driver) = ask(
+        kernel,
+        "Where should I go for the reading group get-together?",
+        vec![
+            search("reading group"),
+            search("get-together venue"),
+            search("where to go"),
+            final_script(&["The Birch Room."]),
+        ],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let results = tool_results(driver.requests().last().unwrap());
+    assert!(results[0]["memories"].is_array(), "{}", results[0]);
+    assert!(results[1]["memories"].is_array(), "{}", results[1]);
+    // A turn searches twice: the fact, then a pointer the fact named. Past that
+    // the model is rephrasing a question it already asked.
+    assert_eq!(results[2], json!({ "error": "limit_reached" }));
+    kernel.shutdown_agent_runs().await.unwrap();
+    replays(&fixture, &status.turn_id);
+}
+
+#[tokio::test]
 async fn a_search_returns_only_what_the_user_asserted() {
     let fixture = Fixture::new();
     let kernel = &fixture.kernel;

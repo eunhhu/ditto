@@ -276,8 +276,21 @@ impl<'turn> ReplayProjector<'turn, '_> {
                         .ok_or_else(|| replay_invalid("memory search precedes the context"))?;
                     self.recall_space = Some(self.rebuild_recall_space(context)?);
                 }
-                result
-                    == MemoryResult::search(query, self.recall_space.as_deref().unwrap_or_default())
+                // Past the per-turn budget a search is refused, so a recorded
+                // refusal is consistent when the count already reached it.
+                // Journals from before the budget still hold the result they
+                // computed, and replays of them keep working.
+                let used = self.memory_search_count;
+                let expected = if used >= memory_tool::MAX_MEMORY_SEARCHES {
+                    MemoryResult::Refused {
+                        code: memory_tool::MemoryRefusal::LimitReached,
+                    }
+                } else {
+                    MemoryResult::search(query, self.recall_space.as_deref().unwrap_or_default())
+                };
+                result == expected
+                    || (used >= memory_tool::MAX_MEMORY_SEARCHES
+                        && matches!(result, MemoryResult::Found { .. }))
             }
             _ => {
                 let snapshot = self.snapshot;
@@ -330,6 +343,10 @@ impl<'turn> ReplayProjector<'turn, '_> {
         self.memory_write_count += u32::from(matches!(
             result,
             MemoryResult::Remembered { .. } | MemoryResult::Forgotten { .. }
+        ));
+        self.memory_search_count += u32::from(matches!(
+            action.as_ref(),
+            Some(MemoryAction::Search { .. }) if matches!(result, MemoryResult::Found { .. })
         ));
         let record = ReplayedToolCall {
             requested: request,

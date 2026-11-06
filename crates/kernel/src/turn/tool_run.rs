@@ -4,7 +4,7 @@
 use super::super::memory as memory_tool;
 use super::super::memory::{MemoryAction, MemoryDeriver, MemoryRefusal, MemoryResult};
 use super::super::sort::{SortToolError, SortToolResult};
-use super::super::tool::{LeaseRefusal, STOPPED, ToolOutput, ToolRequested, ToolStarted};
+use super::super::tool::{LeaseRefusal, ToolOutput, ToolRequested, ToolStarted, STOPPED};
 use super::super::web::{self, WebResult, WebToolError};
 use super::*;
 use crate::TrustedContextNodeDraft;
@@ -320,18 +320,33 @@ impl DittoKernel {
             .await?;
         let result = match (invocation, action) {
             (Some(invocation), Some(MemoryAction::Search { query })) => {
-                let now = Utc::now();
-                match authorizer.authorize_static(&invocation, &StaticPolicy::memory_search(), now)
-                {
-                    Ok(AuthorizationOutcome::Permitted(permit))
-                        if permit.validate(&invocation, now).is_ok() =>
-                    {
-                        MemoryResult::search(&query, space)
+                // A turn searches twice at most: the first search for the fact,
+                // the second to follow a pointer it named. Refusing past that
+                // keeps the tool surface stable while stopping the rephrasing
+                // loop that spent the whole request budget without answering.
+                let used = scope.memory_searches.get();
+                if u32::from(used) >= memory_tool::MAX_MEMORY_SEARCHES {
+                    MemoryResult::Refused {
+                        code: MemoryRefusal::LimitReached,
                     }
-                    _ => {
-                        return Err(TurnRunError::Internal(
-                            "memory search static policy contradicted its contract",
-                        ));
+                } else {
+                    let now = Utc::now();
+                    match authorizer.authorize_static(
+                        &invocation,
+                        &StaticPolicy::memory_search(),
+                        now,
+                    ) {
+                        Ok(AuthorizationOutcome::Permitted(permit))
+                            if permit.validate(&invocation, now).is_ok() =>
+                        {
+                            scope.memory_searches.set(used + 1);
+                            MemoryResult::search(&query, space)
+                        }
+                        _ => {
+                            return Err(TurnRunError::Internal(
+                                "memory search static policy contradicted its contract",
+                            ));
+                        }
                     }
                 }
             }
