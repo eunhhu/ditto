@@ -52,8 +52,9 @@ Agent runs are offered a builtin `memory.search` tool:
 - **Surface.** From turn payload version 8 the tool is part of every agent
   run's stable tool surface while its package is installed; a missing or
   altered package withdraws it. Legacy artifact turns never see it.
-- **Budget.** A turn makes at most two searches: the first for the fact, the
-  second to follow a pointer that fact named. A third and later search returns
+- **Budget.** A turn makes at most three searches: the fact, a pointer that
+  fact named, and one more wording when a query matched nothing. A fourth and
+  later search returns
   `limit_reached` without searching, and the tool stays on the surface so the
   prompt prefix is unchanged. The budget exists because a turn that keeps
   rephrasing a query it already asked spends its whole eight-request budget

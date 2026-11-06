@@ -197,7 +197,7 @@ async fn a_search_finds_a_memory_the_context_budget_left_out() {
 }
 
 #[tokio::test]
-async fn a_third_search_in_one_turn_is_refused() {
+async fn a_fourth_search_in_one_turn_is_refused() {
     let fixture = Fixture::new();
     let kernel = &fixture.kernel;
     save_memory(kernel, "personal", "The reading group meets at the Birch Room", None);
@@ -208,17 +208,20 @@ async fn a_third_search_in_one_turn_is_refused() {
             search("reading group"),
             search("get-together venue"),
             search("where to go"),
+            search("meeting place"),
             final_script(&["The Birch Room."]),
         ],
     )
     .await;
     assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
     let results = tool_results(driver.requests().last().unwrap());
-    assert!(results[0]["memories"].is_array(), "{}", results[0]);
-    assert!(results[1]["memories"].is_array(), "{}", results[1]);
-    // A turn searches twice: the fact, then a pointer the fact named. Past that
-    // the model is rephrasing a question it already asked.
-    assert_eq!(results[2], json!({ "error": "limit_reached" }));
+    for found in &results[..3] {
+        assert!(found["memories"].is_array(), "{found}");
+    }
+    // A turn searches three times: the fact, a pointer it named, and one more
+    // wording when a query matched nothing. Past that the model is rephrasing a
+    // question it already asked.
+    assert_eq!(results[3], json!({ "error": "limit_reached" }));
     kernel.shutdown_agent_runs().await.unwrap();
     replays(&fixture, &status.turn_id);
 }
