@@ -71,8 +71,20 @@ asked to finish Ditto quickly so it can replace the current assistant
   about $0.0018 per attempt at the list price.
 - Seeding 1,000 memories on the Pi's SD card showed 11–25 s stalls on single
   memory writes while other runs competed for I/O; seed calls now allow
-  180 s. Whether the stall reproduces in isolation is still open.
+  180 s.
 - `scripts/test-eval-task017.py`: suite rejections, fixture digest
   reproduction, decimal pricing, and a real dry run whose report is forged,
   truncated, stripped of a null reason, tampered and symlinked — each
   rejected by `validate`.
+- Calibration 1 (DeepSeek V4.1 Flash via OpenCode Go, release build, turn
+  contract 14): $0.178 for 130 attempts at the list price; schedule 20/20 and
+  sort artifacts 20/20 verified. 16 attempts (12%) failed because the
+  provider ignored `parallel_tool_calls: false` and the kernel refused a
+  second ready call - two memory searches, or an artifact read and its sort.
+  `long_use` Recall@5 0.625: the model searched only with the request's words
+  (P2), stopped after the first hop (P3), or did not search memory while
+  sorting (X1). This led to turn contract 15 (ADR 0038) and its memory search
+  instructions; the calibration is kept as the contract-14 baseline.
+- The seed stalls are most likely SQLite WAL checkpoints (`synchronous=NORMAL`
+  syncs only there) on the SD card, the Pi's only disk (unconfirmed); seeding
+  is setup outside every measured attempt.

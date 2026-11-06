@@ -129,7 +129,8 @@ and checks establish a new fact.
   eight model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. Agent tool calls share
   one `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
-  There is one turn contract, version 14 (ADR 0034): replay rejects turns
+  There is one turn contract, version 15 (ADR 0034; 0038 runs the ready
+  calls of a response in order): replay rejects turns
   recorded under any other version, while status and thread history still
   read their answers.
   The contract carries typed failure reasons (ADR 0021), the thread's recent

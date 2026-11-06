@@ -16,11 +16,14 @@ use crate::KernelError;
 /// recorded under an earlier contract stay in the journal, and their answers
 /// stay readable in run status and conversation history, but replay rejects
 /// them.
-pub const TURN_PAYLOAD_VERSION: u16 = 14;
+pub const TURN_PAYLOAD_VERSION: u16 = 15;
 /// Oldest contract whose terminal events run status still reads: their
 /// shape has not changed.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
 pub const MAX_MODEL_REQUESTS: usize = 8;
+/// Ready tool calls one model request may yield; they run one after another
+/// in call order (ADR 0038).
+pub const MAX_READY_CALLS_PER_REQUEST: usize = 4;
 pub const MAX_MODEL_EVENTS_PER_REQUEST: usize = 4_096;
 pub const MAX_ASSISTANT_TEXT_BYTES: usize = 256 * 1_024;
 pub const MAX_MODEL_OUTPUT_EVENT_BYTES: usize = 320 * 1_024;

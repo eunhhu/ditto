@@ -36,11 +36,11 @@ use super::types::{
     CapabilitiesSelectedPayload, CapabilitiesSelectedRefPayload, CapabilityRequestedPayload,
     ContextCompiledPayload, ExecutionOutputPayload, ExecutionStartedPayload,
     MAX_ASSISTANT_TEXT_BYTES, MAX_MODEL_EVENTS_PER_REQUEST, MAX_MODEL_OUTPUT_BYTES_PER_REQUEST,
-    MAX_MODEL_OUTPUT_EVENT_BYTES, MAX_MODEL_REQUESTS, MAX_TURN_DURATION,
-    MAX_TURN_FAILURE_MESSAGE_BYTES, ModelOutputPayload, ModelRequestDigestPayload,
-    ModelRequestedPayload, ReplayError, ReplayedArtifactReadCall, ReplayedReadOnlyTurn,
-    TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFailureEvidence,
-    TurnFailureReason, TurnFinishedPayload, TurnSequenceSpan,
+    MAX_MODEL_OUTPUT_EVENT_BYTES, MAX_MODEL_REQUESTS, MAX_READY_CALLS_PER_REQUEST,
+    MAX_TURN_DURATION, MAX_TURN_FAILURE_MESSAGE_BYTES, ModelOutputPayload,
+    ModelRequestDigestPayload, ModelRequestedPayload, ReplayError, ReplayedArtifactReadCall,
+    ReplayedReadOnlyTurn, TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode,
+    TurnFailureEvidence, TurnFailureReason, TurnFinishedPayload, TurnSequenceSpan,
 };
 
 #[derive(Debug, Deserialize)]
@@ -620,7 +620,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             let mut model_output_bytes = 0_usize;
             let mut previous_admitted_at: Option<DateTime<Utc>> = None;
             let mut tool_buffer = ToolCallBuffer::default();
-            let mut ready_call: Option<ReadyCall> = None;
+            let mut ready_calls: Vec<ReadyCall> = Vec::new();
             let mut request_text = String::new();
             let terminal;
             loop {
@@ -779,10 +779,12 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                             )?;
                             return Ok(ArtifactReadTurnReplay::Failed { failure });
                         }
-                        if ready_call.is_some() {
+                        if ready_calls.len() == MAX_READY_CALLS_PER_REQUEST {
                             let failure = self.take_exact_failure(
                                 TurnFailureCode::Protocol,
-                                "a model request produced more than one ready tool call",
+                                format!(
+                                    "a model request produced more than {MAX_READY_CALLS_PER_REQUEST} ready tool calls"
+                                ),
                                 Some(request_index as u8),
                                 Some(call_id.clone()),
                             )?;
@@ -804,7 +806,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                             )?;
                             return Ok(ArtifactReadTurnReplay::Failed { failure });
                         }
-                        ready_call = Some(ReadyCall {
+                        ready_calls.push(ReadyCall {
                             call_id: call_id.clone(),
                             capability_id: capability_id.clone(),
                             arguments: arguments.clone(),
@@ -899,7 +901,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         )?;
                         return Ok(ArtifactReadTurnReplay::Failed { failure });
                     }
-                    let Some(call) = ready_call else {
+                    let Some(first) = ready_calls.first() else {
                         let failure = self.take_exact_failure(
                             TurnFailureCode::Protocol,
                             "tool-call terminal contained no ready tool call",
@@ -913,213 +915,218 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                             TurnFailureCode::BoundExceeded,
                             format!("turn exhausted the {MAX_MODEL_REQUESTS}-request limit"),
                             Some(request_index as u8),
-                            Some(call.call_id.clone()),
+                            Some(first.call_id.clone()),
                         )?;
                         return Ok(ArtifactReadTurnReplay::Failed { failure });
                     }
-                    if self.next_is_failure() {
-                        let failure_event_time = self
-                            .events
-                            .get(self.index)
-                            .expect("next failure event is present")
-                            .recorded_at;
-                        let failure = self
-                            .take_failure()?
-                            .expect("next event was checked as turn.failed");
-                        let valid = self.valid_checkpoint_failure(
-                            &failure,
-                            failure_event_time,
-                            &[Checkpoint::BeforeCapabilityRequest],
-                        );
-                        if !valid
-                            || failure.request_index != Some(request_index as u8)
-                            || failure.call_id.as_ref() != Some(&call.call_id)
-                        {
-                            return Err(replay_invalid(
-                                "turn.failed is not valid before capability request",
-                            ));
-                        }
-                        return Ok(ArtifactReadTurnReplay::Failed { failure });
-                    }
-
-                    if call.capability_id != super::memory::ID {
-                        self.read_external_content = true;
-                    }
-                    let at = request_index as u8;
-                    let stopped = if call.capability_id == ditto_web_fetch::ID {
-                        Some(self.replay_web_call(at, &call)?)
-                    } else if call.capability_id == super::memory::ID {
-                        Some(self.replay_memory_call(at, &call)?)
-                    } else if call.capability_id == ditto_artifact_sort::ID {
-                        Some(self.replay_sort_call(at, &call)?)
-                    } else {
-                        None
-                    };
-                    match stopped {
-                        Some(Some(failure)) => {
+                    for call in ready_calls {
+                        if self.next_is_failure() {
+                            let failure_event_time = self
+                                .events
+                                .get(self.index)
+                                .expect("next failure event is present")
+                                .recorded_at;
+                            let failure = self
+                                .take_failure()?
+                                .expect("next event was checked as turn.failed");
+                            let valid = self.valid_checkpoint_failure(
+                                &failure,
+                                failure_event_time,
+                                &[Checkpoint::BeforeCapabilityRequest],
+                            );
+                            if !valid
+                                || failure.request_index != Some(request_index as u8)
+                                || failure.call_id.as_ref() != Some(&call.call_id)
+                            {
+                                return Err(replay_invalid(
+                                    "turn.failed is not valid before capability request",
+                                ));
+                            }
                             return Ok(ArtifactReadTurnReplay::Failed { failure });
                         }
-                        Some(None) => {
-                            request_index += 1;
-                            continue;
+
+                        if call.capability_id != super::memory::ID {
+                            self.read_external_content = true;
                         }
-                        None => {}
-                    }
-
-                    let capability_event =
-                        self.take(event_kind::CAPABILITY_REQUESTED, EventActor::Model)?;
-                    let capability: CapabilityRequestedPayload =
-                        self.decode_versioned(capability_event)?;
-                    self.require_turn_id(&capability.turn_id)?;
-                    if capability_event.span_id.as_deref() != Some(capability.call_id.as_str()) {
-                        return Err(replay_invalid(
-                            "capability.requested span id is inconsistent",
-                        ));
-                    }
-                    if capability.request_index as usize != request_index
-                        || capability.execution_epoch_id
-                            != self
-                                .execution_epoch_id
-                                .as_ref()
-                                .expect("selected epoch is set")
-                                .clone()
-                        || capability.call_id != call.call_id
-                        || capability.capability_id != ARTIFACT_READ_ID
-                        || capability.capability_version != ARTIFACT_READ_VERSION
-                        || capability.arguments != call.arguments
-                    {
-                        return Err(replay_invalid("capability request is not correlated"));
-                    }
-                    let normalized =
-                        ditto_artifact_read::ArtifactReadNormalizer.normalize(&call.arguments);
-                    match (&normalized, &capability.normalized) {
-                        (Ok(expected), Some(actual)) if expected == actual => {}
-                        (Err(_), None) => {}
-                        _ => {
-                            return Err(replay_invalid(
-                                "capability request normalization is inconsistent",
-                            ));
+                        let at = request_index as u8;
+                        let stopped = if call.capability_id == ditto_web_fetch::ID {
+                            Some(self.replay_web_call(at, &call)?)
+                        } else if call.capability_id == super::memory::ID {
+                            Some(self.replay_memory_call(at, &call)?)
+                        } else if call.capability_id == ditto_artifact_sort::ID {
+                            Some(self.replay_sort_call(at, &call)?)
+                        } else {
+                            None
+                        };
+                        match stopped {
+                            Some(Some(failure)) => {
+                                return Ok(ArtifactReadTurnReplay::Failed { failure });
+                            }
+                            Some(None) => {
+                                continue;
+                            }
+                            None => {}
                         }
-                    }
 
-                    let call_projection_index = self.calls.len();
-                    self.calls.push(ReplayedArtifactReadCall {
-                        requested: capability.clone(),
-                        started: None,
-                        output: None,
-                    });
-
-                    if self.next_is_failure() {
-                        let failure_event_time = self
-                            .events
-                            .get(self.index)
-                            .expect("next failure event is present")
-                            .recorded_at;
-                        let failure = self
-                            .take_failure()?
-                            .expect("next event was checked as turn.failed");
-                        let valid = self.valid_checkpoint_failure(
-                            &failure,
-                            failure_event_time,
-                            &[Checkpoint::AfterCapabilityRequest],
-                        );
-                        if !valid
-                            || failure.request_index != Some(request_index as u8)
-                            || failure.call_id.as_ref() != Some(&call.call_id)
+                        let capability_event =
+                            self.take(event_kind::CAPABILITY_REQUESTED, EventActor::Model)?;
+                        let capability: CapabilityRequestedPayload =
+                            self.decode_versioned(capability_event)?;
+                        self.require_turn_id(&capability.turn_id)?;
+                        if capability_event.span_id.as_deref() != Some(capability.call_id.as_str())
                         {
                             return Err(replay_invalid(
-                                "turn.failed is not valid after capability request",
+                                "capability.requested span id is inconsistent",
                             ));
                         }
-                        return Ok(ArtifactReadTurnReplay::Failed { failure });
-                    }
-
-                    let started_event =
-                        self.take(event_kind::EXECUTION_STARTED, EventActor::Capability)?;
-                    let started: ExecutionStartedPayload = self.decode_versioned(started_event)?;
-                    self.require_turn_id(&started.turn_id)?;
-                    if started_event.span_id.as_deref() != Some(started.call_id.as_str()) {
-                        return Err(replay_invalid("execution.started span id is inconsistent"));
-                    }
-                    if started.request_index as usize != request_index
-                        || started.call_id != call.call_id
-                        || started.capability_id != ARTIFACT_READ_ID
-                        || started.capability_version != ARTIFACT_READ_VERSION
-                        || started.authorization_through_seq < capability_event.seq
-                        || started.authorization_through_seq >= started_event.seq
-                    {
-                        return Err(replay_invalid("execution start is not correlated"));
-                    }
-                    match (&normalized, &started.resource) {
-                        (Ok(expected), Some(actual)) if expected == actual => {}
-                        (Err(_), None) => {}
-                        _ => {
-                            return Err(replay_invalid(
-                                "execution resource does not match strict normalization",
-                            ));
-                        }
-                    }
-                    self.calls[call_projection_index].started = Some(started.clone());
-
-                    if self.next_is_failure() {
-                        let failure_event_time = self
-                            .events
-                            .get(self.index)
-                            .expect("next failure event is present")
-                            .recorded_at;
-                        let failure = self
-                            .take_failure()?
-                            .expect("next event was checked as turn.failed");
-                        let valid_checkpoint_failure = self.valid_checkpoint_failure(
-                            &failure,
-                            failure_event_time,
-                            &[
-                                Checkpoint::AfterExecutionStarted,
-                                Checkpoint::AfterArtifactRead,
-                            ],
-                        );
-                        if !valid_checkpoint_failure
-                            || failure.request_index != Some(request_index as u8)
-                            || failure.call_id.as_ref() != Some(&call.call_id)
+                        if capability.request_index as usize != request_index
+                            || capability.execution_epoch_id
+                                != self
+                                    .execution_epoch_id
+                                    .as_ref()
+                                    .expect("selected epoch is set")
+                                    .clone()
+                            || capability.call_id != call.call_id
+                            || capability.capability_id != ARTIFACT_READ_ID
+                            || capability.capability_version != ARTIFACT_READ_VERSION
+                            || capability.arguments != call.arguments
                         {
+                            return Err(replay_invalid("capability request is not correlated"));
+                        }
+                        let normalized =
+                            ditto_artifact_read::ArtifactReadNormalizer.normalize(&call.arguments);
+                        match (&normalized, &capability.normalized) {
+                            (Ok(expected), Some(actual)) if expected == actual => {}
+                            (Err(_), None) => {}
+                            _ => {
+                                return Err(replay_invalid(
+                                    "capability request normalization is inconsistent",
+                                ));
+                            }
+                        }
+
+                        let call_projection_index = self.calls.len();
+                        self.calls.push(ReplayedArtifactReadCall {
+                            requested: capability.clone(),
+                            started: None,
+                            output: None,
+                        });
+
+                        if self.next_is_failure() {
+                            let failure_event_time = self
+                                .events
+                                .get(self.index)
+                                .expect("next failure event is present")
+                                .recorded_at;
+                            let failure = self
+                                .take_failure()?
+                                .expect("next event was checked as turn.failed");
+                            let valid = self.valid_checkpoint_failure(
+                                &failure,
+                                failure_event_time,
+                                &[Checkpoint::AfterCapabilityRequest],
+                            );
+                            if !valid
+                                || failure.request_index != Some(request_index as u8)
+                                || failure.call_id.as_ref() != Some(&call.call_id)
+                            {
+                                return Err(replay_invalid(
+                                    "turn.failed is not valid after capability request",
+                                ));
+                            }
+                            return Ok(ArtifactReadTurnReplay::Failed { failure });
+                        }
+
+                        let started_event =
+                            self.take(event_kind::EXECUTION_STARTED, EventActor::Capability)?;
+                        let started: ExecutionStartedPayload =
+                            self.decode_versioned(started_event)?;
+                        self.require_turn_id(&started.turn_id)?;
+                        if started_event.span_id.as_deref() != Some(started.call_id.as_str()) {
                             return Err(replay_invalid(
-                                "turn.failed is not valid at the execution checkpoint",
+                                "execution.started span id is inconsistent",
                             ));
                         }
-                        return Ok(ArtifactReadTurnReplay::Failed { failure });
+                        if started.request_index as usize != request_index
+                            || started.call_id != call.call_id
+                            || started.capability_id != ARTIFACT_READ_ID
+                            || started.capability_version != ARTIFACT_READ_VERSION
+                            || started.authorization_through_seq < capability_event.seq
+                            || started.authorization_through_seq >= started_event.seq
+                        {
+                            return Err(replay_invalid("execution start is not correlated"));
+                        }
+                        match (&normalized, &started.resource) {
+                            (Ok(expected), Some(actual)) if expected == actual => {}
+                            (Err(_), None) => {}
+                            _ => {
+                                return Err(replay_invalid(
+                                    "execution resource does not match strict normalization",
+                                ));
+                            }
+                        }
+                        self.calls[call_projection_index].started = Some(started.clone());
+
+                        if self.next_is_failure() {
+                            let failure_event_time = self
+                                .events
+                                .get(self.index)
+                                .expect("next failure event is present")
+                                .recorded_at;
+                            let failure = self
+                                .take_failure()?
+                                .expect("next event was checked as turn.failed");
+                            let valid_checkpoint_failure = self.valid_checkpoint_failure(
+                                &failure,
+                                failure_event_time,
+                                &[
+                                    Checkpoint::AfterExecutionStarted,
+                                    Checkpoint::AfterArtifactRead,
+                                ],
+                            );
+                            if !valid_checkpoint_failure
+                                || failure.request_index != Some(request_index as u8)
+                                || failure.call_id.as_ref() != Some(&call.call_id)
+                            {
+                                return Err(replay_invalid(
+                                    "turn.failed is not valid at the execution checkpoint",
+                                ));
+                            }
+                            return Ok(ArtifactReadTurnReplay::Failed { failure });
+                        }
+                        let output_event =
+                            self.take(event_kind::EXECUTION_OUTPUT, EventActor::Capability)?;
+                        let output: ExecutionOutputPayload = self.decode_versioned(output_event)?;
+                        self.require_turn_id(&output.turn_id)?;
+                        if output_event.span_id.as_deref() != Some(output.call_id.as_str()) {
+                            return Err(replay_invalid("execution.output span id is inconsistent"));
+                        }
+                        if output.request_index as usize != request_index
+                            || output.call_id != call.call_id
+                            || output.capability_id != ARTIFACT_READ_ID
+                            || output.capability_version != ARTIFACT_READ_VERSION
+                        {
+                            return Err(replay_invalid("execution output is not correlated"));
+                        }
+                        let authorized = normalized.as_ref().is_ok_and(|resource| {
+                            self.artifact_is_authorized_in_snapshot(
+                                resource,
+                                started.authorization_through_seq,
+                            )
+                        });
+                        validate_execution_result(&normalized, &output.result, authorized)?;
+                        self.calls[call_projection_index].output = Some(output.clone());
+                        let result_value = serde_json::to_value(&output.result)
+                            .map_err(|error| replay_invalid(error.to_string()))?;
+                        self.conversation.push(ConversationItem::ToolResult {
+                            call_id: call.call_id,
+                            content: vec![ContentPart::Structured {
+                                value: result_value,
+                            }],
+                            is_error: output.result.is_error(),
+                        });
+                        self.tool_call_count = self.tool_call_count.saturating_add(1);
                     }
-                    let output_event =
-                        self.take(event_kind::EXECUTION_OUTPUT, EventActor::Capability)?;
-                    let output: ExecutionOutputPayload = self.decode_versioned(output_event)?;
-                    self.require_turn_id(&output.turn_id)?;
-                    if output_event.span_id.as_deref() != Some(output.call_id.as_str()) {
-                        return Err(replay_invalid("execution.output span id is inconsistent"));
-                    }
-                    if output.request_index as usize != request_index
-                        || output.call_id != call.call_id
-                        || output.capability_id != ARTIFACT_READ_ID
-                        || output.capability_version != ARTIFACT_READ_VERSION
-                    {
-                        return Err(replay_invalid("execution output is not correlated"));
-                    }
-                    let authorized = normalized.as_ref().is_ok_and(|resource| {
-                        self.artifact_is_authorized_in_snapshot(
-                            resource,
-                            started.authorization_through_seq,
-                        )
-                    });
-                    validate_execution_result(&normalized, &output.result, authorized)?;
-                    self.calls[call_projection_index].output = Some(output.clone());
-                    let result_value = serde_json::to_value(&output.result)
-                        .map_err(|error| replay_invalid(error.to_string()))?;
-                    self.conversation.push(ConversationItem::ToolResult {
-                        call_id: call.call_id,
-                        content: vec![ContentPart::Structured {
-                            value: result_value,
-                        }],
-                        is_error: output.result.is_error(),
-                    });
-                    self.tool_call_count = self.tool_call_count.saturating_add(1);
                     request_index += 1;
                 }
                 ModelEvent::Completed {
@@ -1135,7 +1142,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                         )?;
                         return Ok(ArtifactReadTurnReplay::Failed { failure });
                     }
-                    if let Some(call) = ready_call {
+                    if let Some(call) = ready_calls.into_iter().next() {
                         let failure = self.take_exact_failure(
                             TurnFailureCode::Protocol,
                             "non-tool terminal followed a ready tool call",

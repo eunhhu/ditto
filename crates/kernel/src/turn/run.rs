@@ -49,9 +49,9 @@ use super::types::{
     CapabilityRequestedPayload, ContextCompiledPayload, ExecutionOutputPayload,
     ExecutionStartedPayload, MAX_ASSISTANT_TEXT_BYTES, MAX_MODEL_EVENTS_PER_REQUEST,
     MAX_MODEL_OUTPUT_BYTES_PER_REQUEST, MAX_MODEL_OUTPUT_EVENT_BYTES, MAX_MODEL_REQUESTS,
-    MAX_TURN_DURATION, ModelOutputPayload, ModelRequestDigestPayload, ReadOnlyTurnControl,
-    TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFailureEvidence,
-    TurnFailureReason, TurnFinishedPayload, TurnRunError,
+    MAX_READY_CALLS_PER_REQUEST, MAX_TURN_DURATION, ModelOutputPayload, ModelRequestDigestPayload,
+    ReadOnlyTurnControl, TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode,
+    TurnFailureEvidence, TurnFailureReason, TurnFinishedPayload, TurnRunError,
 };
 
 #[derive(Clone)]
@@ -149,7 +149,7 @@ struct TurnTotals {
 /// The validated terminal state of one model request.
 struct ModelResponse {
     finish_reason: FinishReason,
-    ready_call: Option<ReadyCall>,
+    ready_calls: Vec<ReadyCall>,
     text: String,
 }
 
@@ -908,10 +908,10 @@ impl DittoKernel {
                 .stream_model_response(run, request_index, &request, &mut conversation, &mut totals)
                 .await?;
             if response.finish_reason == FinishReason::ToolCalls {
-                self.execute_tool_call(
+                self.execute_tool_calls(
                     run,
                     request_index,
-                    response.ready_call,
+                    response.ready_calls,
                     &tools,
                     &mut conversation,
                     &mut totals,
@@ -1014,7 +1014,7 @@ impl DittoKernel {
         // its own, and the two together never pass the request's bound.
         let mut model_output_bytes = 0_usize;
         let mut tool_buffer = ToolCallBuffer::default();
-        let mut ready_call: Option<ReadyCall> = None;
+        let mut ready_calls: Vec<ReadyCall> = Vec::new();
         let mut request_text = String::new();
         // When text last became durable. Text after a quiet interval commits
         // at once, so coalescing never delays the first words of a burst.
@@ -1218,11 +1218,13 @@ impl DittoKernel {
                     arguments,
                 } => {
                     self.ensure_known_capability(run, index, call_id, capability_id)?;
-                    if ready_call.is_some() {
+                    if ready_calls.len() == MAX_READY_CALLS_PER_REQUEST {
                         return Err(self.fail(
                             run,
                             TurnFailureCode::Protocol,
-                            "a model request produced more than one ready tool call",
+                            format!(
+                                "a model request produced more than {MAX_READY_CALLS_PER_REQUEST} ready tool calls"
+                            ),
                             index,
                             Some(call_id.clone()),
                         ));
@@ -1245,7 +1247,7 @@ impl DittoKernel {
                             Some(call_id.clone()),
                         ));
                     }
-                    ready_call = Some(ReadyCall {
+                    ready_calls.push(ReadyCall {
                         call_id: call_id.clone(),
                         capability_id: capability_id.clone(),
                         arguments: arguments.clone(),
@@ -1309,7 +1311,7 @@ impl DittoKernel {
                     }
                     return Ok(ModelResponse {
                         finish_reason: finish_reason.clone(),
-                        ready_call,
+                        ready_calls,
                         text: request_text,
                     });
                 }
@@ -1318,19 +1320,21 @@ impl DittoKernel {
         }
     }
 
-    /// Execute the one ready call of a `ToolCalls` terminal and append its
-    /// structured result to the conversation.
-    async fn execute_tool_call(
+    /// Execute the ready calls of a `ToolCalls` terminal one after another,
+    /// in the order the model produced them, appending each structured
+    /// result to the conversation. Providers may return several calls even
+    /// when parallel calls are forbidden; each keeps its own lifecycle.
+    async fn execute_tool_calls(
         &self,
         run: &mut TurnRun<'_>,
         request_index: usize,
-        ready_call: Option<ReadyCall>,
+        ready_calls: Vec<ReadyCall>,
         tools: &TurnTools,
         conversation: &mut Vec<ConversationItem>,
         totals: &mut TurnTotals,
     ) -> Result<(), TurnRunError> {
         let index = Some(request_index as u8);
-        let Some(call) = ready_call else {
+        let Some(first) = ready_calls.first() else {
             return Err(self.fail(
                 run,
                 TurnFailureCode::Protocol,
@@ -1340,14 +1344,33 @@ impl DittoKernel {
             ));
         };
         if request_index + 1 >= MAX_MODEL_REQUESTS {
+            let call_id = first.call_id.clone();
             return Err(self.fail(
                 run,
                 TurnFailureCode::BoundExceeded,
                 format!("turn exhausted the {MAX_MODEL_REQUESTS}-request limit"),
                 index,
-                Some(call.call_id),
+                Some(call_id),
             ));
         }
+        for call in ready_calls {
+            self.execute_tool_call(run, request_index, call, tools, conversation, totals)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Execute one ready call and append its structured result.
+    async fn execute_tool_call(
+        &self,
+        run: &mut TurnRun<'_>,
+        request_index: usize,
+        call: ReadyCall,
+        tools: &TurnTools,
+        conversation: &mut Vec<ConversationItem>,
+        totals: &mut TurnTotals,
+    ) -> Result<(), TurnRunError> {
+        let index = Some(request_index as u8);
 
         // Give cancellation a deterministic checkpoint after the provider
         // terminal and before any capability request is journaled.
@@ -1649,7 +1672,7 @@ impl DittoKernel {
         totals: &TurnTotals,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
         let index = Some(request_index as u8);
-        if let Some(call) = response.ready_call {
+        if let Some(call) = response.ready_calls.into_iter().next() {
             return Err(self.fail(
                 run,
                 TurnFailureCode::Protocol,
