@@ -4,7 +4,7 @@
 use super::super::memory as memory_tool;
 use super::super::memory::{MemoryAction, MemoryDeriver, MemoryRefusal, MemoryResult};
 use super::super::sort::{SortToolError, SortToolResult};
-use super::super::tool::{LeaseRefusal, ToolOutput, ToolRequested, ToolStarted, STOPPED};
+use super::super::tool::{LeaseRefusal, STOPPED, ToolOutput, ToolRequested, ToolStarted};
 use super::super::web::{self, WebResult, WebToolError};
 use super::*;
 use crate::TrustedContextNodeDraft;

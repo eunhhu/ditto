@@ -200,7 +200,12 @@ async fn a_search_finds_a_memory_the_context_budget_left_out() {
 async fn a_fourth_search_in_one_turn_is_refused() {
     let fixture = Fixture::new();
     let kernel = &fixture.kernel;
-    save_memory(kernel, "personal", "The reading group meets at the Birch Room", None);
+    save_memory(
+        kernel,
+        "personal",
+        "The reading group meets at the Birch Room",
+        None,
+    );
     let (status, driver) = ask(
         kernel,
         "Where should I go for the reading group get-together?",
