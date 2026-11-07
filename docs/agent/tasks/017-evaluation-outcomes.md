@@ -571,6 +571,37 @@ signature - bounded at two extra tries - and records the count as
 Ditto, so it must not become one; an attempt that spent tokens or carries a
 failure reason is never retried.
 
+## Campaign 10 (the attachment compiled before the model asks)
+
+ADR 0041 landed before this run: a turn that holds a sort permission compiles
+its attachment into the context after selection, with the canonical receipt
+reason `prefetch-attachment`. The suite is unchanged, so this campaign measures
+that slice alone.
+
+| measure | campaign 9 | campaign 10 |
+| --- | --- | --- |
+| observed attempts | 129 / 130 | **130 / 130** |
+| model requests per turn | 2.26 | **2.00** |
+| memory family | 1.96 | 1.96 |
+| schedule family | 1.75 | 1.75 |
+| tool family (artifact) | 2.80 | **2.10** |
+| mixed family | 2.64 | **2.12** |
+| mean input tokens | 3,491 | **3,094** |
+| spend | $0.1826 | **$0.1547** |
+
+Seven gates pass: integrity, safety, semantic, tool, schedule, resource, and the
+answer gate is blocked only because its second reading is outstanding. The first
+pass graded 110 items with 96 pass, 14 review and no failure.
+
+`cost_latency` fails, and the reason is the provider rather than the harness:
+turn p50 is 5.5 s (already inside the 6 s bar) while p95 is 58.9 s and the worst
+turn took 100 s. The same binary produced 2.08 s per request at calibration and
+4.9 s in campaign 9. This is the case the `harness_ms` / `provider_ms` split was
+approved for; until it exists, the absolute gate measures the provider's day.
+
+What remains between 2.00 and the 1.3 bar is the sort itself. An artifact turn
+still spends one request on `artifact.sort` and one on the answer.
+
 ## Campaigns 8 and 9 (the retry, and a verifier correction)
 
 **Campaign 8** ran the same binary with a healthy provider: **130 of 130
