@@ -936,6 +936,24 @@ class Campaign:
     # -- attempts -----------------------------------------------------------
 
     def immediate_attempt(self, daemon: Daemon, case: dict, profile_id: str, rep: int, labels: dict, caps: Path):
+        """One attempt, re-asked when the provider answers with nothing.
+
+        A lost response is not a turn: one request, no token usage, no failure
+        reason. Counting it as an attempt would make a gate verdict depend on
+        the provider's mood, so it is re-run - bounded, and the count is
+        recorded rather than hidden.
+        """
+        attempt = self.attempt_once(daemon, case, profile_id, rep, labels, caps)
+        retries = 0
+        while retries < MAX_TRANSPORT_RETRIES and transport_loss(attempt):
+            retries += 1
+            attempt = self.attempt_once(daemon, case, profile_id, rep, labels, caps)
+        attempt["transport_retries"] = retries
+        if retries:
+            print(f"   {case['case_id']}/{profile_id}#{rep} retried after {retries} empty response(s)", flush=True)
+        self.attempts.append(attempt)
+
+    def attempt_once(self, daemon: Daemon, case: dict, profile_id: str, rep: int, labels: dict, caps: Path):
         session = session_name(case["case_id"], "task")
         daemon.api.ok("/v1/commands/conversation/reset", {"session_id": session})
         request_id = ulid()
@@ -954,8 +972,8 @@ class Campaign:
         task_id = status["task_id"]
         events = self.settle(daemon, after, task_id)
         wall_end = wall_of_day()
-        self.record_attempt(daemon, case, profile_id, rep, request_id, events, [status], labels, caps,
-                            t0=t0, admission_ms=None, wall=(wall_start, wall_end), schedule_facts=None)
+        return self.record_attempt(daemon, case, profile_id, rep, request_id, events, [status], labels, caps,
+                                   t0=t0, admission_ms=None, wall=(wall_start, wall_end), schedule_facts=None)
 
     def settle(self, daemon: Daemon, after: int, task_id: str, timeout=5.0) -> list[dict]:
         """Wait until the run's terminal turn event is journaled and timestamped."""
@@ -1085,12 +1103,13 @@ class Campaign:
         events = [e for e in session_events if e.get("task_id") in set(run_tasks) | {f"schedule_{plan['request_id']}"}
                   or e in claims]
         answer = next((s.get("response") for s in reversed(run_statuses) if s and s.get("response")), None)
-        self.record_attempt(daemon, case, profile_id, plan["rep"], plan["request_id"], events, run_statuses, {}, caps,
+        self.attempts.append(self.record_attempt(daemon, case, profile_id, plan["rep"], plan["request_id"], events,
+                                                 run_statuses, {}, caps,
                             t0=None, admission_ms=plan["admission_ms"], wall=batch["wall"],
                             schedule_facts={"verdict": verdict, "claim_ms": max(claim_latency) if claim_latency else None,
                                             "completion_ms": max(completion) if len(completion) == len(claims) and claims else None,
                                             "unavailable": not restarts_ok, "answer": answer,
-                                            "selected": batch["selected"]})
+                                            "selected": batch["selected"]}))
 
     def record_attempt(self, daemon, case, profile_id, rep, request_id, events, statuses, labels, caps, *, t0,
                        admission_ms, wall, schedule_facts):
@@ -1228,13 +1247,13 @@ class Campaign:
                                               else "not_observed")
         attempt["resources"] = res
         attempt["null_reasons"] = [{"path": k, "reason": v} for k, v in sorted(nulls.items())]
-        self.attempts.append(attempt)
         mark = {True: "ok", False: "FAIL", None: "?"}[independent]
         print(f"   {case['case_id']}/{profile_id}#{rep} {state} independent={mark} "
               f"completion={res['completion_ms'] and round(res['completion_ms'])}ms calls={calls}", flush=True)
         if oracle["answer_grade_required"] and answer is not None:
             self.grading_items.append({"case_id": case["case_id"], "profile_id": profile_id, "repetition": rep,
                                        "request": case["request"], "answer": answer})
+        return attempt
 
     # -- report -------------------------------------------------------------
 
@@ -1675,6 +1694,18 @@ def compute_gates(report: dict, suite: dict, get, manifest: dict) -> list[tuple[
         blocks.append("both profiles not recorded")
     done("resource", fails, blocks)
     return out
+
+
+MAX_TRANSPORT_RETRIES = 2
+
+
+def transport_loss(attempt: dict) -> bool:
+    """The provider answered with nothing: no tokens, no failure, one request."""
+    resources = attempt.get("resources") or {}
+    return (attempt.get("state") == "failed" and not attempt.get("failure")
+            and resources.get("input_tokens") is None
+            and resources.get("output_tokens") is None
+            and (resources.get("model_calls") or 0) <= 1)
 
 
 def _artifact_ok(verdict: dict) -> bool:

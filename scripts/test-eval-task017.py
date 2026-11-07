@@ -184,6 +184,31 @@ class StaleBinary(unittest.TestCase):
         self.assertGreaterEqual(newest, (ev.ROOT / "Cargo.toml").stat().st_mtime)
 
 
+class TransportLoss(unittest.TestCase):
+    """A provider that answers with nothing is re-asked, an ordinary failure is not."""
+
+    def attempt(self, **over):
+        base = {"state": "failed", "failure": None,
+                "resources": {"model_calls": 1, "input_tokens": None, "output_tokens": None}}
+        base.update(over)
+        return base
+
+    def test_empty_response_counts_as_transport_loss(self):
+        self.assertTrue(ev.transport_loss(self.attempt()))
+
+    def test_a_failure_with_a_reason_is_a_real_failure(self):
+        self.assertFalse(ev.transport_loss(self.attempt(failure="deadline")))
+
+    def test_a_turn_that_spent_tokens_is_not_a_lost_response(self):
+        self.assertFalse(ev.transport_loss(self.attempt(resources={"model_calls": 1, "input_tokens": 900,
+                                                                  "output_tokens": 12})))
+        self.assertFalse(ev.transport_loss(self.attempt(resources={"model_calls": 3, "input_tokens": None,
+                                                                  "output_tokens": None})))
+
+    def test_an_observed_turn_is_never_retried(self):
+        self.assertFalse(ev.transport_loss(self.attempt(state="observed")))
+
+
 class FailureLog(unittest.TestCase):
     """A store that fails to start must leave its daemon log in the run."""
 

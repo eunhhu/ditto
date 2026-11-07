@@ -178,7 +178,11 @@ separate budget manifest, evidence index and later attempt report. Each is a
 separate UTF-8 JSON document; objects are closed, all listed fields are
 required, and IDs are unique within their collection. The report's
 `suite_sha256` hashes the exact suite-file bytes,
-not a reserialized object. `evidence_index_sha256` identifies a retained index
+not a reserialized object. One attempt field is optional:
+`transport_retries` counts attempts the runner re-asked because the provider
+answered with nothing (one request, no token usage, no failure reason), so a
+lost response cannot decide a gate. Records made before it existed omit it.
+`evidence_index_sha256` identifies a retained index
 mapping every referenced content digest except its own to inspectable local
 bytes. `evidence_index_path` locates that index relative to the report. A report does not
 count as evidence if those bytes cannot be inspected. `freeze_sha256` identifies
@@ -369,6 +373,7 @@ declared semantics; `not_applicable` is distinct from missing measurement.
         "answer_grade": {"oneOf": [{"$ref": "#/$defs/grade"}, {"type": "null"}]},
         "false_completion": {"type": ["boolean", "null"]},
         "unexpected_interventions": {"type": "integer", "minimum": 0},
+        "transport_retries": {"type": "integer", "minimum": 0},
         "resources": {
           "type": "object", "additionalProperties": false,
           "required": ["completion_ms", "first_useful_progress_ms", "admission_ms", "due_to_claim_ms", "model_ms", "tool_ms", "ditto_overhead_ms", "model_calls", "tool_calls", "input_tokens", "output_tokens", "external_provider_usd", "total_operating_usd", "pricing_sha256", "server_peak_rss_bytes", "child_peak_rss_bytes", "retained_bytes", "inactive_body_loads"],
@@ -550,6 +555,21 @@ Facts worth keeping:
   reported no departure city while the memory held Lakeside). The twenty-two
   item second review is still open, so the answer gate has never passed and no
   readiness claim follows from these campaigns.
+
+### Campaign 7 and the transport retry
+
+A repeat on the same binary lost **28 of 130 attempts** (21.5%) to empty
+provider responses, every one of them one request with no token usage and no
+failure reason. That is worse than campaign 6, on the same code, so the loss is
+upstream and not a property of the harness. Observed attempts still gave recall
+35/35 clean and 35/36 long_use (0.972), and artifact turns 2.89 requests.
+
+Two full campaigns in a row cannot decide a gate when a fifth of the attempts
+never reach a turn. The runner now re-asks an attempt that shows exactly this
+signature - bounded at two extra tries - and records the count as
+`transport_retries` in the attempt. A lost response is not evidence about
+Ditto, so it must not become one; an attempt that spent tokens or carries a
+failure reason is never retried.
 
 ## Campaign 6 (pointer closure and the sort preview)
 

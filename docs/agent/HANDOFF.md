@@ -247,6 +247,13 @@ attempts (9 artifact attempts never reached a tool call; two genuine misses,
 T3/clean#4 and X4/long_use#5), so readiness is still `fail` pending a repeat on
 a healthy provider. Do not read campaign 6 as a harness regression.
 
+**Campaign 7 lost 28 attempts the same way** (21.5%, same signature: one
+request, no token usage, no failure reason), so the evaluation runner now
+re-asks exactly that signature up to two more times and records
+`transport_retries`. Two campaigns whose loss rate moves from 0 to 14 to 21.5
+percent on identical code measure the provider, not Ditto, and a gate verdict
+must not depend on it.
+
 ## Latest work: Task 042, a harness-side search budget
 
 - A turn makes at most three `memory.search` calls; a fourth returns
