@@ -683,6 +683,9 @@ def spans(events: list[dict], arrivals: dict, start_kind: str, end_kinds: set, k
     return None if open_ else total
 
 
+PREFETCH_NODE_PREFIX = "prefetch_attachment_"
+
+
 def memory_context(case: dict, events: list[dict], labels: dict) -> dict | None:
     """Rank-ordered returned context mapped to seeded source event IDs."""
     compiled = [e for e in events if e["kind"] == "context.compiled"]
@@ -691,6 +694,11 @@ def memory_context(case: dict, events: list[dict], labels: dict) -> dict | None:
     sources = labels.get("_node_sources", {})
     returned = []
     for node in compiled[0]["payload"]["compiled"]["nodes"]:
+        # A prefetched attachment is context the harness supplied from a grant the
+        # turn already held, not something retrieval returned; counting it would
+        # score the harness's own read as a false positive (ADR 0041).
+        if str(node.get("id", "")).startswith(PREFETCH_NODE_PREFIX):
+            continue
         returned += [s for s in node.get("source_event_ids") or [sources.get(node["id"], node["id"])] if s not in returned]
     for e in events:
         if e["kind"] == "tool.output" and e["payload"].get("capability_id") == "memory.manage":

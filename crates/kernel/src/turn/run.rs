@@ -446,7 +446,7 @@ impl DittoKernel {
         input_event: &EventRecord,
         prefetched: Option<ContextNode>,
     ) -> Result<(ContextCapsule, Vec<HistoryExchange>, Vec<InFlight>), TurnRunError> {
-        let (mut context_candidates, sources_verified, snapshot) = match context_candidates {
+        let (context_candidates, sources_verified, snapshot) = match context_candidates {
             Some(candidates) => (candidates.into_iter().collect(), false, None),
             None => match self.agent_context_candidates(
                 &run.scope.session_id,
@@ -469,9 +469,6 @@ impl DittoKernel {
                 }
             },
         };
-        if let Some(node) = prefetched {
-            context_candidates.push(ContextCandidate::ranked(node));
-        }
         let compiled = ContextCompiler::default()
             .compile_with_closure(
                 ContextSelection::CompleteSet,
@@ -491,6 +488,23 @@ impl DittoKernel {
                     None,
                 ),
             })?;
+        // The prefetched attachment rides with the compilation rather than
+        // competing for its budget, so a turn that carries an attachment cannot
+        // push a memory the turn needs out of the selection (ADR 0041).
+        let mut compiled = compiled;
+        if let Some(node) = prefetched {
+            let token_cost = ditto_context::ContextCapsuleItem::from(&node).token_cost();
+            compiled.receipt.included.push(ditto_context::ContextReceiptEntry {
+                node_id: node.id.clone(),
+                source_event_ids: node.source_event_ids.clone(),
+                epistemic: node.epistemic,
+                reason: ditto_context::PREFETCH_ATTACHMENT_REASON.into(),
+                score: 0.0,
+                token_cost,
+            });
+            compiled.receipt.total_token_cost += token_cost;
+            compiled.nodes.push(node);
+        }
         let capsule = ContextCapsule::from(&compiled);
         let provenance_through_seq = self.latest_event_seq()?;
         // Session-wide sources were checked once when the context was taken.

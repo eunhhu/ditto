@@ -1059,6 +1059,10 @@ impl ContextSelection {
 }
 
 const TASK_RELEVANCE_REASON: &str = "task-relevance";
+/// The turn supplied this node itself, from a source it was already granted
+/// (ADR 0041). It takes no part in ranking, so it carries no score and sorts
+/// after everything the compiler selected.
+pub const PREFETCH_ATTACHMENT_REASON: &str = "prefetch-attachment";
 const COMPLETE_SET_REASON: &str = "complete-set";
 
 #[derive(Debug, Clone, Copy)]
@@ -1468,7 +1472,13 @@ impl ContextCompiler {
                     actual: receipt.token_cost,
                 });
             }
-            if receipt.score.to_bits() != expected_score.to_bits() {
+            if receipt.reason == PREFETCH_ATTACHMENT_REASON {
+                if receipt.score != 0.0 {
+                    return Err(CompiledContextValidationError::ScoreMismatch {
+                        node_id: node.id.clone(),
+                    });
+                }
+            } else if receipt.score.to_bits() != expected_score.to_bits() {
                 return Err(CompiledContextValidationError::ScoreMismatch {
                     node_id: node.id.clone(),
                 });
@@ -1816,7 +1826,13 @@ impl ContextCompiler {
                     actual: receipt.token_cost,
                 });
             }
-            if receipt.score.to_bits() != expected_score.to_bits() {
+            if receipt.reason == PREFETCH_ATTACHMENT_REASON {
+                if receipt.score != 0.0 {
+                    return Err(CompiledContextValidationError::ScoreMismatch {
+                        node_id: node.id.clone(),
+                    });
+                }
+            } else if receipt.score.to_bits() != expected_score.to_bits() {
                 return Err(CompiledContextValidationError::ScoreMismatch {
                     node_id: node.id.clone(),
                 });
@@ -2257,6 +2273,7 @@ fn receipt_reason_priority(reason: &str, selection: ContextSelection) -> Option<
         TASK_RELEVANCE_REASON => Some(0),
         COMPLETE_SET_REASON if selection == ContextSelection::CompleteSet => Some(0),
         "user-pinned" => Some(1),
+        PREFETCH_ATTACHMENT_REASON => Some(3),
         _ if reason
             .strip_prefix("policy-required: ")
             .is_some_and(|policy_reason| !policy_reason.trim().is_empty()) =>
