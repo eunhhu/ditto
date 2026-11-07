@@ -16,8 +16,9 @@ use ditto_capability::{
     LiveExecutionEpoch, UntrustedToolCall, UntrustedToolCallError,
 };
 use ditto_context::{
-    CompiledContext, ContextCandidate, ContextCapsule, ContextCompileError, ContextCompiler,
-    ContextSelection, TaskSignature,
+    CompiledContext, ContextCandidate, ContextCapsule, ContextCompileError,
+    ContextCompiler, ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope,
+    ContextSelection, EpistemicStatus, TaskSignature,
 };
 use ditto_model::{
     CancellationToken, ContentPart, ConversationItem, ExecutionEpochId, FinishReason,
@@ -162,6 +163,11 @@ struct ModelResponse {
 const TEXT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(48);
 /// A chunk commits before it would pass this much text.
 const TEXT_CHUNK_BYTES: usize = 2 * 1_024;
+
+/// The attachment text a turn compiles into its context before its first model
+/// request (ADR 0041). Bounded, because it shares the capsule's token ceiling
+/// with the memories the turn selected.
+const PREFETCH_ATTACHMENT_BYTES: usize = 1_500;
 
 /// Coalesced text awaiting its commit, with its pre-assigned event ID so later
 /// transitions can name it as their cause.
@@ -412,8 +418,16 @@ impl DittoKernel {
         };
 
         self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
-        let (capsule, history, in_flight) =
-            self.compile_turn_context(&mut run, &text, context_candidates, &input_event)?;
+        // The attachment this turn was granted is part of its compiled context,
+        // so it is recorded with the compilation and replayed from it (ADR 0041).
+        let prefetched = self.prefetched_attachment(&run, &input_event)?;
+        let (capsule, history, in_flight) = self.compile_turn_context(
+            &mut run,
+            &text,
+            context_candidates,
+            &input_event,
+            prefetched,
+        )?;
         let tools = self.select_turn_tools(&mut run, &input_event)?;
         let text = latest_user_text(&text, run.accepted_at, run.utc_offset_minutes, &in_flight)
             .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
@@ -430,8 +444,9 @@ impl DittoKernel {
         text: &str,
         context_candidates: Option<impl IntoIterator<Item = ContextCandidate>>,
         input_event: &EventRecord,
+        prefetched: Option<ContextNode>,
     ) -> Result<(ContextCapsule, Vec<HistoryExchange>, Vec<InFlight>), TurnRunError> {
-        let (context_candidates, sources_verified, snapshot) = match context_candidates {
+        let (mut context_candidates, sources_verified, snapshot) = match context_candidates {
             Some(candidates) => (candidates.into_iter().collect(), false, None),
             None => match self.agent_context_candidates(
                 &run.scope.session_id,
@@ -454,6 +469,9 @@ impl DittoKernel {
                 }
             },
         };
+        if let Some(node) = prefetched {
+            context_candidates.push(ContextCandidate::ranked(node));
+        }
         let compiled = ContextCompiler::default()
             .compile_with_closure(
                 ContextSelection::CompleteSet,
@@ -933,6 +951,96 @@ impl DittoKernel {
 
     /// Build, validate, and journal one model request before driver I/O.
     /// Returns the request and its durable `model.requested` timestamp.
+    /// The attachment a sort permission names, as a context node the turn
+    /// compiles before its first model request (ADR 0041).
+    ///
+    /// The reference is fixed at admission and the artifact is content-addressed,
+    /// so the text is a property of the events already journaled: it compiles
+    /// with the rest of the context and replays from the recorded compilation.
+    /// What it buys is the round trip the model would otherwise spend asking
+    /// for text the harness is holding.
+    fn prefetched_attachment(
+        &self,
+        run: &TurnRun<'_>,
+        input_event: &EventRecord,
+    ) -> Result<Option<ContextNode>, TurnRunError> {
+        let Some(grant) = run.scope.sort.as_ref() else {
+            return Ok(None);
+        };
+        let reference = grant.reference.clone();
+        let Ok(artifact) = ArtifactRef::new(reference.clone()) else {
+            return Ok(None);
+        };
+        let Ok(Some(source)) = self.artifact_creation(&run.scope.session_id, &reference) else {
+            return Ok(None);
+        };
+        let Ok(read) = self.inner.artifacts.read_verified_range_with_object_limit(
+            &artifact,
+            0,
+            PREFETCH_ATTACHMENT_BYTES,
+            PREFETCH_ATTACHMENT_BYTES as u64,
+        ) else {
+            return Ok(None);
+        };
+        let Ok(text) = std::str::from_utf8(read.bytes()) else {
+            return Ok(None);
+        };
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ContextNode {
+            id: format!("prefetch_attachment_{}", input_event.seq),
+            kind: ContextNodeKind::Resource,
+            summary: format!(
+                "the attachment this turn was given, read in full at the start of the turn \
+                 ({} bytes, reference {reference}):\n{text}",
+                read.bytes().len()
+            ),
+            origin: ContextOrigin::System,
+            epistemic: EpistemicStatus::Verified,
+            scope: ContextScope::Session,
+            lens: ContextLens::Task,
+            confidence: 1.0,
+            source_event_ids: vec![source.event_id.clone()],
+            supersedes: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+        }))
+    }
+
+    /// The `artifact.created` event that makes `reference` readable in this
+    /// session, when there is one.
+    fn artifact_creation(
+        &self,
+        session: &str,
+        reference: &str,
+    ) -> Result<Option<EventRecord>, KernelError> {
+        let high_water = self.inner.events.latest_seq()?;
+        let mut query = EventQuery {
+            session_id: Some(session.to_owned()),
+            ..EventQuery::default()
+        };
+        loop {
+            query.limit = Some(1_000);
+            let page = self.list_events_through(&query, high_water)?;
+            if page.is_empty() {
+                return Ok(None);
+            }
+            let last_seq = page.last().map_or(0, |event| event.seq);
+            if let Some(found) = page.into_iter().find(|event| {
+                event.kind == event_kind::ARTIFACT_CREATED
+                    && event.actor == EventActor::System
+                    && event.payload.get("reference").and_then(Value::as_str) == Some(reference)
+            }) {
+                return Ok(Some(found));
+            }
+            if last_seq >= high_water {
+                return Ok(None);
+            }
+            query.after_seq = Some(last_seq);
+        }
+    }
+
     fn dispatch_model_request(
         &self,
         run: &mut TurnRun<'_>,

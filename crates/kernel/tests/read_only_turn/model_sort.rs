@@ -563,3 +563,42 @@ fn runtime_loss_after_sort_preserves_verified_result_without_reissuing_effect() 
     assert_eq!(kernel.event_count().unwrap(), count);
     assert_eq!(driver.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn the_attachment_is_compiled_before_the_model_asks_for_it() {
+    let fixture = Fixture::new();
+    let command = permitted(false);
+    let input = worker::input_reference(INPUT.as_bytes());
+    let output = worker::input_reference(b"a\nb\nb\n");
+    let driver = ScriptedDriver::new(vec![
+        sort_call("sort", &input, false),
+        final_script(&["Sorted the attachment."]),
+    ]);
+    let accepted = fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(status.status, AgentRunStatus::Unverified);
+    assert_eq!(
+        status.sort.as_ref().unwrap().state,
+        AgentSortState::Verified
+    );
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 2);
+    let compiled = serde_json::to_string(&requests[0].turn.context).unwrap();
+    assert!(
+        compiled.contains("the attachment this turn was given"),
+        "the compiled context names the prefetched attachment: {compiled}"
+    );
+    assert!(
+        compiled.contains("b\\na\\nb"),
+        "the compiled context carries the attachment text: {compiled}"
+    );
+    assert!(compiled.contains(&input));
+    let events = fixture.events_for_session("personal");
+    let replay = replay_artifact_read_turn(&events, &accepted.turn_id).unwrap();
+    assert_eq!(replay.requests.len(), 2);
+    assert_eq!(replay.tool_calls.len(), 1);
+    let _ = output;
+}
