@@ -29,8 +29,13 @@ After tool selection and before the first model request, the harness may run
   its content;
 - `artifact.sort` when a sort permission was granted with the turn.
 
-At most one prefetch runs per turn, under the same lease and verifier the model
-call would use. Its result is journaled as `tool.requested` with
+The prefetched text is **appended after selection**, with its own canonical
+receipt reason (`prefetch-attachment`), so it rides with the compilation instead
+of competing for its budget: a turn that carries an attachment can never push a
+memory it needs out of the selection. It is also journaled with the compilation
+rather than as a tool call, so replay derives it and the request digest is
+unchanged. At most one prefetch runs per turn, under the same lease and verifier
+the model call would use. Its result is journaled as `tool.requested` with
 `origin: prefetch` (a new field, `serde(default)`) followed by the ordinary
 `tool.output`, and the compiled prompt carries the result before any model
 request. The tool stays offered in the same request, so the model can still ask

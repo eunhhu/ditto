@@ -80,6 +80,26 @@ contract change. Move 4 is a configuration policy with a measurement.
 - Time to the first visible token under 2 s on p95, measured at the stream.
 - No new model call added per turn; the request body stays at or below 4.7 KB.
 
+## First measurement (probe, artifact families)
+
+Ten attempts per case, two profiles, same provider and suite, comparing model
+requests per turn against campaign 9:
+
+| case / profile | campaign 9 | with the prefetched attachment |
+| --- | --- | --- |
+| T1 / clean | 3.0 | 2.0 |
+| T4 / clean | 3.0 | 2.0 |
+| X1 / clean | 2.6 | 2.0 |
+| X1 / long_use | 3.4 | 2.8 |
+| X4 / clean | 2.75 | 2.0 |
+| X4 / long_use | 2.4 | 2.0 |
+
+The read round trip is gone from the sort tasks and from the attachment turns.
+Three things are still open: the provider was losing whole responses during the
+probe (retries and 60-90 s outliers), one X1 long_use attempt selected nine
+memories and dragged the aggregate precision to 0.53, and the full suite has not
+been re-run with the prefetch in place.
+
 ## The first slice
 
 Prefetch for the memory and artifact read paths, behind the capability page
