@@ -8,7 +8,7 @@ use super::*;
 use ditto_kernel::{ReplayedReadOnlyTurn, TrustedContextNodeDraft};
 use ditto_protocol::{AgentRunResponse, AgentRunStatus, MemoryQuery, UserMemory};
 
-fn tool_results(request: &ModelRequest) -> Vec<Value> {
+pub(super) fn tool_results(request: &ModelRequest) -> Vec<Value> {
     request
         .turn
         .conversation

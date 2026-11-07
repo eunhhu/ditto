@@ -3,7 +3,7 @@
 //! journal `tool.started`, then journal `tool.output`.
 use super::super::memory as memory_tool;
 use super::super::memory::{MemoryAction, MemoryDeriver, MemoryRefusal, MemoryResult};
-use super::super::sort::{SortToolError, SortToolResult};
+use super::super::sort::{SortToolError, SortToolResult, result_lines};
 use super::super::tool::{LeaseRefusal, STOPPED, ToolOutput, ToolRequested, ToolStarted};
 use super::super::web::{self, WebResult, WebToolError};
 use super::*;
@@ -561,6 +561,7 @@ impl DittoKernel {
                         verifier: worker::VERIFIER.into(),
                         input_lines: output.input_lines(),
                         output_lines: output.output_lines(),
+                        lines: result_lines(output.bytes()),
                     },
                     Some(stored.event.event_id),
                 )

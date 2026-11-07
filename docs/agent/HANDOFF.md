@@ -212,6 +212,33 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
+## Latest work: Task 038, two hops and a lighter tool call
+
+Two changes, both measured on the Task 017 suite.
+
+**A memory that places an object travels with the memory that names it.** The
+capsule was selected by word overlap with the request, so "the saffron tin sits
+above the fridge" shared nothing with "where is my spare key" and was dropped;
+P3 answered "inside the saffron tin" in half its long-use attempts with one
+model call and no search. `ContextCompiler::compile_with_closure` now recompiles
+once in process, marking up to two such nodes `policy-required: memory pointer`
+(ADR 0029). A pointer needs a word that at most two candidate summaries share,
+so a topic word does not drag in unrelated memories. No model call and no new
+receipt reason.
+
+Measured (`probe-closure`, P1-P5, 50 attempts, $0.09): P3 long-use recall
+5/10 -> 9/9, long-use recall over valid attempts 0.889 -> 1.000. Ten attempts
+failed with an empty provider response (one call, no token usage, ~8 s), which
+is upstream and not the change; the ratios above exclude them.
+
+**A sort returns the lines it sorted** (ADR 0040, turn contract 16). Artifact
+turns spent four requests where three carried work: the model read the sorted
+artifact back only because the sort result named a reference. The verified
+result now carries up to eight lines, 120 characters each, and the model
+answers from it.
+
+`read_only_turn` is 103 tests; `ditto-kernel` suite green.
+
 ## Latest work: Task 042, a harness-side search budget
 
 - A turn makes at most three `memory.search` calls; a fourth returns

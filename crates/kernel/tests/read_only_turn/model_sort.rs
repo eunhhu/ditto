@@ -105,6 +105,37 @@ async fn model_sort_continues_with_verified_output_and_survives_restart() {
 }
 
 #[tokio::test]
+async fn a_sort_hands_back_the_lines_it_produced() {
+    let fixture = Fixture::new();
+    let command = permitted(true);
+    let input = worker::input_reference(INPUT.as_bytes());
+    // The sort result carries the order, so the model answers in the second
+    // request instead of spending a third one reading back what it sorted.
+    let driver = ScriptedDriver::new(vec![
+        sort_call("sort", &input, true),
+        final_script(&["Sorted: a, b."]),
+    ]);
+    let accepted = fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    assert_eq!(accepted.sort.unwrap().state, AgentSortState::NotRun);
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(
+        status.status,
+        AgentRunStatus::Unverified,
+        "{:?}",
+        fixture.events_for_session("personal")
+    );
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 2, "the model did not need a read-back");
+    let result = super::memory::tool_results(&requests[1])[0].clone();
+    assert_eq!(result["output_lines"], 2, "{result}");
+    assert_eq!(result["lines"], json!(["a", "b"]), "{result}");
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+}
+
+#[tokio::test]
 async fn invalid_or_unpermitted_calls_preserve_one_shot_lease_and_repeats_cannot_overwrite_result()
 {
     let fixture = Fixture::new();

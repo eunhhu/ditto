@@ -94,6 +94,21 @@ pub enum SortToolError {
     VerificationFailed,
 }
 
+/// Lines a sort hands back with its result. Small enough to ride in the tool
+/// output, so a model that has already read the input does not spend another
+/// request reading back what it just sorted.
+pub const MAX_RESULT_LINES: usize = 8;
+pub const MAX_RESULT_LINE_CHARS: usize = 120;
+
+/// The first lines of a sort's output, each cut to `MAX_RESULT_LINE_CHARS`.
+pub(super) fn result_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .take(MAX_RESULT_LINES)
+        .map(|line| line.chars().take(MAX_RESULT_LINE_CHARS).collect())
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SortToolResult {
@@ -102,6 +117,11 @@ pub enum SortToolResult {
         verifier: String,
         input_lines: usize,
         output_lines: usize,
+        /// The first lines of the sorted output, so a model that already read
+        /// the input can report the order without reading the file again. Empty
+        /// in journals recorded before turn contract 16.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lines: Vec<String>,
     },
     Error {
         code: SortToolError,
@@ -116,9 +136,16 @@ impl SortToolResult {
                 verifier,
                 input_lines,
                 output_lines,
-            } => json!({
-                "reference":reference,"verifier":verifier,"input_lines":input_lines,"output_lines":output_lines
-            }),
+                lines,
+            } => {
+                let mut value = json!({
+                    "reference":reference,"verifier":verifier,"input_lines":input_lines,"output_lines":output_lines
+                });
+                if !lines.is_empty() {
+                    value["lines"] = json!(lines);
+                }
+                value
+            }
             Self::Error { code } => json!({"error":code}),
         }
     }
@@ -173,6 +200,7 @@ pub(crate) fn valid_result(
             verifier,
             input_lines,
             output_lines,
+            lines,
         } => {
             started
                 && artifact_event_id.is_some()
@@ -180,6 +208,10 @@ pub(crate) fn valid_result(
                 && verifier == worker::VERIFIER
                 && *input_lines <= worker::MAX_LINES
                 && *output_lines <= *input_lines
+                && lines.len() <= (*output_lines).min(MAX_RESULT_LINES)
+                && lines
+                    .iter()
+                    .all(|line| line.chars().count() <= MAX_RESULT_LINE_CHARS)
         }
     }
 }
