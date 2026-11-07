@@ -16,9 +16,9 @@ use ditto_capability::{
     LiveExecutionEpoch, UntrustedToolCall, UntrustedToolCallError,
 };
 use ditto_context::{
-    CompiledContext, ContextCandidate, ContextCapsule, ContextCompileError,
-    ContextCompiler, ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope,
-    ContextSelection, EpistemicStatus, TaskSignature,
+    CompiledContext, ContextCandidate, ContextCapsule, ContextCompileError, ContextCompiler,
+    ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope, ContextSelection,
+    EpistemicStatus, TaskSignature,
 };
 use ditto_model::{
     CancellationToken, ContentPart, ConversationItem, ExecutionEpochId, FinishReason,
@@ -494,14 +494,17 @@ impl DittoKernel {
         let mut compiled = compiled;
         if let Some(node) = prefetched {
             let token_cost = ditto_context::ContextCapsuleItem::from(&node).token_cost();
-            compiled.receipt.included.push(ditto_context::ContextReceiptEntry {
-                node_id: node.id.clone(),
-                source_event_ids: node.source_event_ids.clone(),
-                epistemic: node.epistemic,
-                reason: ditto_context::PREFETCH_ATTACHMENT_REASON.into(),
-                score: 0.0,
-                token_cost,
-            });
+            compiled
+                .receipt
+                .included
+                .push(ditto_context::ContextReceiptEntry {
+                    node_id: node.id.clone(),
+                    source_event_ids: node.source_event_ids.clone(),
+                    epistemic: node.epistemic,
+                    reason: ditto_context::PREFETCH_ATTACHMENT_REASON.into(),
+                    score: 0.0,
+                    token_cost,
+                });
             compiled.receipt.total_token_cost += token_cost;
             compiled.nodes.push(node);
         }
