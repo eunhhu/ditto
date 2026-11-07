@@ -254,6 +254,15 @@ re-asks exactly that signature up to two more times and records
 percent on identical code measure the provider, not Ditto, and a gate verdict
 must not depend on it.
 
+**Campaign 9 is the readable one.** 129 of 130 observed after the retry, spend
+$0.1826, and seven of eight gates decided: integrity, safety, semantic, tool,
+schedule and resource pass; `answer` needs the second review; `cost_latency`
+fails at p95 29.9 s clean and 45.5 s long_use against the frozen 27.5 s. Input
+tokens per turn fell 4343 -> 3560 and requests 2.66 -> 2.34 since campaign 5,
+while the median turn went 8.1 s -> 13.4 s, so the ceiling is measuring the
+provider's day rather than the harness. Do not widen the ceiling to make the
+gate pass; re-measure it deliberately or run in a faster window.
+
 ## Latest work: Task 042, a harness-side search budget
 
 - A turn makes at most three `memory.search` calls; a fourth returns
