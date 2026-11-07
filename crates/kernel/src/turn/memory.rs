@@ -41,6 +41,11 @@ pub const MAX_MEMORY_WRITES: u32 = 3;
 /// that was allowed seven kept rephrasing until it ran out of requests without
 /// answering (ADR 0029, per-turn search budget).
 pub const MAX_MEMORY_SEARCHES: u32 = 3;
+
+/// Memories a compiled capsule may add because an included memory named the
+/// object they place. A two-hop fact is usually one pointer; two leaves room for
+/// a fact that names two things without turning the capsule into a dump.
+pub const MAX_POINTER_MEMORIES: usize = 2;
 /// The lease that bounds a turn's memory writes.
 pub(crate) const LEASE_ID: &str = "agent-memory";
 /// A memory Ditto inferred is likely, not asserted by the user.

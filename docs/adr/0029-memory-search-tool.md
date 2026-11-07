@@ -52,6 +52,14 @@ Agent runs are offered a builtin `memory.search` tool:
 - **Surface.** From turn payload version 8 the tool is part of every agent
   run's stable tool surface while its package is installed; a missing or
   altered package withdraws it. Legacy artifact turns never see it.
+- **Pointer closure.** A memory that places an object is not relevant to a
+  request that names the object, so the complete set drops it and the model
+  answers half of a two-hop fact. The compiler now recompiles once with up to
+  two such nodes marked `policy-required: memory pointer`, chosen because they
+  share a word that appears in at most two candidate summaries with an included
+  memory. It is a second in-process pass: no model call, no capability page, and
+  the capsule still validates because a policy-required node is an existing
+  receipt reason with a recomputed score.
 - **Budget.** A turn makes at most three searches: the fact, a pointer that
   fact named, and one more wording when a query matched nothing. A fourth and
   later search returns

@@ -96,6 +96,48 @@ fn fill_past_the_budget(kernel: &DittoKernel) {
 }
 
 #[tokio::test]
+async fn a_memory_that_places_an_object_comes_with_the_memory_that_names_it() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let key = save_memory(
+        kernel,
+        "personal",
+        "I keep the spare key in the saffron tin",
+        None,
+    );
+    let tin = save_memory(
+        kernel,
+        "personal",
+        "The saffron tin sits above the fridge",
+        None,
+    );
+    let piano = save_memory(
+        kernel,
+        "personal",
+        "My piano lesson happens every Tuesday",
+        None,
+    );
+    fill_past_the_budget(kernel);
+
+    // "Where is my spare key?" shares no word with the memory that places the
+    // tin, and the model would answer "in the saffron tin" without searching.
+    let (status, driver) = ask(
+        kernel,
+        "Where is my spare key?",
+        vec![final_script(&["Above the fridge."])],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let ids = context_ids(&driver.requests()[0]);
+    assert!(ids.contains(&key), "{ids:?}");
+    assert!(
+        ids.contains(&tin),
+        "a memory that places the object travels with it: {ids:?}"
+    );
+    assert!(!ids.contains(&piano), "{ids:?}");
+}
+
+#[tokio::test]
 async fn a_search_finds_a_memory_the_context_budget_left_out() {
     let fixture = Fixture::new();
     let kernel = &fixture.kernel;

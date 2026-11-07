@@ -455,12 +455,13 @@ impl DittoKernel {
             },
         };
         let compiled = ContextCompiler::default()
-            .compile_with(
+            .compile_with_closure(
                 ContextSelection::CompleteSet,
                 &turn_signature(text),
                 context_candidates,
                 None,
                 run.accepted_at,
+                super::memory::MAX_POINTER_MEMORIES,
             )
             .map_err(|error| match context_compile_reason(&error) {
                 Some(reason) => self.fail_with(run, reason, error.to_string(), None, None),
