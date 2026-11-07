@@ -239,6 +239,14 @@ answers from it.
 
 `read_only_turn` is 103 tests; `ditto-kernel` suite green.
 
+**Campaign 6 recorded the two changes on a bad provider day.** 130 attempts,
+112 observed, 18 lost to empty responses (14%). Semantic passed at recall 1.000
+on both profiles, artifact turns fell from 3.50 to 2.78 model requests, and all
+turns from 2.66 to 2.34. The tool and cost_latency gates failed on the same 18
+attempts (9 artifact attempts never reached a tool call; two genuine misses,
+T3/clean#4 and X4/long_use#5), so readiness is still `fail` pending a repeat on
+a healthy provider. Do not read campaign 6 as a harness regression.
+
 ## Latest work: Task 042, a harness-side search budget
 
 - A turn makes at most three `memory.search` calls; a fourth returns

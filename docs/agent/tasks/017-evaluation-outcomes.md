@@ -551,6 +551,34 @@ Facts worth keeping:
   item second review is still open, so the answer gate has never passed and no
   readiness claim follows from these campaigns.
 
+## Campaign 6 (pointer closure and the sort preview)
+
+Run on `06a11a5` after ADR 0029's pointer closure and ADR 0040's sort lines.
+130 attempts, **112 observed**, 18 lost to an empty provider response (one call,
+no token usage, ~8 s). That rate (14%) is not the change: the same pattern hit
+20% of the `probe-closure` sample while a release build shared the CPU, and
+campaigns 3-5 saw it in single digits or not at all.
+
+- **semantic: pass.** Recall@5 is 38/38 clean and 38/38 long_use over the
+  observed attempts - 1.000 on both profiles, where campaign 5 failed at 0.889.
+  P3's two-hop fact is answered from the capsule with one model call and no
+  search, because the memory that places the object now travels with the memory
+  that names it.
+- **tool: fail, contaminated.** 49 of 60 artifact attempts verified (0.817).
+  Eleven misses, of which nine never reached a tool call because the provider
+  returned nothing; two are genuine (T3/clean#4, X4/long_use#5). Over the
+  observed attempts the rate is 49/51.
+- **cost_latency: fail, contaminated.** p95 47 s clean and 79 s long_use against
+  the frozen ceiling; the same attempts that lost their provider response.
+- **Requests per turn fell as designed.** Artifact turns 3.50 -> 2.78 model
+  requests (-21%, the read-back is gone), memory turns 2.02 -> 2.12, all turns
+  2.66 -> 2.34. The request body stays 4.7 KB, so this is a real drop in round
+  trips, not in bytes per round trip.
+
+Readiness stays `fail`, and not because of a harness defect this run can
+attribute: the run needs a repeat on a healthy provider before the tool and
+cost_latency gates mean anything.
+
 ## Campaign 5 (the search budget in place)
 
 130 attempts, 130 verified, $0.2296. `integrity`, `safety`, `tool`,
