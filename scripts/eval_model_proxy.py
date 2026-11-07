@@ -23,6 +23,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM = urllib.parse.urlsplit(sys.argv[2].rstrip("/"))
 KEY = os.environ["UPSTREAM_API_KEY"]
+# Set DUMP_DIR to keep each request body for size measurements (ditto eval).
+DUMP_DIR = os.environ.get("DUMP_DIR")
+DUMP_SEQ = {"n": 0}
 STATE = {"session": "ditto-eval-default"}
 LOCK = threading.Lock()
 
@@ -44,6 +47,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         with LOCK:
             session = STATE["session"]
+        if DUMP_DIR:
+            with LOCK:
+                DUMP_SEQ["n"] += 1
+                n = DUMP_SEQ["n"]
+            os.makedirs(DUMP_DIR, exist_ok=True)
+            with open(os.path.join(DUMP_DIR, f"request-{n:04d}.json"), "wb") as handle:
+                handle.write(body)
         path = UPSTREAM.path + self.path[len("/v1"):] if self.path.startswith("/v1") else UPSTREAM.path + self.path
         conn = http.client.HTTPSConnection(UPSTREAM.netloc, timeout=300)
         conn.request("POST", path, body=body, headers={
