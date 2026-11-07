@@ -602,6 +602,35 @@ responses, 5 recovered by the retry, **129 observed**, spend $0.1826.
 
 `answer` stays blocked: it needs the second review of a 20% sample.
 
+### What the latency is made of
+
+The same journals carry the provider's own numbers, so the change can be split
+from the provider's day without another run:
+
+- per model request, campaign 5: **2.08 s median, 8.46 s p95**;
+  campaign 9: **4.89 s median, 17.39 s p95** - the provider got 2.4x slower.
+- per turn, campaign 5 asked 2.66 requests and campaign 9 asked 2.34, and input
+  tokens fell 4343 -> 3560.
+
+A turn that used to cost 2.1 requests at 2.1 s now costs 2.0 requests at 4.9 s,
+so the round-trip saving is real and the ceiling is being crossed by the
+provider. p95 29.9 s here against 31.6 s in campaign 5 is the harness holding a
+slower provider to roughly the same number.
+
+### First-pass answer grading (campaign 9)
+
+109 items were graded, mechanically where the oracle decides and by hand where
+it does not. **108 pass, one fails**: X1/long_use#1 answered honestly that the
+attachment held packing items and that it had no memory of the departure city,
+so the memory naming Lakeside went unused. No answer claimed a forbidden fact
+and none invented a value.
+
+Two bugs in the grading tool, not in Ditto, are worth recording because both
+first showed up as model failures: an oracle's forbidden atom was reported when
+it was *absent* (so P2's correct "Birch Room" read as a claim about Alder Hall),
+and the abstention cue matched only a straight apostrophe, so P5's "I don’t
+have it" read as a refusal to abstain.
+
 ## Campaign 6 (pointer closure and the sort preview)
 
 Run on `06a11a5` after ADR 0029's pointer closure and ADR 0040's sort lines.
