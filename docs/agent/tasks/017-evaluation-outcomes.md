@@ -621,9 +621,23 @@ the answers.
   oracle lists "above the fridge", P5 abstains without inventing a policy
   number, P2 gives the venue note it holds and hedges whether the reading group
   is that club, and T2/T4 show the sorted lines and say deduplication was not
-  permitted. The reading passes all 29 with its reasons recorded per item. The
-  fixed 20% sample of 22 items was reviewed separately and agreed, which is what
-  the gate's second-review step asks for.
+  permitted. The reading passes 28 of the 29; the exception is P1/long_use#4,
+  where the answer abstains although the store holds "The canine's name is
+  Miso." and the question says "pet dog". That is a retrieval miss, not a
+  correct abstention, and it is recorded as a failing item. The fixed 20% sample
+  of 22 items was reviewed separately and agreed. The gate passes with that one
+  miss in the profile rates.
+
+### What that one miss says about the memory family
+
+P1/long_use#4 compiled no nodes at all and then searched "dog", "pet", "puppy"
+and "name" - four queries, none of which reach "canine". Recall is otherwise
+intact across the family (49 of 50 attempts recalled the required memory), so the
+memory family's 2.06 requests per turn are not a retrieval problem: even when the
+compiled context already holds the fact, the model spends a request searching
+before it answers (1.85 requests mean on recalled turns). The next slice is
+therefore about the redundant search and about the dog/canine lexical gap, not
+about ranking.
 
 One correction happened after the run: a one-shot schedule journals
 `schedule.claimed` while a repeat journals `schedule.occurrence.claimed`, and the
