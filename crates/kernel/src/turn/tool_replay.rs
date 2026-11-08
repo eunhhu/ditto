@@ -11,7 +11,149 @@ use super::*;
 use ditto_web_fetch::WebRequest;
 use serde_json::json;
 
+/// The sort a turn ran before its first model request (ADR 0041): its claim,
+/// when it started, and the recorded result its context node derives from.
+pub(super) struct ReplayedPrefetch {
+    pub(super) start: Option<ToolStarted>,
+    pub(super) result: SortToolResult,
+}
+
 impl<'turn> ReplayProjector<'turn, '_> {
+    /// Replay the sort recorded before the compilation, when there is one: the
+    /// call the permission fixes, recorded by the system as a prefetch, with
+    /// the lifecycle and result rules of the model's own call. Its claim is
+    /// the turn's one, and the conversation does not carry it - its result
+    /// reaches the model through the context.
+    pub(super) fn replay_prefetch_sort(&mut self) -> Result<Option<ReplayedPrefetch>, ReplayError> {
+        let Some(next) = self.events.get(self.index) else {
+            return Ok(None);
+        };
+        if next.kind != event_kind::TOOL_REQUESTED {
+            return Ok(None);
+        }
+        let grant = self
+            .sort
+            .clone()
+            .ok_or_else(|| replay_invalid("a prefetched sort needs a sort permission"))?;
+        let arguments = grant
+            .prefetch_arguments()
+            .filter(|_| self.agent_run)
+            .ok_or_else(|| replay_invalid("the permission fixes no sort to prefetch"))?;
+        let arguments_value = json!(arguments);
+        let event = self.take(event_kind::TOOL_REQUESTED, EventActor::System)?;
+        let request: ToolRequested = decode_payload(event)?;
+        if !tool::valid_requested(&request, event, &self.events[0], Some(&arguments_value))
+            || request.origin != tool::ToolOrigin::Prefetch
+            || request.request_index != 0
+            || request.call_id.as_str() != sort_tool::prefetch_call_id(&self.turn_id)
+            || request.capability_id != ditto_artifact_sort::ID
+            || request.arguments != arguments_value
+        {
+            return Err(replay_invalid("prefetched sort contradicts its permission"));
+        }
+        let start = if self
+            .events
+            .get(self.index)
+            .is_some_and(|next| next.kind == event_kind::TOOL_STARTED)
+        {
+            let started = self.take(event_kind::TOOL_STARTED, EventActor::Capability)?;
+            let start: ToolStarted = decode_payload(started)?;
+            if !tool::valid_started(&start, started, &request, event, &self.events[0]) {
+                return Err(replay_invalid(
+                    "prefetched sort start contradicts its request",
+                ));
+            }
+            Some((started, start))
+        } else {
+            None
+        };
+        let started = start.as_ref().map(|(event, _)| *event);
+        let (output_event, output, result): (_, _, SortToolResult) =
+            self.take_tool_output(&request, event, started)?;
+        // An unclaimed prefetch could only have lost its lease to the clock.
+        if !sort_tool::valid_result(
+            &result,
+            Some(&arguments),
+            started.is_some(),
+            &grant,
+            false,
+            started.is_none(),
+            output.artifact_event_id.as_deref(),
+        ) {
+            return Err(replay_invalid(
+                "prefetched sort output contradicts dispatch",
+            ));
+        }
+        if let SortToolResult::Verified { reference, .. } = &result {
+            let started = started.ok_or_else(|| replay_invalid("sort output has no start"))?;
+            if !self.snapshot.iter().any(|root| {
+                sort_tool::valid_output_root(
+                    root,
+                    reference,
+                    output.artifact_event_id.as_deref(),
+                    output_event,
+                    started,
+                )
+            }) {
+                return Err(replay_invalid("sort output has no matching artifact root"));
+            }
+        }
+        self.sort_claimed |= started.is_some();
+        self.tool_calls.push(ReplayedToolCall {
+            requested: request,
+            started: start.as_ref().map(|(_, started)| started.clone()),
+            output: Some(output),
+        });
+        self.tool_call_count = self.tool_call_count.saturating_add(1);
+        Ok(Some(ReplayedPrefetch {
+            start: start.map(|(_, started)| started),
+            result,
+        }))
+    }
+
+    /// The nodes a turn supplied itself carry only what the journal derives:
+    /// the attachment node of this input, and the node of the recorded sort.
+    /// File content in the context is file content read (ADR 0031).
+    pub(super) fn validate_prefetched_nodes(
+        &mut self,
+        context: &ContextCompiledPayload,
+    ) -> Result<(), ReplayError> {
+        let input_seq = self.events[0].seq;
+        let expected_sort =
+            self.sort
+                .as_ref()
+                .zip(self.prefetch.as_ref())
+                .and_then(|(grant, prefetched)| {
+                    sort_tool::prefetch_node(grant, input_seq, &prefetched.result)
+                });
+        let attachment = format!("prefetch_attachment_{input_seq}");
+        let mut supplied = 0_usize;
+        for entry in &context.compiled.receipt.included {
+            let supplied_by_turn = entry.reason == ditto_context::PREFETCH_ATTACHMENT_REASON;
+            let is_attachment =
+                supplied_by_turn && entry.node_id == attachment && self.sort.is_some();
+            let is_sort = supplied_by_turn
+                && expected_sort
+                    .as_ref()
+                    .is_some_and(|node| node.id == entry.node_id);
+            if supplied_by_turn && !(is_attachment || is_sort) {
+                return Err(replay_invalid(
+                    "a node the turn supplied itself is not one it derives",
+                ));
+            }
+            supplied += usize::from(supplied_by_turn);
+        }
+        if let Some(node) = &expected_sort
+            && !context.compiled.nodes.contains(node)
+        {
+            return Err(replay_invalid(
+                "the compilation does not hold the recorded sort",
+            ));
+        }
+        self.read_external_content |= supplied > 0;
+        Ok(())
+    }
+
     /// Take `tool.requested` for `call`, normalized by replay's own rule.
     fn take_tool_request(
         &mut self,

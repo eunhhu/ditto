@@ -2,10 +2,69 @@
 //! explicitly permitted run offers, on the shared tool lifecycle (ADR 0036).
 use ditto_artifact_sort::{self as worker, SortArguments};
 use ditto_capability::CanonicalResource;
+use ditto_context::{
+    ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope, EpistemicStatus,
+};
 use ditto_model::{ContentPart, ConversationItem, MessageRole};
 use ditto_protocol::{AgentSortPermission, EventActor, EventRecord, event_kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// The call id of the sort a turn runs before its first model request.
+pub(crate) fn prefetch_call_id(turn_id: &str) -> String {
+    format!("prefetch_sort_{turn_id}")
+}
+
+/// Id prefix of the node holding a prefetched sort (ADR 0041), after the
+/// attachment's own `prefetch_attachment_` so both sort canonically.
+pub(crate) const PREFETCH_SORT_NODE_PREFIX: &str = "prefetch_sort_";
+
+/// The context node a verified prefetched sort becomes: the first lines of its
+/// order, rendered only from the recorded result so replay compares it with
+/// the node the compilation holds.
+pub(crate) fn prefetch_node(
+    grant: &SortGrant,
+    input_seq: i64,
+    result: &SortToolResult,
+) -> Option<ContextNode> {
+    let SortToolResult::Verified {
+        reference,
+        verifier,
+        input_lines,
+        output_lines,
+        lines,
+    } = result
+    else {
+        return None;
+    };
+    if lines.is_empty() {
+        return None;
+    }
+    let shown = if lines.len() == *output_lines {
+        format!("all {output_lines} lines in order")
+    } else {
+        format!("the first {} of {output_lines} lines in order", lines.len())
+    };
+    Some(ContextNode {
+        id: format!("{PREFETCH_SORT_NODE_PREFIX}{input_seq}"),
+        kind: ContextNodeKind::Resource,
+        summary: format!(
+            "the attachment, sorted at the start of the turn under the user's permission \
+             and checked by {verifier} ({input_lines} lines in, {output_lines} out, \
+             sorted artifact {reference}); {shown}:\n{}",
+            lines.join("\n")
+        ),
+        origin: ContextOrigin::System,
+        epistemic: EpistemicStatus::Verified,
+        scope: ContextScope::Session,
+        lens: ContextLens::Task,
+        confidence: 1.0,
+        source_event_ids: vec![grant.source_event_id.clone()],
+        supersedes: Vec::new(),
+        valid_from: None,
+        valid_until: None,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +89,16 @@ impl SortGrant {
 
     pub fn permits(&self, args: &SortArguments) -> bool {
         self.reference == args.reference && (!args.unique || self.allow_deduplicate)
+    }
+
+    /// The one sort the permission itself fixes (ADR 0041). Deduplicating is
+    /// something the user's request decides and only the model reads it, so a
+    /// permission that allows it fixes nothing and nothing is prefetched.
+    pub fn prefetch_arguments(&self) -> Option<SortArguments> {
+        (!self.allow_deduplicate).then(|| SortArguments {
+            reference: self.reference.clone(),
+            unique: false,
+        })
     }
 
     pub fn matches_root(&self, root: &EventRecord, input: &EventRecord) -> bool {

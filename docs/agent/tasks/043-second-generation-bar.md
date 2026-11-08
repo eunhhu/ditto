@@ -94,6 +94,9 @@ requests per turn against campaign 9:
 | X4 / clean | 2.75 | 2.0 |
 | X4 / long_use | 2.4 | 2.0 |
 
+The granted sort now also runs before the first model request, so an artifact
+turn is a single request when the model only has to answer.
+
 The read round trip is gone from the sort tasks and from the attachment turns.
 Three things are still open: the provider was losing whole responses during the
 probe (retries and 60-90 s outliers), one X1 long_use attempt selected nine

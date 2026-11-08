@@ -2269,9 +2269,18 @@ fn receipt_entry(
 }
 
 fn receipt_reason_priority(reason: &str, selection: ContextSelection) -> Option<u8> {
+    if reason == COMPLETE_SET_REASON && selection != ContextSelection::CompleteSet {
+        return None;
+    }
+    receipt_priority(reason)
+}
+
+/// The canonical order rank of a receipt reason. Included nodes are ordered by
+/// (priority, score, node id), so anything that adds a node to a finished
+/// compilation needs this to place it (ADR 0041).
+pub fn receipt_priority(reason: &str) -> Option<u8> {
     match reason {
-        TASK_RELEVANCE_REASON => Some(0),
-        COMPLETE_SET_REASON if selection == ContextSelection::CompleteSet => Some(0),
+        TASK_RELEVANCE_REASON | COMPLETE_SET_REASON => Some(0),
         "user-pinned" => Some(1),
         PREFETCH_ATTACHMENT_REASON => Some(3),
         _ if reason

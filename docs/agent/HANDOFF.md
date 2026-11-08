@@ -275,13 +275,16 @@ equals its v1 value, so nothing was loosened. `scripts/test-eval-task017.py`
 covers the split (35 tests). Not yet exercised by a full campaign: the next run
 is the first that grades under v2.
 
-Parked, not shipped: prefetching the granted `artifact.sort` before the first
-model request (a working patch in `~/.hermes/cache/scratch/sort-prefetch.patch`).
-It reaches one model request per artifact turn but it performs an effect at
-turn start - the sort publishes an output artifact and spends the one-shot
-lease, so the model can no longer choose different arguments - and four
-`model_sort` tests encode the current "the harness never sorts unless the model
-asks" behaviour. That contract change needs its own decision before it lands.
+The granted `artifact.sort` now runs at the start of the turn (ADR 0041
+amendment): it is performed from the grant's own arguments when the grant does
+not allow deduplication, its output enters the compilation in canonical receipt
+order, and the tool events that produce it are journaled before that compilation
+so replay derives the same context. The accepted consequences are that a
+cancelled turn may already carry a published sort, and that the model cannot
+re-sort because the one-shot lease is spent. Three `model_sort` tests were
+rewritten to that contract; the cancellation test now asserts the race-free
+invariants (no published output, at most one recorded call, at most one model
+request) instead of a fixed event count.
 
 ## Latest work: Task 042, a harness-side search budget
 

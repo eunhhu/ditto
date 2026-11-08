@@ -194,6 +194,11 @@ struct ReplayProjector<'turn, 'snapshot> {
     /// The session's runs active at admission, by input event ID (ADR 0035).
     in_flight: Vec<String>,
     sort_claimed: bool,
+    /// The sort the turn ran before its first model request, once replayed
+    /// (ADR 0041), and the expiry of its claim, which must be the turn's
+    /// deadline once a request records it.
+    prefetch: Option<tool_replay::ReplayedPrefetch>,
+    prefetch_expiry: Option<DateTime<Utc>>,
     /// Whether the recorded selection paged `artifact.read`.
     read_selected: bool,
     /// The `web.browse` schema the selection offered: (read, search).
@@ -348,6 +353,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             sort,
             in_flight,
             sort_claimed: false,
+            prefetch: None,
+            prefetch_expiry: None,
             read_selected: false,
             web: None,
             web_grant: super::web::WebGrant::default(),
@@ -389,6 +396,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         if let Some(failure) = self.take_initial_stage_failure()? {
             return Ok(ArtifactReadTurnReplay::Failed { failure });
         }
+        // A prefetched sort precedes the compilation that holds its result.
+        self.prefetch = self.replay_prefetch_sort()?;
         let context_event = self.take(event_kind::CONTEXT_COMPILED, EventActor::System)?;
         let context: ContextCompiledPayload = self.decode_versioned(context_event)?;
         self.require_turn_id(&context.turn_id)?;
@@ -404,6 +413,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             self.input_recorded_at,
         )?;
         self.validate_context_sources(&context, context_event)?;
+        self.validate_prefetched_nodes(&context)?;
         let history = self.conversation_history(&context)?;
         let latest = latest_user_text(
             &self.input_text,
@@ -556,6 +566,12 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             return Err(replay_invalid(
                 "selected epoch cards contradict the installed contracts",
             ));
+        }
+        if let Some(start) = self.prefetch.as_ref().and_then(|p| p.start.as_ref()) {
+            if start.epoch_id != selected_epoch_id.as_str() {
+                return Err(replay_invalid("prefetched sort ran under another epoch"));
+            }
+            self.prefetch_expiry = Some(start.expires_at);
         }
         self.execution_epoch_id = Some(selected_epoch_id);
         self.schemas = Some(expected_schemas);
@@ -1556,6 +1572,14 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             }
             None => self.deadline = Some(request_deadline),
             Some(_) => {}
+        }
+        if self
+            .prefetch_expiry
+            .is_some_and(|expiry| expiry != request_deadline)
+        {
+            return Err(replay_invalid(
+                "prefetched sort claim does not expire with the turn",
+            ));
         }
         if event.recorded_at >= request_deadline {
             return if self.next_is_failure() {

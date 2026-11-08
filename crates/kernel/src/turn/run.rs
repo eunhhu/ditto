@@ -421,6 +421,9 @@ impl DittoKernel {
         // The attachment this turn was granted is part of its compiled context,
         // so it is recorded with the compilation and replayed from it (ADR 0041).
         let prefetched = self.prefetched_attachment(&run, &input_event)?;
+        // File content in the context is file content read: memory writes are
+        // refused from here on, as after a tool read (ADR 0031).
+        run.read_external_content = prefetched.is_some();
         let (capsule, history, in_flight) = self.compile_turn_context(
             &mut run,
             &text,
@@ -429,6 +432,9 @@ impl DittoKernel {
             prefetched,
         )?;
         let tools = self.select_turn_tools(&mut run, &input_event)?;
+        let capsule = self
+            .prefetch_sort(&mut run, &tools, &input_event, capsule)
+            .await?;
         let text = latest_user_text(&text, run.accepted_at, run.utc_offset_minutes, &in_flight)
             .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
         self.run_model_requests(&mut run, text, history, capsule, tools)
@@ -493,20 +499,7 @@ impl DittoKernel {
         // push a memory the turn needs out of the selection (ADR 0041).
         let mut compiled = compiled;
         if let Some(node) = prefetched {
-            let token_cost = ditto_context::ContextCapsuleItem::from(&node).token_cost();
-            compiled
-                .receipt
-                .included
-                .push(ditto_context::ContextReceiptEntry {
-                    node_id: node.id.clone(),
-                    source_event_ids: node.source_event_ids.clone(),
-                    epistemic: node.epistemic,
-                    reason: ditto_context::PREFETCH_ATTACHMENT_REASON.into(),
-                    score: 0.0,
-                    token_cost,
-                });
-            compiled.receipt.total_token_cost += token_cost;
-            compiled.nodes.push(node);
+            append_prefetched(&mut compiled, node);
         }
         let capsule = ContextCapsule::from(&compiled);
         let provenance_through_seq = self.latest_event_seq()?;
@@ -924,7 +917,10 @@ impl DittoKernel {
             text,
             run.scope.sort.as_ref(),
         ));
-        let mut totals = TurnTotals::default();
+        let mut totals = TurnTotals {
+            tool_calls: run.scope.tool_call_count.get(),
+            ..TurnTotals::default()
+        };
 
         for request_index in 0..MAX_MODEL_REQUESTS {
             let index = Some(request_index as u8);
@@ -1023,6 +1019,84 @@ impl DittoKernel {
             valid_from: None,
             valid_until: None,
         }))
+    }
+
+    /// Run the sort the user's permission fixes before the first model request
+    /// and compile its first ordered lines into the context (ADR 0041).
+    ///
+    /// It is the sort's one claim: the same lease, process, verifier and
+    /// `tool.*` events the model's own call would use, recorded by the system
+    /// as a prefetch. The events precede the compilation that holds their
+    /// result, so the prelude staged so far commits after them; a later call
+    /// by the model finds the lease spent and reads a refusal. The result
+    /// joins the conversation only through the context, so the request after
+    /// it differs from a model's call by nothing but that context.
+    async fn prefetch_sort(
+        &self,
+        run: &mut TurnRun<'_>,
+        tools: &TurnTools,
+        input_event: &EventRecord,
+        capsule: ContextCapsule,
+    ) -> Result<ContextCapsule, TurnRunError> {
+        // A turn already cancelled before it began does no work at all, so the
+        // granted sort is not performed for it either.
+        if run.cancellation.is_cancelled() {
+            return Ok(capsule);
+        }
+        let Some(grant) = run.scope.sort.clone() else {
+            return Ok(capsule);
+        };
+        let Some(arguments) = grant.prefetch_arguments().filter(|_| run.scope.agent_run) else {
+            return Ok(capsule);
+        };
+        let (Some(binding), Ok(call_id)) = (
+            tools.live_epoch.invocable_binding(ditto_artifact_sort::ID),
+            ProviderCallId::new(super::sort::prefetch_call_id(&run.scope.turn_id)),
+        ) else {
+            return Ok(capsule);
+        };
+        let call = ReadyCall {
+            call_id,
+            capability_id: ditto_artifact_sort::ID.to_owned(),
+            arguments: serde_json::to_value(&arguments)?,
+        };
+        // The prelude is staged for the next append; hold it back so the
+        // sort's events come first and the compilation follows its result.
+        let held = run.scope.staged.take();
+        let mut cause = input_event.event_id.clone();
+        let outcome = self
+            .run_sort_call(
+                &mut run.scope,
+                &mut cause,
+                0,
+                &call,
+                binding,
+                &tools.authorizer,
+                run.cancellation.clone(),
+                run.deadline,
+                super::tool::ToolOrigin::Prefetch,
+            )
+            .await;
+        *run.scope.staged.borrow_mut() = held;
+        let result = outcome?;
+        run.scope
+            .tool_call_count
+            .set(run.scope.tool_call_count.get().saturating_add(1));
+        let node = super::sort::prefetch_node(&grant, input_event.seq, &result);
+        let mut staged = run.scope.staged.borrow_mut();
+        let (_, event) = staged
+            .iter_mut()
+            .find(|(_, event)| event.kind == event_kind::CONTEXT_COMPILED)
+            .ok_or(TurnRunError::Internal("the compilation is not staged"))?;
+        event.causation_id = Some(cause);
+        let Some(node) = node else {
+            return Ok(capsule);
+        };
+        let mut payload: ContextCompiledPayload = serde_json::from_value(event.payload.clone())?;
+        append_prefetched(&mut payload.compiled, node);
+        event.payload = serde_json::to_value(&payload)?;
+        run.read_external_content = true;
+        Ok(ContextCapsule::from(&payload.compiled))
     }
 
     /// The `artifact.created` event that makes `reference` readable in this
@@ -1568,6 +1642,7 @@ impl DittoKernel {
                     &tools.authorizer,
                     run.cancellation.clone(),
                     run.deadline,
+                    super::tool::ToolOrigin::Model,
                 )
                 .await?;
             (result.model_value(), result.is_error())
@@ -2246,6 +2321,41 @@ impl DittoKernel {
             ),
         ))
     }
+}
+
+/// Add a node the turn supplied itself to a compilation with the canonical
+/// receipt reason (ADR 0041). Included nodes are ordered by (priority, score,
+/// node id), so the node is placed where it sorts instead of appended: appending
+/// it would leave the receipt out of canonical order.
+fn append_prefetched(compiled: &mut CompiledContext, node: ContextNode) {
+    let token_cost = ditto_context::ContextCapsuleItem::from(&node).token_cost();
+    let entry = ditto_context::ContextReceiptEntry {
+        node_id: node.id.clone(),
+        source_event_ids: node.source_event_ids.clone(),
+        epistemic: node.epistemic,
+        reason: ditto_context::PREFETCH_ATTACHMENT_REASON.into(),
+        score: 0.0,
+        token_cost,
+    };
+    let priority = ditto_context::receipt_priority(&entry.reason).unwrap_or(u8::MAX);
+    let index = compiled
+        .receipt
+        .included
+        .iter()
+        .position(|existing| {
+            let existing_priority =
+                ditto_context::receipt_priority(&existing.reason).unwrap_or(u8::MAX);
+            // Canonical order is descending priority, then descending score,
+            // then ascending node id.
+            existing_priority < priority
+                || (existing_priority == priority
+                    && (existing.score < 0.0
+                        || (existing.score == 0.0 && existing.node_id > entry.node_id)))
+        })
+        .unwrap_or(compiled.receipt.included.len());
+    compiled.receipt.included.insert(index, entry);
+    compiled.receipt.total_token_cost += token_cost;
+    compiled.nodes.insert(index, node);
 }
 
 fn turn_event<T: Serialize>(

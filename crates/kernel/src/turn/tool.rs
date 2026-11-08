@@ -11,6 +11,30 @@ use serde_json::Value;
 /// The turn failure of a call stopped before authorization.
 pub(crate) const STOPPED: &str = "tool call stopped before authorization";
 
+/// Who asked for a tool call (ADR 0041). A prefetched call is the harness's,
+/// recorded by the system under the permission the turn already holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOrigin {
+    #[default]
+    Model,
+    Prefetch,
+}
+
+impl ToolOrigin {
+    pub(crate) fn is_model(&self) -> bool {
+        *self == Self::Model
+    }
+
+    /// The actor that records a call of this origin.
+    pub(crate) fn actor(self) -> EventActor {
+        match self {
+            Self::Model => EventActor::Model,
+            Self::Prefetch => EventActor::System,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolRequested {
@@ -22,6 +46,9 @@ pub struct ToolRequested {
     pub arguments: Value,
     /// The arguments as the tool normalizes them; `None` when invalid.
     pub normalized: Option<Value>,
+    /// Absent in journals recorded before ADR 0041: the model asked.
+    #[serde(default, skip_serializing_if = "ToolOrigin::is_model")]
+    pub origin: ToolOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,7 +129,7 @@ pub(crate) fn valid_requested(
         && request.request_index < 7
         && request.normalized.as_ref() == normalized
         && event.kind == event_kind::TOOL_REQUESTED
-        && event.actor == EventActor::Model
+        && event.actor == request.origin.actor()
         && event.span_id.as_deref() == Some(request.call_id.as_str())
         && same_turn(event, input)
 }

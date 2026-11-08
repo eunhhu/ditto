@@ -68,3 +68,22 @@ A wrong prefetch spends one tool call and one prompt line. The bounded count
 (one per turn) and the read-only set keep the worst case at the cost the turn
 already pays. Measured by requests per turn over the full suite; the slice is
 accepted only if that falls below 1.3 while recall at 5 stays 1.000.
+
+## Amendment: the granted sort runs at the start of the turn
+
+The sort is an effect, not a read: it publishes an output artifact and spends
+the turn's one-shot lease. The owner accepted that consequence, so a turn that
+holds a sort grant now performs it before the first model request, from the
+grant's own arguments (the grant fixes the reference, and a grant that allows
+deduplication is not prefetched because the choice of `unique` is the model's
+judgment). What follows from that, and is now the contract:
+
+- A cancelled turn may already carry a published sort; a cancellation that
+  arrives before the prefetch starts skips it entirely.
+- The model cannot re-sort: the lease is spent, so a later call reads
+  `lease_exhausted`. Its remaining work is to answer.
+- The prefetched output is inserted where it sorts in canonical receipt order
+  (descending priority, then descending score, then ascending node id) rather
+  than appended, and it is journaled through the ordinary tool events before
+  the compilation that carries it, so replay derives the same context.
+
