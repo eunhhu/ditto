@@ -683,6 +683,17 @@ def spans(events: list[dict], arrivals: dict, start_kind: str, end_kinds: set, k
     return None if open_ else total
 
 
+def harness_ms(completion_ms, model_ms):
+    """The turn's time that was not spent waiting for the provider.
+
+    `None` unless both are observed; a negative result means the spans and the
+    completion disagree about the clock, which is not evidence about the harness.
+    """
+    if completion_ms is None or model_ms is None or model_ms > completion_ms:
+        return None
+    return completion_ms - model_ms
+
+
 PREFETCH_NODE_PREFIX = "prefetch_attachment_"
 
 
@@ -1101,7 +1112,7 @@ class Campaign:
         terminal_events = {t: next((e for e in session_events if e.get("task_id") == t and e["kind"] in TERMINAL_TURN), None)
                            for t in run_tasks}
         # timings from arrival clock; due times converted from the submission clock
-        claim_latency, completion = [], []
+        claim_latency, completion, harness = [], [], []
         for e, t in zip(claims, run_tasks):
             k = e["payload"].get("occurrence", 1) - 1
             if e["seq"] in daemon.arrivals and 0 <= k < len(plan["dues"]):
@@ -1109,6 +1120,9 @@ class Campaign:
             end = terminal_events.get(t)
             if end and e["seq"] in daemon.arrivals and end["seq"] in daemon.arrivals:
                 completion.append((daemon.arrivals[end["seq"]] - daemon.arrivals[e["seq"]]) * 1000)
+                run_model = spans([x for x in session_events if x.get("task_id") == t], daemon.arrivals,
+                                  "model.requested", {"*model_terminal*"}, lambda x: x["payload"].get("request_id"))
+                harness.append(harness_ms(completion[-1], run_model))
         restarts_ok = plan["restarts"][0] < plan["dues"][0]
         for k in range(1, sched["occurrences"]):
             end = terminal_events.get(run_tasks[k - 1]) if k - 1 < len(run_tasks) else None
@@ -1134,6 +1148,8 @@ class Campaign:
                             t0=None, admission_ms=plan["admission_ms"], wall=batch["wall"],
                             schedule_facts={"verdict": verdict, "claim_ms": max(claim_latency) if claim_latency else None,
                                             "completion_ms": max(completion) if len(completion) == len(claims) and claims else None,
+                                            "harness_ms": (max(harness) if len(harness) == len(claims) and claims
+                                                           and None not in harness else None),
                                             "unavailable": not restarts_ok, "answer": answer,
                                             "selected": batch["selected"]}))
 
@@ -1242,8 +1258,15 @@ class Campaign:
                                 lambda e: e["payload"].get("request_id"))
         res["tool_ms"] = spans(events, arrivals, "tool.started", {"tool.output", "tool.failed"},
                                lambda e: e["payload"].get("call_id"))
-        res["ditto_overhead_ms"] = None
-        nulls["/resources/ditto_overhead_ms"] = "not_instrumented"
+        # The harness's own share (harness_ms, ADR 0042): the turn's completion
+        # less the time its model requests spent at the provider. A scheduled
+        # attempt measures it per run, since its completion is one run's.
+        if schedule_facts:
+            res["ditto_overhead_ms"] = schedule_facts.get("harness_ms")
+        else:
+            res["ditto_overhead_ms"] = harness_ms(res["completion_ms"], res["model_ms"])
+        if res["ditto_overhead_ms"] is None:
+            nulls["/resources/ditto_overhead_ms"] = "not_observed"
         res["model_calls"] = calls
         res["tool_calls"] = sum(e["kind"] == "tool.requested" for e in events)
         res["input_tokens"], res["output_tokens"] = tokens_in, tokens_out
@@ -1292,7 +1315,9 @@ class Campaign:
         manifest = {"source_commit": commit, "source_clean": not dirty, "dry_run": self.dry,
                     "agent_check_exit": self.args.agent_check_exit, "calibration": self.args.calibration,
                     "trace": self.trace, "suite_sha256": sha256(self.suite_bytes),
-                    "planned": len(planned_attempts(self.suite)), "cases_filter": self.args.cases or None}
+                    "planned": len(planned_attempts(self.suite)), "cases_filter": self.args.cases or None,
+                    # Which latency rule the budgets carry (ADR 0042); older manifests omit it and mean 1.
+                    "budgets_version": strict_loads(self.budget_bytes)["schema_version"] if self.budget_bytes else 1}
         self.evidence.put(self.suite_bytes)
         manifest_sha = self.evidence.put_json(manifest)
         budgets = []
@@ -1486,6 +1511,99 @@ def gate_inputs(report: dict, get) -> dict:
     return verdicts
 
 
+def _p(values: list, rank: float):
+    return nearest_rank(values, rank)
+
+
+def cost_latency_gate(attempts: list, cases: dict, report_budgets: list, version: int) -> tuple:
+    """The cost_latency gate as (fails, blocks, stats).
+
+    Budgets version 1 gates the absolute turn time, which is the provider's time
+    and the harness's together. Version 2 (ADR 0042) gates what the harness
+    controls - its own share of the turn (`ditto_overhead_ms`, reported as
+    harness_ms), the model round trips and the input tokens - against the same
+    frozen numbers, and records the absolute turn time, first progress and the
+    provider's time beside them without gating on them.
+    """
+    from decimal import Decimal
+    fails, blocks, stats = [], [], {}
+    key = lambda a: (a["case_id"], a["profile_id"], a["repetition"])
+    budgets = {(b["family"], b["profile_id"]): b for b in report_budgets}
+    used = {(cases[a["case_id"]]["family"], a["profile_id"]) for a in attempts}
+    for fp in sorted(used):
+        group = [a for a in attempts if (cases[a["case_id"]]["family"], a["profile_id"]) == fp]
+        budget = budgets.get(fp)
+        if budget is None:
+            blocks.append(f"{fp} no frozen budget")
+            continue
+        schedule = fp[0] == "schedule"
+        absolute = (("completion_ms", "max_p95_completion_ms"),) + (
+            (("admission_ms", "max_p95_admission_ms"), ("due_to_claim_ms", "max_p95_due_to_claim_ms"))
+            if schedule else (("first_useful_progress_ms", "max_p95_first_progress_ms"),))
+        if version >= 2:
+            # Admission and the claim are the harness's own latencies; the rest of
+            # a turn is waiting for the provider.
+            gated = ([f for f in absolute if f[0] in ("admission_ms", "due_to_claim_ms")]
+                     + [("ditto_overhead_ms", "max_p95_ditto_overhead_ms")])
+            recorded = [f for f in absolute if f not in gated]
+        else:
+            gated, recorded = list(absolute), []
+        for field, ceiling in gated:
+            samples = [a["resources"][field] for a in group]
+            if None in samples or len(samples) < 20:
+                blocks.append(f"{fp} {field}: {len(samples)} samples, {samples.count(None)} missing")
+                continue
+            p95 = _p(samples, 0.95)
+            label = "harness_ms" if field == "ditto_overhead_ms" else field
+            stats[f"{fp[0]}/{fp[1]}/{label}"] = {"p50": _p(samples, 0.5), "p95": p95, "n": len(samples)}
+            if budget[ceiling] is None:
+                blocks.append(f"{fp} {ceiling} uncalibrated")
+            elif p95 > budget[ceiling]:
+                fails.append(f"{fp} {label} p95 {p95:.0f} > {budget[ceiling]}")
+        for field, _ceiling in recorded:
+            samples = [a["resources"][field] for a in group if a["resources"][field] is not None]
+            stats[f"{fp[0]}/{fp[1]}/{field}"] = {
+                "p50": _p(samples, 0.5) if samples else None, "p95": _p(samples, 0.95) if samples else None,
+                "n": len(samples), "missing": len(group) - len(samples), "gating": False}
+        if version >= 2:
+            # The provider's day, recorded so a slow turn can be read against it:
+            # the time spent in model requests per turn, and its mean per request.
+            spans = [a["resources"]["model_ms"] for a in group if a["resources"]["model_ms"] is not None]
+            means = [a["resources"]["model_ms"] / a["resources"]["model_calls"] for a in group
+                     if a["resources"]["model_ms"] is not None and a["resources"]["model_calls"]]
+            for name, values in (("provider_ms", spans), ("provider_request_mean_ms", means)):
+                stats[f"{fp[0]}/{fp[1]}/{name}"] = {
+                    "p50": _p(values, 0.5) if values else None, "p95": _p(values, 0.95) if values else None,
+                    "n": len(values), "missing": len(group) - len(values), "gating": False}
+        # The ceilings were frozen from a p95, so they describe the shape of the
+        # group, not the worst single attempt: applying a p95 ceiling to every
+        # sample fails about five percent of attempts by construction. Compare
+        # the group's p95, and keep a three-times runaway guard on single tries.
+        for field, ceiling in (("model_calls", "max_model_calls"), ("tool_calls", "max_tool_calls"),
+                               ("input_tokens", "max_input_tokens"), ("output_tokens", "max_output_tokens")):
+            values = [a["resources"][field] for a in group]
+            if None in values or budget[ceiling] is None:
+                blocks.append(f"{fp} {field} or ceiling missing")
+                continue
+            p95, runaways = budget_check(values, budget[ceiling])
+            stats[f"{fp[0]}/{fp[1]}/{field}"] = {"p50": nearest_rank(values, 0.5), "p95": p95, "n": len(values)}
+            if p95 > budget[ceiling]:
+                fails.append(f"{fp} {field} p95 {p95:g} > {budget[ceiling]:g}")
+            fails += [f"{fp} {field} {v:g} > 3x {budget[ceiling]:g}" for v in runaways]
+        usd = [Decimal(str(a["resources"]["external_provider_usd"])) for a in group
+               if a["resources"]["external_provider_usd"] is not None]
+        if len(usd) != len(group) or budget["max_external_provider_usd"] is None:
+            blocks.append(f"{fp} usd or ceiling missing")
+        else:
+            ceiling_usd = Decimal(budget["max_external_provider_usd"])
+            p95_usd = sorted(usd)[max(0, math.ceil(0.95 * len(usd)) - 1)]
+            if p95_usd > ceiling_usd:
+                fails.append(f"{fp} usd p95 {p95_usd} > {ceiling_usd}")
+            fails += [f"{key(a)} usd over 3x ceiling" for a in group
+                      if Decimal(str(a["resources"]["external_provider_usd"])) > 3 * ceiling_usd]
+    return fails, blocks, stats
+
+
 def compute_gates(report: dict, suite: dict, get, manifest: dict) -> list[tuple[str, str, dict]]:
     cases = {c["case_id"]: c for c in suite["cases"]}
     attempts = report["attempts"]
@@ -1654,56 +1772,7 @@ def compute_gates(report: dict, suite: dict, get, manifest: dict) -> list[tuple[
     done("schedule", fails, blocks)
 
     # cost/latency
-    fails, blocks, stats = [], [], {}
-    budgets = {(b["family"], b["profile_id"]): b for b in report["budgets"]}
-    used = {(cases[a["case_id"]]["family"], a["profile_id"]) for a in attempts}
-    for fp in sorted(used):
-        group = [a for a in attempts if (cases[a["case_id"]]["family"], a["profile_id"]) == fp]
-        budget = budgets.get(fp)
-        if budget is None:
-            blocks.append(f"{fp} no frozen budget")
-            continue
-        fields = (("completion_ms", "max_p95_completion_ms"),) + (
-            (("admission_ms", "max_p95_admission_ms"), ("due_to_claim_ms", "max_p95_due_to_claim_ms"))
-            if fp[0] == "schedule" else (("first_useful_progress_ms", "max_p95_first_progress_ms"),))
-        for field, ceiling in fields:
-            samples = [a["resources"][field] for a in group]
-            if None in samples or len(samples) < 20:
-                blocks.append(f"{fp} {field}: {len(samples)} samples, {samples.count(None)} missing")
-                continue
-            p95 = nearest_rank(samples, 0.95)
-            stats[f"{fp[0]}/{fp[1]}/{field}"] = {"p50": nearest_rank(samples, 0.5), "p95": p95, "n": len(samples)}
-            if budget[ceiling] is None:
-                blocks.append(f"{fp} {ceiling} uncalibrated")
-            elif p95 > budget[ceiling]:
-                fails.append(f"{fp} {field} p95 {p95:.0f} > {budget[ceiling]}")
-        from decimal import Decimal
-        # The ceilings were frozen from a p95, so they describe the shape of the
-        # group, not the worst single attempt: applying a p95 ceiling to every
-        # sample fails about five percent of attempts by construction. Compare
-        # the group's p95, and keep a three-times runaway guard on single tries.
-        for field, ceiling in (("model_calls", "max_model_calls"), ("tool_calls", "max_tool_calls"),
-                               ("input_tokens", "max_input_tokens"), ("output_tokens", "max_output_tokens")):
-            values = [a["resources"][field] for a in group]
-            if None in values or budget[ceiling] is None:
-                blocks.append(f"{fp} {field} or ceiling missing")
-                continue
-            p95, runaways = budget_check(values, budget[ceiling])
-            stats[f"{fp[0]}/{fp[1]}/{field}"] = {"p50": nearest_rank(values, 0.5), "p95": p95, "n": len(values)}
-            if p95 > budget[ceiling]:
-                fails.append(f"{fp} {field} p95 {p95:g} > {budget[ceiling]:g}")
-            fails += [f"{fp} {field} {v:g} > 3x {budget[ceiling]:g}" for v in runaways]
-        usd = [Decimal(str(a["resources"]["external_provider_usd"])) for a in group
-               if a["resources"]["external_provider_usd"] is not None]
-        if len(usd) != len(group) or budget["max_external_provider_usd"] is None:
-            blocks.append(f"{fp} usd or ceiling missing")
-        else:
-            ceiling_usd = Decimal(budget["max_external_provider_usd"])
-            p95_usd = sorted(usd)[max(0, math.ceil(0.95 * len(usd)) - 1)]
-            if p95_usd > ceiling_usd:
-                fails.append(f"{fp} usd p95 {p95_usd} > {ceiling_usd}")
-            fails += [f"{key(a)} usd over 3x ceiling" for a in group
-                      if Decimal(str(a["resources"]["external_provider_usd"])) > 3 * ceiling_usd]
+    fails, blocks, stats = cost_latency_gate(attempts, cases, report["budgets"], manifest.get("budgets_version", 1))
     done("cost_latency", fails, blocks, {"stats": stats})
 
     # resource
@@ -1840,6 +1909,8 @@ def report_errors(run_dir: Path, suite_bytes: bytes, budget_bytes: bytes | None 
             freeze = sha256(budget_bytes)
             manifest = strict_loads(budget_bytes)
             errors += budget_manifest_errors(manifest)
+            if run_manifest.get("budgets_version", 1) != manifest.get("schema_version"):
+                errors.append("run manifest was bound to another budgets version")
             if dt.datetime.fromisoformat(manifest["frozen_utc"].replace("Z", "+00:00")) >= \
                     dt.datetime.fromisoformat(report["environment"]["started_utc"].replace("Z", "+00:00")):
                 errors.append("budgets were not frozen before the campaign started")
@@ -1966,6 +2037,12 @@ def budget_manifest_errors(manifest: dict) -> list[str]:
         need = ["max_p95_completion_ms", "max_model_calls", "max_tool_calls", "max_input_tokens", "max_output_tokens",
                 "max_external_provider_usd"] + (["max_p95_admission_ms", "max_p95_due_to_claim_ms"] if schedule
                                                 else ["max_p95_first_progress_ms"])
+        if manifest["schema_version"] >= 2:
+            # Version 2 gates the harness's own share against the frozen turn
+            # ceiling and changes no number (ADR 0042).
+            need = need + ["max_p95_ditto_overhead_ms"]
+            if b["max_p95_ditto_overhead_ms"] != b["max_p95_completion_ms"]:
+                errors.append(f"{where}: the harness ceiling must be the frozen turn ceiling")
         errors += [f"{where}: {k} must be finite" for k in need if b[k] is None]
         na = ["max_p95_first_progress_ms"] if schedule else ["max_p95_admission_ms", "max_p95_due_to_claim_ms"]
         for k in na:

@@ -424,7 +424,7 @@ declared semantics; `not_applicable` is distinct from missing measurement.
       "required": ["record_type", "schema_version", "frozen_utc", "budgets"],
       "properties": {
         "record_type": {"const": "budget_manifest"},
-        "schema_version": {"const": 1},
+        "schema_version": {"enum": [1, 2]},
         "frozen_utc": {"type": "string", "format": "date-time"},
         "budgets": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/budget"}}
       }

@@ -219,6 +219,13 @@ pages that tool only for the permitted run and derives its exact-resource lease;
 natural-language instructions never create authority. No arbitrary executable
 or shell is exposed. See [ADR 0018](adr/0018-user-scoped-model-sort.md).
 
+When the permission fixes the operation (it does not allow deduplicating), the
+harness runs that one sort itself before the first model request, with the same
+lease, process, verifier and `tool.*` events, recorded by the system as a
+prefetch, and compiles the first lines of its order into the context; the
+model still composes the answer, and a later model call finds the lease spent.
+See [ADR 0041](adr/0041-read-only-prefetch.md).
+
 SSH is placement transport, not a model-facing raw shell.
 
 ## Artifacts and evidence

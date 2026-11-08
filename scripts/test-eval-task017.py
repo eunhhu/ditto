@@ -162,6 +162,102 @@ class BudgetCheck(unittest.TestCase):
         self.assertEqual(runaways, [4200])
 
 
+def attempt(case="C", profile="clean", completion=1000.0, model=900.0, calls=2, tokens=3000, progress=500.0,
+            harness="derive"):
+    """One attempt's resources, as the gate reads them."""
+    return {"case_id": case, "profile_id": profile, "repetition": 0, "resources": {
+        "completion_ms": completion, "first_useful_progress_ms": progress, "admission_ms": None,
+        "due_to_claim_ms": None, "model_ms": model,
+        "ditto_overhead_ms": ev.harness_ms(completion, model) if harness == "derive" else harness,
+        "model_calls": calls, "tool_calls": 1, "input_tokens": tokens, "output_tokens": 100,
+        "external_provider_usd": "0.0010"}}
+
+
+class CostLatencySplit(unittest.TestCase):
+    """ADR 0042: the harness's share is gated; the provider's day is recorded."""
+
+    V1 = json.loads((ROOT / "eval/task017/budgets-v1.json").read_text())
+    V2 = json.loads((ROOT / "eval/task017/budgets-v2.json").read_text())
+    CASES = {"C": {"family": "tool"}}
+
+    def gate(self, attempts, version, budgets=None):
+        return ev.cost_latency_gate(attempts, self.CASES, (budgets or self.V2)["budgets"], version)
+
+    def group(self, **kwargs):
+        return [attempt(**kwargs) for _ in range(20)]
+
+    def test_budgets_v2_changes_no_frozen_number(self):
+        self.assertEqual(ev.budget_manifest_errors(self.V1), [])
+        self.assertEqual(ev.budget_manifest_errors(self.V2), [])
+        self.assertEqual(self.V2["schema_version"], 2)
+        for old, new in zip(self.V1["budgets"], self.V2["budgets"]):
+            self.assertEqual((old["family"], old["profile_id"]), (new["family"], new["profile_id"]))
+            for field, value in old.items():
+                if field in ("max_p95_ditto_overhead_ms", "null_reasons"):
+                    continue
+                self.assertEqual(value, new[field], field)
+            self.assertEqual(new["max_p95_ditto_overhead_ms"], old["max_p95_completion_ms"])
+
+    def test_a_harness_ceiling_other_than_the_frozen_one_is_refused(self):
+        forged = copy.deepcopy(self.V2)
+        forged["budgets"][0]["max_p95_ditto_overhead_ms"] += 1
+        self.assertTrue(ev.budget_manifest_errors(forged))
+        unset = copy.deepcopy(self.V2)
+        unset["budgets"][0]["max_p95_ditto_overhead_ms"] = None
+        unset["budgets"][0]["null_reasons"].append({"path": "/max_p95_ditto_overhead_ms", "reason": "uncalibrated"})
+        self.assertTrue(ev.budget_manifest_errors(unset))
+
+    def test_harness_share_is_the_turn_less_the_provider(self):
+        self.assertEqual(ev.harness_ms(1000.0, 900.0), 100.0)
+        self.assertIsNone(ev.harness_ms(None, 900.0))
+        self.assertIsNone(ev.harness_ms(1000.0, None))
+        self.assertIsNone(ev.harness_ms(900.0, 1000.0), "spans longer than the turn are a clock fault")
+
+    def test_a_slow_provider_day_fails_version_1_and_passes_version_2(self):
+        ceiling = self.V1["budgets"][-1]["max_p95_completion_ms"]
+        slow = self.group(completion=ceiling * 2.0, model=ceiling * 2.0 - 50.0, progress=ceiling * 2.0 - 60.0)
+        fails, blocks, _ = self.gate(slow, 1, self.V1)
+        self.assertTrue(any("completion_ms" in f for f in fails), fails)
+        fails, blocks, stats = self.gate(slow, 2)
+        self.assertEqual((fails, blocks), ([], []))
+        turn = stats["tool/clean/completion_ms"]
+        self.assertGreater(turn["p95"], ceiling)
+        self.assertIs(turn["gating"], False)
+        self.assertIs(stats["tool/clean/first_useful_progress_ms"]["gating"], False)
+        self.assertEqual(stats["tool/clean/harness_ms"]["p95"], 50.0)
+        self.assertNotIn("gating", stats["tool/clean/harness_ms"])
+        provider = stats["tool/clean/provider_ms"]
+        self.assertEqual((provider["p95"], provider["gating"]), (ceiling * 2.0 - 50.0, False))
+        self.assertEqual(stats["tool/clean/provider_request_mean_ms"]["p95"], (ceiling * 2.0 - 50.0) / 2)
+
+    def test_the_harness_over_the_frozen_ceiling_fails_version_2(self):
+        ceiling = self.V1["budgets"][-1]["max_p95_completion_ms"]
+        slow = self.group(completion=ceiling + 2000.0, model=1000.0)
+        fails, _, stats = self.gate(slow, 2)
+        self.assertTrue(any("harness_ms" in f for f in fails), fails)
+        self.assertGreater(stats["tool/clean/harness_ms"]["p95"], ceiling)
+
+    def test_an_unmeasured_harness_share_blocks_instead_of_passing(self):
+        fails, blocks, _ = self.gate(self.group(harness=None), 2)
+        self.assertEqual(fails, [])
+        self.assertTrue(any("ditto_overhead_ms" in b for b in blocks), blocks)
+
+    def test_round_trips_and_input_tokens_stay_gated_in_version_2(self):
+        calls_ceiling = self.V1["budgets"][-1]["max_model_calls"]
+        tokens_ceiling = self.V1["budgets"][-1]["max_input_tokens"]
+        fails, _, _ = self.gate(self.group(calls=calls_ceiling + 1), 2)
+        self.assertTrue(any("model_calls" in f for f in fails), fails)
+        fails, _, _ = self.gate(self.group(tokens=tokens_ceiling + 1), 2)
+        self.assertTrue(any("input_tokens" in f for f in fails), fails)
+
+    def test_version_1_output_is_unchanged_by_the_split(self):
+        fails, blocks, stats = self.gate(self.group(), 1, self.V1)
+        self.assertEqual((fails, blocks), ([], []))
+        self.assertNotIn("tool/clean/harness_ms", stats)
+        self.assertNotIn("tool/clean/provider_ms", stats)
+        self.assertNotIn("gating", stats["tool/clean/completion_ms"])
+
+
 class CaseThreshold(unittest.TestCase):
     """A five-attempt case cannot carry a 0.80 threshold."""
 

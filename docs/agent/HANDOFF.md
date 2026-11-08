@@ -263,6 +263,26 @@ while the median turn went 8.1 s -> 13.4 s, so the ceiling is measuring the
 provider's day rather than the harness. Do not widen the ceiling to make the
 gate pass; re-measure it deliberately or run in a faster window.
 
+## Latest verified slice: Task 017, the cost_latency split (ADR 0042)
+
+`budgets-v2.json` (schema version 2) gates the `cost_latency` family on
+`harness_ms` - the turn's completion less the sum of its model request spans,
+recorded in the existing `resources.ditto_overhead_ms` field - together with the
+model round trips and the input tokens, while the absolute turn time and the
+provider's own span are recorded with a same-day baseline and do not gate.
+`budgets-v1.json` keeps its meaning and stays readable; every ceiling in v2
+equals its v1 value, so nothing was loosened. `scripts/test-eval-task017.py`
+covers the split (35 tests). Not yet exercised by a full campaign: the next run
+is the first that grades under v2.
+
+Parked, not shipped: prefetching the granted `artifact.sort` before the first
+model request (a working patch in `~/.hermes/cache/scratch/sort-prefetch.patch`).
+It reaches one model request per artifact turn but it performs an effect at
+turn start - the sort publishes an output artifact and spends the one-shot
+lease, so the model can no longer choose different arguments - and four
+`model_sort` tests encode the current "the harness never sorts unless the model
+asks" behaviour. That contract change needs its own decision before it lands.
+
 ## Latest work: Task 042, a harness-side search budget
 
 - A turn makes at most three `memory.search` calls; a fourth returns
