@@ -571,6 +571,40 @@ signature - bounded at two extra tries - and records the count as
 Ditto, so it must not become one; an attempt that spent tokens or carries a
 failure reason is never retried.
 
+## Campaign 11 (the granted sort inside the turn, graded under budgets v2)
+
+ADR 0041's amendment and ADR 0042 both landed before this run, so it measures
+the sort that runs before the first model request and grades with the split
+`cost_latency` gate for the first time.
+
+| measure | campaign 10 | campaign 11 |
+| --- | --- | --- |
+| observed attempts | 130 / 130 | 130 / 130 |
+| model requests per turn | 2.00 | **1.72** |
+| tool family (artifact) | 2.10 | **1.70** |
+| mixed family | 2.12 | **1.50** |
+| memory family | 1.96 | 1.90 |
+| schedule family | 1.75 | 1.75 |
+| mean input tokens | 3,094 | **2,629** |
+| spend | $0.1547 | **$0.1314** |
+
+Gates: integrity, safety, tool, schedule and resource pass. `answer` is blocked
+on the second reading of 21 disputed items (rule-based first pass: 86 pass, 21
+disputed, none failing). Two reported failures were examined:
+
+- `semantic` reported precision 0.727 on both profiles. That was the evaluator,
+  not the retrieval: the sort's prefetched node carries the id `prefetch_sort_*`
+  and the earlier exclusion only skipped the `prefetch_attachment_` prefix, so
+  the harness's own read was scored as a false positive. Excluding by receipt
+  reason (`prefetch-`) recomputes to **45/45 clean and 30/30 long_use, precision
+  1.000**. The fix is in `scripts/eval_task017.py`; the stored 0.727 belongs to
+  the old logic and is not rewritten.
+- `cost_latency` fails on `admission_ms` p95 6.2 ms against the frozen 5 ms, with
+  p50 2.35 ms over 20 samples and one 10.4 ms outlier on S4. Admission runs
+  before compilation or prefetch, so this is not the new slice; it is the
+  harness's own startup-tail on this host and needs its own investigation rather
+  than a ceiling change.
+
 ## Campaign 10 (the attachment compiled before the model asks)
 
 ADR 0041 landed before this run: a turn that holds a sort permission compiles

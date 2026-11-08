@@ -694,7 +694,7 @@ def harness_ms(completion_ms, model_ms):
     return completion_ms - model_ms
 
 
-PREFETCH_NODE_PREFIX = "prefetch_attachment_"
+PREFETCH_REASON_PREFIX = "prefetch-"
 
 
 def memory_context(case: dict, events: list[dict], labels: dict) -> dict | None:
@@ -703,12 +703,19 @@ def memory_context(case: dict, events: list[dict], labels: dict) -> dict | None:
     if not compiled:
         return None
     sources = labels.get("_node_sources", {})
+    # A prefetched node is context the harness supplied from a grant the turn
+    # already held, not something retrieval returned; counting it would score the
+    # harness's own read as a false positive (ADR 0041). The receipt reason is
+    # the canonical marker, not the node id.
+    receipt = compiled[0]["payload"]["compiled"].get("receipt") or {}
+    prefetched = {
+        entry.get("node_id")
+        for entry in receipt.get("included") or []
+        if str(entry.get("reason", "")).startswith(PREFETCH_REASON_PREFIX)
+    }
     returned = []
     for node in compiled[0]["payload"]["compiled"]["nodes"]:
-        # A prefetched attachment is context the harness supplied from a grant the
-        # turn already held, not something retrieval returned; counting it would
-        # score the harness's own read as a false positive (ADR 0041).
-        if str(node.get("id", "")).startswith(PREFETCH_NODE_PREFIX):
+        if node.get("id") in prefetched:
             continue
         returned += [s for s in node.get("source_event_ids") or [sources.get(node["id"], node["id"])] if s not in returned]
     for e in events:
