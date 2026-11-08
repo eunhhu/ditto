@@ -651,6 +651,34 @@ def run_events(events: list[dict], task_id: str) -> list[dict]:
     return [e for e in events if e.get("task_id") == task_id]
 
 
+def event_ms(event: dict | None):
+    """The event's recorded time in epoch milliseconds, when it has one.
+
+    Journals carry `recorded_at` at millisecond precision with or without a
+    fractional part, so both forms are accepted.
+    """
+    if not event or not event.get("recorded_at"):
+        return None
+    text = str(event["recorded_at"]).replace("Z", "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            moment = dt.datetime.strptime(text, fmt).replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            continue
+        return moment.timestamp() * 1000
+    return None
+
+
+def daemon_admission_ms(events: list[dict]):
+    """The daemon's own admission span for a scheduled turn: the occurrence the
+    scheduler claimed to the turn it admitted. The client's round trip for the
+    command that registered it is a durable-write measurement and is not this."""
+    claimed = next((e for e in events if e["kind"] == "schedule.occurrence.claimed"), None)
+    received = next((e for e in events if e["kind"] == "input.received"), None)
+    a, b = event_ms(claimed), event_ms(received)
+    return None if a is None or b is None else max(0.0, b - a)
+
+
 def model_usage(events: list[dict]):
     """(model_calls, input_tokens, output_tokens, model_ms_spans) from one run's events."""
     requests, usage = [], {}
@@ -1243,6 +1271,9 @@ class Campaign:
         res = {}
         if schedule_facts:
             res["admission_ms"] = admission_ms
+            res["daemon_admission_ms"] = daemon_admission_ms(events)
+            if res["daemon_admission_ms"] is None:
+                nulls["/resources/daemon_admission_ms"] = "not_observed"
             res["due_to_claim_ms"] = schedule_facts["claim_ms"]
             res["first_useful_progress_ms"] = None
             nulls["/resources/first_useful_progress_ms"] = "not_applicable"
@@ -1250,6 +1281,8 @@ class Campaign:
         else:
             res["admission_ms"] = None
             nulls["/resources/admission_ms"] = "not_applicable"
+            res["daemon_admission_ms"] = None
+            nulls["/resources/daemon_admission_ms"] = "not_applicable"
             res["due_to_claim_ms"] = None
             nulls["/resources/due_to_claim_ms"] = "not_applicable"
             first = next((e for e in events if e["kind"] == "model.output" and
@@ -1404,7 +1437,7 @@ def finish_control(control: dict) -> dict:
 
 def unavailable_attempt(case: dict, profile_id: str, rep: int, why: str, evidence: Evidence) -> dict:
     verdict = evidence.put_json({"verifier": "unavailable", "reason": why})
-    resources = {k: None for k in ["completion_ms", "first_useful_progress_ms", "admission_ms", "due_to_claim_ms", "model_ms",
+    resources = {k: None for k in ["completion_ms", "first_useful_progress_ms", "admission_ms", "daemon_admission_ms", "due_to_claim_ms", "model_ms",
                                    "tool_ms", "ditto_overhead_ms", "model_calls", "tool_calls", "input_tokens",
                                    "output_tokens", "external_provider_usd", "total_operating_usd", "pricing_sha256",
                                    "server_peak_rss_bytes", "child_peak_rss_bytes", "retained_bytes", "inactive_body_loads"]}
@@ -1545,9 +1578,18 @@ def cost_latency_gate(attempts: list, cases: dict, report_budgets: list, version
             continue
         schedule = fp[0] == "schedule"
         absolute = (("completion_ms", "max_p95_completion_ms"),) + (
-            (("admission_ms", "max_p95_admission_ms"), ("due_to_claim_ms", "max_p95_due_to_claim_ms"))
+            (("admission_ms", "max_p95_admission_ms"), ("daemon_admission_ms", "max_p95_daemon_admission_ms"),
+             ("due_to_claim_ms", "max_p95_due_to_claim_ms"))
             if schedule else (("first_useful_progress_ms", "max_p95_first_progress_ms"),))
-        if version >= 2:
+        if version >= 3:
+            # Admission is the daemon's own span from claiming the occurrence to
+            # admitting the turn. The client's round trip for the command that
+            # registered it is dominated by fsync on the store and is recorded.
+            gated = ([("daemon_admission_ms", "max_p95_daemon_admission_ms"),
+                      ("due_to_claim_ms", "max_p95_due_to_claim_ms")]
+                     + [("ditto_overhead_ms", "max_p95_ditto_overhead_ms")])
+            recorded = [f for f in absolute if f not in gated]
+        elif version >= 2:
             # Admission and the claim are the harness's own latencies; the rest of
             # a turn is waiting for the provider.
             gated = ([f for f in absolute if f[0] in ("admission_ms", "due_to_claim_ms")]
@@ -1992,6 +2034,7 @@ ATTEMPT_NULLABLE = (["/evidence/journal_sha256", "/evidence/context_sha256", "/e
                      "/evidence/verifier_sha256", "/context", "/independent_success", "/verifier_id", "/answer_grade",
                      "/false_completion"]
                     + [f"/resources/{k}" for k in ["completion_ms", "first_useful_progress_ms", "admission_ms",
+                                                   "daemon_admission_ms",
                                                    "due_to_claim_ms", "model_ms", "tool_ms", "ditto_overhead_ms",
                                                    "model_calls", "tool_calls", "input_tokens", "output_tokens",
                                                    "external_provider_usd", "total_operating_usd", "pricing_sha256",
@@ -2001,7 +2044,7 @@ CONTROL_NULLABLE = [f"/{k}" for k in ["seed_model_calls", "recovery_model_calls"
                                       "startup_inactive_body_loads", "startup_ms", "recovery_ms", "idle_rss_bytes",
                                       "storage_bytes", "evidence_sha256"]]
 BUDGET_NULLABLE = [f"/{k}" for k in ["max_p95_completion_ms", "max_p95_first_progress_ms", "max_p95_admission_ms",
-                                     "max_p95_due_to_claim_ms", "max_model_calls", "max_tool_calls", "max_input_tokens",
+                                     "max_p95_daemon_admission_ms", "max_p95_due_to_claim_ms", "max_model_calls", "max_tool_calls", "max_input_tokens",
                                      "max_output_tokens", "max_external_provider_usd", "max_p95_ditto_overhead_ms",
                                      "freeze_sha256"]]
 
@@ -2037,13 +2080,23 @@ def budget_manifest_errors(manifest: dict) -> list[str]:
         where = f"budget {b['family']}/{b['profile_id']}"
         if b["freeze_sha256"] is not None:
             errors.append(f"{where}: manifest freeze_sha256 must be null")
-        errors += null_reason_errors(b, BUDGET_NULLABLE, where)
+        schedule = b["family"] == "schedule"
+        nullable = list(BUDGET_NULLABLE)
+        if manifest["schema_version"] < 3 or not schedule:
+            nullable.remove("/max_p95_daemon_admission_ms")
+        errors += null_reason_errors(b, nullable, where)
         if {"path": "/freeze_sha256", "reason": "not_applicable"} not in b["null_reasons"]:
             errors.append(f"{where}: freeze_sha256 needs not_applicable")
-        schedule = b["family"] == "schedule"
         need = ["max_p95_completion_ms", "max_model_calls", "max_tool_calls", "max_input_tokens", "max_output_tokens",
                 "max_external_provider_usd"] + (["max_p95_admission_ms", "max_p95_due_to_claim_ms"] if schedule
                                                 else ["max_p95_first_progress_ms"])
+        if manifest["schema_version"] >= 3:
+            # Version 3 gates admission on the daemon's own span and keeps the
+            # client's command round trip as a recorded number (ADR 0043).
+            if schedule:
+                need = need + ["max_p95_daemon_admission_ms"]
+                if b["max_p95_daemon_admission_ms"] != b["max_p95_admission_ms"]:
+                    errors.append(f"{where}: the daemon admission ceiling must be the frozen admission ceiling")
         if manifest["schema_version"] >= 2:
             # Version 2 gates the harness's own share against the frozen turn
             # ceiling and changes no number (ADR 0042).

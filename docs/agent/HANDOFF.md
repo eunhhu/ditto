@@ -263,6 +263,15 @@ while the median turn went 8.1 s -> 13.4 s, so the ceiling is measuring the
 provider's day rather than the harness. Do not widen the ceiling to make the
 gate pass; re-measure it deliberately or run in a faster window.
 
+## Latest verified slice: admission is the daemon's span (ADR 0043)
+
+`budgets-v3` gates `daemon_admission_ms` (journal: claimed occurrence to admitted
+turn, 0-1 ms measured) and keeps the client's command round trip as a recorded
+number, because that round trip is the store's fsync tail on this host (p50 0.74 ms
+on tmpfs, 2.35 ms on the SD card). No ceiling changed; a manifest check refuses a
+v3 file that relaxes admission. `scripts/test-eval-task017.py` covers it with 41
+tests.
+
 ## Latest verified slice: Task 017, the cost_latency split (ADR 0042)
 
 `budgets-v2.json` (schema version 2) gates the `cost_latency` family on

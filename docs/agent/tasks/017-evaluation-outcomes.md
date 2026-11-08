@@ -308,6 +308,7 @@ declared semantics; `not_applicable` is distinct from missing measurement.
         "max_p95_completion_ms": {"type": ["integer", "null"], "minimum": 0},
         "max_p95_first_progress_ms": {"type": ["integer", "null"], "minimum": 0},
         "max_p95_admission_ms": {"type": ["integer", "null"], "minimum": 0},
+        "max_p95_daemon_admission_ms": {"type": ["integer", "null"], "minimum": 0},
         "max_p95_due_to_claim_ms": {"type": ["integer", "null"], "minimum": 0},
         "max_model_calls": {"type": ["integer", "null"], "minimum": 0},
         "max_tool_calls": {"type": ["integer", "null"], "minimum": 0},
@@ -376,11 +377,12 @@ declared semantics; `not_applicable` is distinct from missing measurement.
         "transport_retries": {"type": "integer", "minimum": 0},
         "resources": {
           "type": "object", "additionalProperties": false,
-          "required": ["completion_ms", "first_useful_progress_ms", "admission_ms", "due_to_claim_ms", "model_ms", "tool_ms", "ditto_overhead_ms", "model_calls", "tool_calls", "input_tokens", "output_tokens", "external_provider_usd", "total_operating_usd", "pricing_sha256", "server_peak_rss_bytes", "child_peak_rss_bytes", "retained_bytes", "inactive_body_loads"],
+          "required": ["completion_ms", "first_useful_progress_ms", "admission_ms", "daemon_admission_ms", "due_to_claim_ms", "model_ms", "tool_ms", "ditto_overhead_ms", "model_calls", "tool_calls", "input_tokens", "output_tokens", "external_provider_usd", "total_operating_usd", "pricing_sha256", "server_peak_rss_bytes", "child_peak_rss_bytes", "retained_bytes", "inactive_body_loads"],
           "properties": {
             "completion_ms": {"type": ["number", "null"], "minimum": 0},
             "first_useful_progress_ms": {"type": ["number", "null"], "minimum": 0},
             "admission_ms": {"type": ["number", "null"], "minimum": 0},
+            "daemon_admission_ms": {"type": ["number", "null"], "minimum": 0},
             "due_to_claim_ms": {"type": ["number", "null"], "minimum": 0},
             "model_ms": {"type": ["number", "null"], "minimum": 0},
             "tool_ms": {"type": ["number", "null"], "minimum": 0},
@@ -424,7 +426,7 @@ declared semantics; `not_applicable` is distinct from missing measurement.
       "required": ["record_type", "schema_version", "frozen_utc", "budgets"],
       "properties": {
         "record_type": {"const": "budget_manifest"},
-        "schema_version": {"enum": [1, 2]},
+        "schema_version": {"enum": [1, 2, 3]},
         "frozen_utc": {"type": "string", "format": "date-time"},
         "budgets": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/budget"}}
       }
@@ -585,9 +587,12 @@ appending one command event. Same release binary, same request, 100 samples:
 So the value is the filesystem's `fsync` tail on this host, not the harness's own
 admission work, which is sub-millisecond. Campaign 10 measured the same path at
 p95 5.11 ms against the same 5 ms ceiling, so the ceiling sits at the noise floor
-of a 20-sample p95 and the gate flips on a single I/O hiccup. Recorded as a
-measurement defect to fix (daemon-side admission span, with the client round trip
-kept as a recorded number), not as a reason to move the ceiling.
+of a 20-sample p95 and the gate flips on a single I/O hiccup. Fixed by ADR 0043 rather than
+by moving the ceiling: `budgets-v3` gates `daemon_admission_ms`, the journal span
+from the claimed occurrence to the admitted turn, which is 0-1 ms in these same
+runs; the client round trip stays as a recorded number. Every ceiling in v3 is
+identical to v2 and a manifest check refuses a v3 file whose admission ceiling
+differs from the frozen one.
 
 ## Campaign 11 (the granted sort inside the turn, graded under budgets v2)
 

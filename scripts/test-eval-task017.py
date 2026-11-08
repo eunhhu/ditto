@@ -344,5 +344,66 @@ class FailureLog(unittest.TestCase):
         self.assertEqual(runner.failure_logs, [])
 
 
+class AdmissionDefinition(unittest.TestCase):
+    """ADR 0043: admission is the daemon's span, not the store's fsync tail."""
+
+    V2 = json.loads((ROOT / "eval/task017/budgets-v2.json").read_text())
+    V3 = json.loads((ROOT / "eval/task017/budgets-v3.json").read_text())
+    CASES = {"S": {"family": "schedule"}}
+
+    def group(self, **overrides):
+        rows = []
+        for _ in range(20):
+            res = {"completion_ms": 1000.0, "first_useful_progress_ms": None, "admission_ms": 2.0,
+                   "daemon_admission_ms": 1.0, "due_to_claim_ms": 3.0, "model_ms": 900.0,
+                   "ditto_overhead_ms": 100.0, "model_calls": 1, "tool_calls": 0, "input_tokens": 3000,
+                   "output_tokens": 100, "external_provider_usd": "0.0010"}
+            res.update(overrides)
+            rows.append({"case_id": "S", "profile_id": "clean", "repetition": 0, "resources": res})
+        return rows
+
+    def gate(self, attempts, version, manifest=None):
+        return ev.cost_latency_gate(attempts, self.CASES, (manifest or self.V3)["budgets"], version)
+
+    def test_budgets_v3_changes_no_frozen_ceiling(self):
+        self.assertEqual(ev.budget_manifest_errors(self.V3), [])
+        self.assertEqual(self.V3["schema_version"], 3)
+        for old, new in zip(self.V2["budgets"], self.V3["budgets"]):
+            self.assertEqual((old["family"], old["profile_id"]), (new["family"], new["profile_id"]))
+            for field, value in old.items():
+                self.assertEqual(value, new[field], field)
+            if old["family"] == "schedule":
+                self.assertEqual(new["max_p95_daemon_admission_ms"], old["max_p95_admission_ms"])
+
+    def test_a_daemon_admission_ceiling_other_than_the_frozen_one_is_refused(self):
+        forged = copy.deepcopy(self.V3)
+        schedule = next(b for b in forged["budgets"] if b["family"] == "schedule")
+        schedule["max_p95_daemon_admission_ms"] += 1
+        self.assertTrue(ev.budget_manifest_errors(forged))
+
+    def test_the_daemon_span_is_read_from_the_journal(self):
+        events = [{"kind": "schedule.occurrence.claimed", "recorded_at": "2026-11-08T12:20:13.170Z"},
+                  {"kind": "input.received", "recorded_at": "2026-11-08T12:20:13.171Z"}]
+        self.assertAlmostEqual(ev.daemon_admission_ms(events), 1.0, places=3)
+        coarse = [{"kind": "schedule.occurrence.claimed", "recorded_at": "2026-11-08T12:20:13Z"},
+                  {"kind": "input.received", "recorded_at": "2026-11-08T12:20:13Z"}]
+        self.assertEqual(ev.daemon_admission_ms(coarse), 0.0)
+        self.assertIsNone(ev.daemon_admission_ms(events[:1]), "an unclaimed occurrence has no span")
+
+    def test_a_slow_store_round_trip_does_not_fail_version_3(self):
+        fails, blocks, stats = self.gate(self.group(admission_ms=40.0), 3)
+        self.assertEqual((fails, blocks), ([], []), fails)
+        self.assertIs(stats["schedule/clean/admission_ms"]["gating"], False)
+        self.assertGreater(stats["schedule/clean/daemon_admission_ms"]["p95"], 0.0)
+
+    def test_a_slow_daemon_admission_still_fails_version_3(self):
+        fails, blocks, _ = self.gate(self.group(daemon_admission_ms=40.0), 3)
+        self.assertTrue(any("daemon_admission_ms" in f for f in fails), fails)
+
+    def test_version_2_still_gates_the_client_round_trip(self):
+        fails, blocks, _ = self.gate(self.group(admission_ms=40.0), 2, self.V2)
+        self.assertTrue(any("admission_ms" in f for f in fails), fails)
+
+
 if __name__ == "__main__":
     unittest.main()

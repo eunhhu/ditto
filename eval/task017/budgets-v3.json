@@ -1,0 +1,178 @@
+{
+ "record_type": "budget_manifest",
+ "schema_version": 3,
+ "frozen_utc": "2026-11-08T13:37:20Z",
+ "budgets": [
+  {
+   "family": "memory",
+   "profile_id": "clean",
+   "max_p95_completion_ms": 19101,
+   "max_p95_first_progress_ms": 18190,
+   "max_p95_admission_ms": null,
+   "max_p95_due_to_claim_ms": null,
+   "max_model_calls": 6,
+   "max_tool_calls": 6,
+   "max_input_tokens": 7922,
+   "max_output_tokens": 851,
+   "max_external_provider_usd": "0.00305685",
+   "max_p95_ditto_overhead_ms": 19101,
+   "freeze_sha256": null,
+   "null_reasons": [
+    {
+     "path": "/max_p95_admission_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/max_p95_due_to_claim_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/freeze_sha256",
+     "reason": "not_applicable"
+    }
+   ]
+  },
+  {
+   "family": "memory",
+   "profile_id": "long_use",
+   "max_p95_completion_ms": 27485,
+   "max_p95_first_progress_ms": 26555,
+   "max_p95_admission_ms": null,
+   "max_p95_due_to_claim_ms": null,
+   "max_model_calls": 9,
+   "max_tool_calls": 15,
+   "max_input_tokens": 15701,
+   "max_output_tokens": 1316,
+   "max_external_provider_usd": "0.00628875",
+   "max_p95_ditto_overhead_ms": 27485,
+   "freeze_sha256": null,
+   "null_reasons": [
+    {
+     "path": "/max_p95_admission_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/max_p95_due_to_claim_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/freeze_sha256",
+     "reason": "not_applicable"
+    }
+   ]
+  },
+  {
+   "family": "mixed",
+   "profile_id": "clean",
+   "max_p95_completion_ms": 35206,
+   "max_p95_first_progress_ms": 35058,
+   "max_p95_admission_ms": null,
+   "max_p95_due_to_claim_ms": null,
+   "max_model_calls": 6,
+   "max_tool_calls": 3,
+   "max_input_tokens": 12182,
+   "max_output_tokens": 3438,
+   "max_external_provider_usd": "0.00771120",
+   "max_p95_ditto_overhead_ms": 35206,
+   "freeze_sha256": null,
+   "null_reasons": [
+    {
+     "path": "/max_p95_admission_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/max_p95_due_to_claim_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/freeze_sha256",
+     "reason": "not_applicable"
+    }
+   ]
+  },
+  {
+   "family": "mixed",
+   "profile_id": "long_use",
+   "max_p95_completion_ms": 47978,
+   "max_p95_first_progress_ms": 47826,
+   "max_p95_admission_ms": null,
+   "max_p95_due_to_claim_ms": null,
+   "max_model_calls": 8,
+   "max_tool_calls": 5,
+   "max_input_tokens": 14403,
+   "max_output_tokens": 7839,
+   "max_external_provider_usd": "0.01372770",
+   "max_p95_ditto_overhead_ms": 47978,
+   "freeze_sha256": null,
+   "null_reasons": [
+    {
+     "path": "/max_p95_admission_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/max_p95_due_to_claim_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/freeze_sha256",
+     "reason": "not_applicable"
+    }
+   ]
+  },
+  {
+   "family": "schedule",
+   "profile_id": "clean",
+   "max_p95_completion_ms": 3768,
+   "max_p95_first_progress_ms": null,
+   "max_p95_admission_ms": 5,
+   "max_p95_due_to_claim_ms": 7,
+   "max_model_calls": 5,
+   "max_tool_calls": 0,
+   "max_input_tokens": 5252,
+   "max_output_tokens": 179,
+   "max_external_provider_usd": "0.00178965",
+   "max_p95_ditto_overhead_ms": 3768,
+   "freeze_sha256": null,
+   "null_reasons": [
+    {
+     "path": "/max_p95_first_progress_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/freeze_sha256",
+     "reason": "not_applicable"
+    }
+   ],
+   "max_p95_daemon_admission_ms": 5
+  },
+  {
+   "family": "tool",
+   "profile_id": "clean",
+   "max_p95_completion_ms": 31615,
+   "max_p95_first_progress_ms": 31190,
+   "max_p95_admission_ms": null,
+   "max_p95_due_to_claim_ms": null,
+   "max_model_calls": 6,
+   "max_tool_calls": 2,
+   "max_input_tokens": 11118,
+   "max_output_tokens": 1394,
+   "max_external_provider_usd": "0.00498195",
+   "max_p95_ditto_overhead_ms": 31615,
+   "freeze_sha256": null,
+   "null_reasons": [
+    {
+     "path": "/max_p95_admission_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/max_p95_due_to_claim_ms",
+     "reason": "not_applicable"
+    },
+    {
+     "path": "/freeze_sha256",
+     "reason": "not_applicable"
+    }
+   ]
+  }
+ ]
+}
