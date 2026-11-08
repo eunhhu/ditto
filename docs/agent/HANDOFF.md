@@ -263,6 +263,15 @@ while the median turn went 8.1 s -> 13.4 s, so the ceiling is measuring the
 provider's day rather than the harness. Do not widen the ceiling to make the
 gate pass; re-measure it deliberately or run in a faster window.
 
+## State: campaign 12 passes all eight gates
+
+130 of 130 attempts observed under `budgets-v3`; 1.75 model requests per turn
+(prompt 2.06, tool 1.60, mixed 1.45, schedule 1.75), turn p50 4.0 s, $0.1326 for
+the run, daemon admission p95 1.0 ms. The answer gate cleared after the reading
+of 29 rule-flagged items and the agreed 20% second-review sample. Remaining
+distance to the Task 043 bar (1.3 requests per turn) is the memory family at
+1.90 and the tool family at 1.60.
+
 ## Latest verified slice: admission is the daemon's span (ADR 0043)
 
 `budgets-v3` gates `daemon_admission_ms` (journal: claimed occurrence to admitted

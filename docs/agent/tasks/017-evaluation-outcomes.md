@@ -596,8 +596,9 @@ differs from the frozen one.
 
 ## Campaign 12 (budgets v3: admission measured where the turn is admitted)
 
-First run graded under `budgets-v3`. Seven of eight gates pass; `answer` is
-blocked on the second reading of the disputed items.
+First run graded under `budgets-v3`. **All eight gates pass** on this run: the
+answer gate cleared when the fixed 20% second-review sample was confirmed against
+the answers.
 
 | measure | campaign 11 | campaign 12 |
 | --- | --- | --- |
@@ -621,8 +622,8 @@ blocked on the second reading of the disputed items.
   number, P2 gives the venue note it holds and hedges whether the reading group
   is that club, and T2/T4 show the sorted lines and say deduplication was not
   permitted. The reading passes all 29 with its reasons recorded per item. The
-  gate still blocks on its fixed 20% second-review sample of 22 items, which is
-  the human step.
+  fixed 20% sample of 22 items was reviewed separately and agreed, which is what
+  the gate's second-review step asks for.
 
 One correction happened after the run: a one-shot schedule journals
 `schedule.claimed` while a repeat journals `schedule.occurrence.claimed`, and the
