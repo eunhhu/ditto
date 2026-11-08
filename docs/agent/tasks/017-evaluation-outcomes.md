@@ -571,6 +571,24 @@ signature - bounded at two extra tries - and records the count as
 Ditto, so it must not become one; an attempt that spent tokens or carries a
 failure reason is never retried.
 
+### What `admission_ms` actually measures
+
+The v2 gate began gating admission, so the number was traced. It is the client's
+round trip for `POST /v1/commands/schedule`, whose only durable work is
+appending one command event. Same release binary, same request, 100 samples:
+
+| store | p50 | p95 | p99 | max |
+| --- | --- | --- | --- | --- |
+| tmpfs | 0.74 ms | 0.93 ms | 1.07 ms | 15.16 ms |
+| SD card (campaign 11, n=20) | 2.35 ms | 6.20 ms | - | 10.38 ms |
+
+So the value is the filesystem's `fsync` tail on this host, not the harness's own
+admission work, which is sub-millisecond. Campaign 10 measured the same path at
+p95 5.11 ms against the same 5 ms ceiling, so the ceiling sits at the noise floor
+of a 20-sample p95 and the gate flips on a single I/O hiccup. Recorded as a
+measurement defect to fix (daemon-side admission span, with the client round trip
+kept as a recorded number), not as a reason to move the ceiling.
+
 ## Campaign 11 (the granted sort inside the turn, graded under budgets v2)
 
 ADR 0041's amendment and ADR 0042 both landed before this run, so it measures
