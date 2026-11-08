@@ -673,7 +673,9 @@ def daemon_admission_ms(events: list[dict]):
     """The daemon's own admission span for a scheduled turn: the occurrence the
     scheduler claimed to the turn it admitted. The client's round trip for the
     command that registered it is a durable-write measurement and is not this."""
-    claimed = next((e for e in events if e["kind"] == "schedule.occurrence.claimed"), None)
+    claimed = next((e for e in reversed(events)
+                    if e["kind"] in ("schedule.claimed", "schedule.occurrence.claimed")
+                    and e.get("recorded_at")), None)
     received = next((e for e in events if e["kind"] == "input.received"), None)
     a, b = event_ms(claimed), event_ms(received)
     return None if a is None or b is None else max(0.0, b - a)
@@ -1585,8 +1587,7 @@ def cost_latency_gate(attempts: list, cases: dict, report_budgets: list, version
             # Admission is the daemon's own span from claiming the occurrence to
             # admitting the turn. The client's round trip for the command that
             # registered it is dominated by fsync on the store and is recorded.
-            gated = ([("daemon_admission_ms", "max_p95_daemon_admission_ms"),
-                      ("due_to_claim_ms", "max_p95_due_to_claim_ms")]
+            gated = ([f for f in absolute if f[0] in ("daemon_admission_ms", "due_to_claim_ms")]
                      + [("ditto_overhead_ms", "max_p95_ditto_overhead_ms")])
             recorded = [f for f in absolute if f not in gated]
         elif version >= 2:

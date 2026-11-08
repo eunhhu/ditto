@@ -389,6 +389,10 @@ class AdmissionDefinition(unittest.TestCase):
                   {"kind": "input.received", "recorded_at": "2026-11-08T12:20:13Z"}]
         self.assertEqual(ev.daemon_admission_ms(coarse), 0.0)
         self.assertIsNone(ev.daemon_admission_ms(events[:1]), "an unclaimed occurrence has no span")
+        once = [{"kind": "schedule.claimed", "recorded_at": "2026-11-08T13:59:42.447Z"},
+                {"kind": "input.received", "recorded_at": "2026-11-08T13:59:42.448Z"}]
+        self.assertAlmostEqual(ev.daemon_admission_ms(once), 1.0, places=3,
+                               msg="a one-shot schedule claims the occurrence, not a repeat")
 
     def test_a_slow_store_round_trip_does_not_fail_version_3(self):
         fails, blocks, stats = self.gate(self.group(admission_ms=40.0), 3)
@@ -399,6 +403,14 @@ class AdmissionDefinition(unittest.TestCase):
     def test_a_slow_daemon_admission_still_fails_version_3(self):
         fails, blocks, _ = self.gate(self.group(daemon_admission_ms=40.0), 3)
         self.assertTrue(any("daemon_admission_ms" in f for f in fails), fails)
+
+    def test_a_non_schedule_family_keeps_gating_its_own_harness_share(self):
+        # The daemon admission span belongs to the schedule family; other
+        # families have no occurrence to claim and must not require the field.
+        cases = {"C": {"family": "tool"}}
+        rows = [{**row, "case_id": "C"} for row in self.group(daemon_admission_ms=None)]
+        fails, blocks, _ = ev.cost_latency_gate(rows, cases, self.V3["budgets"], 3)
+        self.assertEqual((fails, blocks), ([], []))
 
     def test_version_2_still_gates_the_client_round_trip(self):
         fails, blocks, _ = self.gate(self.group(admission_ms=40.0), 2, self.V2)

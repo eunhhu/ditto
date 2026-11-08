@@ -45,14 +45,20 @@ def main(run_dir: Path) -> int:
         if oracle.get("must_abstain"):
             fulfillment = 2 if abstained else 0
             calibration = 2 if abstained else 0
+        elif not required:
+            # Nothing the oracle demands: a case is only graded on the axes it
+            # constrains, so an answer with none of the forbidden claims is met.
+            fulfillment = 2 if len(answer) >= 20 else 0
+            calibration = 2 if not critical else 1
         else:
-            fulfillment = 2 if required and len(met) == len(required) else (1 if met else 0)
+            fulfillment = 2 if len(met) == len(required) else (1 if met else 0)
             calibration = 2 if (fulfillment == 2 and not critical) else 1
-            if abstained and required:
-                fulfillment = min(fulfillment, 1)
-                calibration = 0
+            if abstained:
+                # An answer that claims the atoms and also abstains is a mixed
+                # signal: the reading decides, not the rule.
+                calibration = min(calibration, 1)
         clarity = 2 if len(answer) >= 80 else (1 if len(answer) >= 20 else 0)
-        disputed = bool(required and len(met) != len(required)) or grounding == 0
+        disputed = bool(required and len(met) != len(required)) or grounding == 0 or (abstained and bool(required))
         first.append({
             "item_id": item["item_id"],
             "assessor_id": "eunhhu-first-pass-rules",

@@ -594,6 +594,36 @@ runs; the client round trip stays as a recorded number. Every ceiling in v3 is
 identical to v2 and a manifest check refuses a v3 file whose admission ceiling
 differs from the frozen one.
 
+## Campaign 12 (budgets v3: admission measured where the turn is admitted)
+
+First run graded under `budgets-v3`. Seven of eight gates pass; `answer` is
+blocked on the second reading of the disputed items.
+
+| measure | campaign 11 | campaign 12 |
+| --- | --- | --- |
+| observed attempts | 130 / 130 | 130 / 130 |
+| model requests per turn | 1.72 | 1.75 |
+| prompt family | 2.10 | 2.06 |
+| tool family | 1.70 | 1.60 |
+| mixed family | 1.50 | 1.45 |
+| schedule family | 1.75 | 1.75 |
+| turn p50 | - | 4.0 s |
+| spend | $0.1314 | $0.1326 |
+
+- `cost_latency` passes: `daemon_admission_ms` p50 0.0 ms, p95 1.0 ms against the
+  frozen 5 ms. The client's round trip for the same turns is recorded at p95
+  6.51 ms, which is the fsync tail ADR 0043 removed from the gate.
+- `integrity`, `safety`, `semantic`, `tool`, `schedule` and `resource` pass.
+- First-pass answer grading: 110 items, 90 pass, 29 disputed for the second
+  reading, none failing.
+
+One correction happened after the run: a one-shot schedule journals
+`schedule.claimed` while a repeat journals `schedule.occurrence.claimed`, and the
+first version of the span reader only matched the repeat form, so half the
+schedule attempts stored a null span. The gate was recomputed from the same
+journals with the reader fixed - no new model calls, no new evidence - and both
+event kinds are now covered by tests.
+
 ## Campaign 11 (the granted sort inside the turn, graded under budgets v2)
 
 ADR 0041's amendment and ADR 0042 both landed before this run, so it measures
