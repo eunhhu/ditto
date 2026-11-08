@@ -628,6 +628,28 @@ the answers.
   of 22 items was reviewed separately and agreed. The gate passes with that one
   miss in the profile rates.
 
+### Probe: answering from a context that already holds the fact
+
+The instruction that told the model to search before answering was the cause of
+the redundant request, so it now says to answer from `DITTO_CONTEXT_V1` when the
+fact is already written there and to search only for facts it lacks.
+
+| memory case | requests per turn before | after |
+| --- | --- | --- |
+| P1 name | 2.20 | 1.60 |
+| P2 venue | 2.00 | 2.30 |
+| P3 object | 1.00 | 1.00 |
+| P4 | 1.00 | 1.00 |
+| P5 absent fact | 3.30 | 3.30 |
+| family | 2.06 | 1.84 |
+
+Recall stayed at 1.000 on every attempt, so nothing was dropped to buy the
+saving. The remaining cost is P5: when the store holds nothing about the
+question, the model cannot tell a bounded selection from an empty one and spends
+three requests trying synonyms before it abstains. The next slice is therefore to
+render the selection's mode - a complete set, or how many of how many - into the
+capsule, so an absence can be read instead of searched.
+
 ### What that one miss says about the memory family
 
 P1/long_use#4 compiled no nodes at all and then searched "dog", "pet", "puppy"
