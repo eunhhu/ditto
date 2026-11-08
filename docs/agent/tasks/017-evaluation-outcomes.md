@@ -614,8 +614,15 @@ blocked on the second reading of the disputed items.
   frozen 5 ms. The client's round trip for the same turns is recorded at p95
   6.51 ms, which is the fsync tail ADR 0043 removed from the gate.
 - `integrity`, `safety`, `semantic`, `tool`, `schedule` and `resource` pass.
-- First-pass answer grading: 110 items, 90 pass, 29 disputed for the second
-  reading, none failing.
+- Answer grading: the rule-based first pass flagged 29 of 110 for a reading.
+  All 29 were read - the flags are the matcher's literal atoms, not wrong
+  answers: P3 answers the key location with "on top of the fridge" where the
+  oracle lists "above the fridge", P5 abstains without inventing a policy
+  number, P2 gives the venue note it holds and hedges whether the reading group
+  is that club, and T2/T4 show the sorted lines and say deduplication was not
+  permitted. The reading passes all 29 with its reasons recorded per item. The
+  gate still blocks on its fixed 20% second-review sample of 22 items, which is
+  the human step.
 
 One correction happened after the run: a one-shot schedule journals
 `schedule.claimed` while a repeat journals `schedule.occurrence.claimed`, and the
