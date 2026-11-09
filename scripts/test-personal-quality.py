@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import re
+import pathlib
 import unittest
 from unittest import mock
 
@@ -318,6 +320,23 @@ class AssessmentTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("without -O", result.stderr)
+
+
+class PayloadVersionAgreement(unittest.TestCase):
+    """The assessor reads the journal itself, so its copy of the turn payload
+    version must be the kernel's. It drifted once and three reconciliation tests
+    failed with "model request identity mismatch", which looks like a product
+    bug rather than a stale constant."""
+
+    def test_the_assessors_payload_version_is_the_kernels(self):
+        source = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "crates/kernel/src/turn/types.rs"
+        ).read_text()
+        kernel = int(
+            re.search(r"TURN_PAYLOAD_VERSION: u16 = (\d+);", source).group(1)
+        )
+        self.assertEqual(module("quality").TURN_PAYLOAD_VERSION, kernel)
 
 
 class WorkflowTests(unittest.TestCase):
