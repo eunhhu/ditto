@@ -167,10 +167,12 @@ pub(super) struct ReadyCall {
     pub(super) arguments: Value,
 }
 /// The system instructions of every turn.
-pub(super) fn system_prefix() -> StableSystemPrefix {
-    StableSystemPrefix {
-        segments: INSTRUCTIONS.map(str::to_owned).to_vec(),
+pub(super) fn system_prefix(profile: Option<&str>) -> StableSystemPrefix {
+    let mut segments = INSTRUCTIONS.map(str::to_owned).to_vec();
+    if let Some(segment) = profile.filter(|segment| !segment.trim().is_empty()) {
+        segments.push(segment.to_owned());
     }
+    StableSystemPrefix { segments }
 }
 
 /// `Wednesday, 30 September 2026, 14:04 (UTC+09:00)` at the recorded offset.

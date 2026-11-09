@@ -16,7 +16,7 @@ use crate::KernelError;
 /// recorded under an earlier contract stay in the journal, and their answers
 /// stay readable in run status and conversation history, but replay rejects
 /// them.
-pub const TURN_PAYLOAD_VERSION: u16 = 16;
+pub const TURN_PAYLOAD_VERSION: u16 = 17;
 /// Oldest contract whose terminal events run status still reads: their
 /// shape has not changed.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -43,6 +43,11 @@ pub struct ContextCompiledPayload {
     /// The host's UTC offset at acceptance, in minutes, which fixes the local
     /// time the latest message's note states.
     pub utc_offset_minutes: i32,
+    /// The profile's standing instructions as this turn was given them
+    /// (ADR 0045), recorded so replay reproduces the request without reading the
+    /// current profile. Absent means the turn had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing_instructions: Option<String>,
 }
 
 /// The selection in full, as replay rebuilds it from the recorded references.

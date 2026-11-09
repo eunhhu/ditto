@@ -428,7 +428,8 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             self.sort.as_ref(),
         ));
         self.conversation = conversation;
-        self.system_prefix = Some(system_prefix());
+        let standing = context.standing_instructions.clone();
+        self.system_prefix = Some(system_prefix(standing.as_deref()));
         self.context = Some(presented_context(&capsule));
         self.context_payload = Some(context);
 

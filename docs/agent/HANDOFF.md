@@ -212,6 +212,44 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
+## Latest verified slice: standing instructions are journaled (ADR 0045, Task 044 P2)
+
+- `instructions.recorded` is a durable document: `DittoKernel::set_instructions`
+  journals the text with the event id it supersedes, `instructions_in_force(seq)`
+  reads the last one at or before a sequence. 2000 characters is the limit, and an
+  overlong text is refused by name rather than truncated.
+- The turn pins it after the six core instructions as one segment, recorded in the
+  turn's own `context.compiled` (`standing_instructions`, payload version 17), so
+  replay reproduces the request and a later edit cannot change what an old turn
+  was told. Verified: `instructions::the_standing_instructions_lead_the_request_and_replay_keeps_the_old_text`.
+- Blank instructions pin nothing - an empty profile adds no segment and costs no
+  prefix space.
+- Routes: `GET /v1/instructions` (in force, or `null`), `PUT /v1/instructions`
+  (`{"text": ...}`, 201 with the document, 400 over the limit). CLI:
+  `ditto instructions show|set --text|--file|clear`. Live check against
+  `127.0.0.1:8901`: set returned seq 2, show echoed the text, clear returned
+  `no standing instructions`.
+- Tests: `read_only_turn` 109 passed; daemon `instructions` route test 1 passed.
+
+## Latest verified slice: a profile is a directory (ADR 0044, Task 044 P1)
+
+- `crates/profile` owns the boundary: `validate` (a-z, 0-9, `-`, `_`, at most 32
+  characters, first character alphanumeric), `root` (`default` is the data root
+  itself, every other name is `<data>/profiles/<name>`), `list`, `create`.
+- `ditto-daemon --profile <name>` (env `DITTO_PROFILE`) resolves the data root
+  before the kernel is built and logs `serving one profile` with both values.
+  Verified live: `DITTO_PROFILE=minchae DITTO_DATA_DIR=/tmp/dprof2` listened on
+  8899 and wrote to `/tmp/dprof2/profiles/minchae`.
+- `ditto profile list` and `ditto profile path <name>` read the data root on this
+  host (JSON by default, `--human` for a table). `../etc` is refused by the name
+  rule, not by a path check.
+- Isolation is by construction and tested: a file written under one root does not
+  exist under the other (`two_profiles_live_in_two_directories`).
+- Platform design and slice order: [design/platform-surface.md](../design/platform-surface.md).
+  Durable documents, session state and turn state are separated by ADR 0045;
+  verified by construction - the compiler's candidates come only from
+  `context.node.recorded` events, so a tool result cannot enter tomorrow's capsule.
+
 ## Latest work: Task 038, two hops and a lighter tool call
 
 Two changes, both measured on the Task 017 suite.

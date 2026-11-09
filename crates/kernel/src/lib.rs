@@ -26,6 +26,7 @@ mod agent_sort;
 mod context_admission;
 mod context_retrieval;
 mod conversation;
+pub mod instructions;
 mod memory;
 mod recurrence;
 mod schedule;

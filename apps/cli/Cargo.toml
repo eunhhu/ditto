@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+ditto-profile = { path = "../../crates/profile" }
 ditto-protocol = { path = "../../crates/protocol" }
 futures-util.workspace = true
 ulid.workspace = true

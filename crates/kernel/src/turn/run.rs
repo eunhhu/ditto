@@ -533,7 +533,11 @@ impl DittoKernel {
         };
         let utc_offset_minutes = local_utc_offset_minutes(run.accepted_at);
         run.utc_offset_minutes = utc_offset_minutes;
-        run.system_prefix = system_prefix();
+        let standing = self
+            .instructions_in_force(input_event.seq)
+            .map_err(TurnRunError::Kernel)?
+            .and_then(|document| document.segment());
+        run.system_prefix = system_prefix(standing.as_deref());
         let payload = ContextCompiledPayload {
             event_version: TURN_PAYLOAD_VERSION,
             turn_id: run.scope.turn_id.clone(),
@@ -543,6 +547,7 @@ impl DittoKernel {
                 .iter()
                 .map(|exchange| exchange.turn_id.clone())
                 .collect(),
+            standing_instructions: standing.clone(),
             utc_offset_minutes,
         };
         self.stage_turn_event(

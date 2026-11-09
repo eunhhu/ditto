@@ -31,6 +31,7 @@ const DEFAULT_REPLAY_PAGE_SIZE: usize = 500;
 mod baseline;
 #[cfg(test)]
 mod client_tests;
+mod instructions;
 mod memory;
 mod runs;
 mod schedules;
@@ -48,6 +49,10 @@ struct Args {
     model: runs::ModelArgs,
     #[arg(long, env = "DITTO_DATA_DIR", default_value = ".ditto")]
     data_dir: PathBuf,
+    /// Which profile this daemon serves (ADR 0044). `default` is the data
+    /// directory itself; any other name lives under `<data-dir>/profiles/<name>`.
+    #[arg(long, env = "DITTO_PROFILE", default_value = ditto_profile::DEFAULT_PROFILE)]
+    profile: String,
     #[arg(long, env = "DITTO_CAPABILITIES_DIR", default_value = "capabilities")]
     capabilities_dir: PathBuf,
     #[arg(long, env = "DITTO_BIND", default_value = "127.0.0.1:8787")]
@@ -109,7 +114,14 @@ async fn serve() -> anyhow::Result<()> {
     let args = Args::parse();
     validate_bind(args.bind, args.allow_unauthenticated_remote)?;
     let driver = runs::configured_driver(&args.model, args.bind)?;
-    let mut config = KernelConfig::new(args.data_dir, args.capabilities_dir);
+    let data_dir = ditto_profile::root(&args.data_dir, &args.profile)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    tracing::info!(
+        profile = %args.profile,
+        data_dir = %data_dir.display(),
+        "serving one profile"
+    );
+    let mut config = KernelConfig::new(data_dir, args.capabilities_dir);
     if args.disable_web_fetch {
         config.web_fetch = None;
     }
@@ -194,6 +206,7 @@ async fn blocking<T: Send + 'static>(
 /// assembly so their surfaces cannot drift apart.
 fn api_routes(loopback: bool) -> Router<AppState> {
     let routes = Router::new()
+        .merge(instructions::routes())
         .merge(memory::routes())
         .merge(runs::routes())
         .merge(schedules::routes(loopback))
