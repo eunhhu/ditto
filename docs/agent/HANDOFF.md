@@ -212,6 +212,44 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
+## Latest verified slice: the model reads a skill body by name (ADR 0046, Task 044 P3, second half)
+
+- `skill.read` is a builtin package (`capabilities/core/skill-read`, id
+  `skill.read`, effect: content access, no mutation, local, no resource) and its
+  static no-approval policy (`StaticPolicy::skill_read`) needs no lease: a read
+  of the profile's own document changes nothing.
+- The tool is offered only when the served profile carries at least one skill, so
+  an empty catalogue costs no tool surface, and a malformed skill stops the turn
+  at admission by name rather than hiding behind a shorter catalogue.
+- One call: `{"name": ...}` (the same name rule as the document format, so a path
+  is refused as arguments, not resolved). The result is `{"name", "body"}` or
+  `{"error": "unknown_skill" | "invalid_arguments"}` with `is_error` set; a
+  refusal is a tool result, not a turn failure. Bodies over 64 KiB are refused,
+  never truncated.
+- One wire shape: `SkillResult` serializes to exactly what the model sees, so the
+  journal and the rebuilt conversation cannot disagree. (The first attempt kept
+  two spellings and replay reported `model request digest does not match`.)
+- Replay checks a recorded read against its arguments and the format limits and
+  does not re-read the directory: a body is external mutable state, so the
+  journal is the record of what the document said. `capabilities.selected` now
+  carries `skill_manifest` (payload 18).
+- Tests: kernel lib 46 passed (4 new in `turn::skill`, one of them the catalogue
+  budget), `read_only_turn/skill.rs`
+  3 new integration tests (body arrives only on request; unknown name refused
+  without failing the turn; a profile without skills is not offered the tool),
+  each replayed.
+- The catalogue also leads the request as a pinned segment (one line per skill,
+  ordered by name, after the profile's standing instructions) and that text is
+  recorded in `context.compiled` (`payload 19`), so a skill installed or removed
+  later cannot rewrite what an old turn said. A profile with no skills pays no
+  segment; a turn replayed after its skill was uninstalled still agrees.
+- Evidence so far is the kernel integration suite, which drives a real turn with a
+  scripted model and replays it: a `photo-triage` skill put `skill.read` in the
+  tool list and its line in the prefix, the body arrived only in the request that
+  followed the call, an unknown name came back as a refusal the model could read,
+  and both turns replayed - the first while the skill had already been deleted. A
+  live provider turn is the next campaign's job; none was run for this slice.
+
 ## Latest verified slice: a profile carries skills as documents (ADR 0046, Task 044 P3, first half)
 
 - `crates/profile::skill` owns the format: `<profile>/skills/<name>/SKILL.md` with

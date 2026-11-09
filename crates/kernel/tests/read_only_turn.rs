@@ -48,6 +48,8 @@ mod model_sort;
 mod reuse;
 #[path = "read_only_turn/sessions.rs"]
 mod sessions;
+#[path = "read_only_turn/skill.rs"]
+mod skill;
 #[path = "read_only_turn/stream.rs"]
 mod stream;
 #[path = "read_only_turn/web.rs"]
@@ -602,9 +604,9 @@ async fn run_success(
 async fn successful_two_request_continuation_persists_exact_epoch_schema_history_and_replays() {
     let fixture = Fixture::new();
     let loaded = fixture.kernel.capability_load_metrics();
-    // artifact.read, artifact.sort, device.process.run, memory.manage and
-    // web.browse.
-    assert_eq!(loaded.headers_read, 5);
+    // artifact.read, artifact.sort, device.process.run, memory.manage,
+    // skill.read and web.browse.
+    assert_eq!(loaded.headers_read, 6);
     assert_eq!(loaded.legacy_manifests_read, 0);
     assert_eq!(loaded.manifests_paged, 0);
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));

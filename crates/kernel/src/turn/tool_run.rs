@@ -3,6 +3,7 @@
 //! journal `tool.started`, then journal `tool.output`.
 use super::super::memory as memory_tool;
 use super::super::memory::{MemoryAction, MemoryDeriver, MemoryRefusal, MemoryResult};
+use super::super::skill::{self as skill_tool, SkillAction, SkillDeriver, SkillResult};
 use super::super::sort::{SortToolError, SortToolResult, result_lines};
 use super::super::tool::{
     LeaseRefusal, STOPPED, ToolOrigin, ToolOutput, ToolRequested, ToolStarted,
@@ -302,6 +303,58 @@ impl DittoKernel {
                     .map_err(|_| TurnRunError::Internal("web read lease is unavailable"))?;
             }
         }
+        Ok(result)
+    }
+
+    /// One `skill.read` call: the body of a skill this profile carries.
+    ///
+    /// A read of the profile's own document, so it claims no lease and touches
+    /// nothing outside the data root (ADR 0046).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn run_skill_call(
+        &self,
+        scope: &mut TurnScope,
+        cause: &mut String,
+        request_index: u8,
+        call: &ReadyCall,
+        binding: &InvocableCapabilityBinding,
+        authorizer: &InvocationAuthorizer,
+        cancellation: CancellationToken,
+        deadline: DateTime<Utc>,
+    ) -> Result<SkillResult, TurnRunError> {
+        let invocation = compile_call(binding, call, &SkillDeriver::default())?;
+        let action: Option<SkillAction> = normalized(invocation.as_ref())?;
+        self.tool_requested(
+            scope,
+            cause,
+            request_index,
+            call,
+            invocation.as_ref(),
+            ToolOrigin::Model,
+        )?;
+        self.tool_checkpoint(scope, cause, &cancellation, deadline, request_index, call)
+            .await?;
+        let result = match (invocation, action) {
+            (Some(invocation), Some(action)) => {
+                let now = Utc::now();
+                match authorizer.authorize_static(&invocation, &StaticPolicy::skill_read(), now) {
+                    Ok(AuthorizationOutcome::Permitted(permit))
+                        if permit.validate(&invocation, now).is_ok() =>
+                    {
+                        SkillResult::read(&self.data_dir, &action)
+                    }
+                    _ => {
+                        return Err(TurnRunError::Internal(
+                            "skill read static policy contradicted its contract",
+                        ));
+                    }
+                }
+            }
+            _ => SkillResult::Refused {
+                error: skill_tool::SkillRefusal::InvalidArguments,
+            },
+        };
+        self.tool_output(scope, cause, request_index, call, false, &result, None)?;
         Ok(result)
     }
 

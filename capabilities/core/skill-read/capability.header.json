@@ -1,0 +1,46 @@
+{
+  "header_version": 1,
+  "manifest_sha256": "d2259a31760a57a22ac9c75ec579dc34840e6d0063962d914baf98563d59f05c",
+  "id": "skill.read",
+  "version": "0.1.0",
+  "namespace": "skill",
+  "kind": "tool",
+  "lifecycle": "active",
+  "summary": "Read one of this profile's skills by name: the body of a SKILL.md whose header was in the catalogue.",
+  "placement": {
+    "modes": [
+      "local"
+    ],
+    "requires": []
+  },
+  "retrieval": {
+    "intents": [
+      "follow a procedure this installation knows",
+      "read the steps of a named skill"
+    ],
+    "negative_examples": [
+      "remember a fact",
+      "search the web"
+    ],
+    "complements": [],
+    "aliases": [
+      "open skill",
+      "read skill"
+    ]
+  },
+  "effects": {
+    "minimum": {
+      "access": "content",
+      "mutation": "none",
+      "externality": "local",
+      "privilege": "user"
+    },
+    "maximum": {
+      "access": "content",
+      "mutation": "none",
+      "externality": "local",
+      "privilege": "user"
+    }
+  },
+  "candidate_bytes": 264
+}

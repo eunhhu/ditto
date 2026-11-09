@@ -119,8 +119,10 @@ applies.
    *Done for the pinned half:* `instructions.recorded`, `GET/PUT
    /v1/instructions`, `ditto instructions`, and the text recorded inside each
    turn so replay never reads the profile.
-3. **P3 - skills.** `SKILL.md` discovery by header, `skill.read`, and a budget on
-   the catalogue.
+3. **P3 - skills.** (done) `SKILL.md` discovery by header, `skill.read`, the
+   catalogue as a pinned prefix segment, and its 4,000-character budget
+   (descriptions are dropped before names, and a catalogue that cannot fit as
+   names refuses the turn).
 4. **P4 - plugin manifests.** Install, digest pinning, uninstall, and the effect
    request review.
 5. **P5 - provider conformance.** Adapter registry and golden fixtures per shape.

@@ -210,6 +210,8 @@ struct ReplayProjector<'turn, 'snapshot> {
     web_searches: u32,
     /// Whether the recorded selection paged `memory.manage`.
     memory_selected: bool,
+    /// Whether the recorded selection offered `skill.read` (ADR 0046).
+    skill_selected: bool,
     /// The memories a search read, rebuilt at the first search.
     recall_space: Option<Vec<ditto_context::ContextNode>>,
     /// Whether a tool returned a web page or file content yet, and the
@@ -361,6 +363,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             web_reads: 0,
             web_searches: 0,
             memory_selected: false,
+            skill_selected: false,
             recall_space: None,
             read_external_content: false,
             memory_write_count: 0,
@@ -429,7 +432,10 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         ));
         self.conversation = conversation;
         let standing = context.standing_instructions.clone();
-        self.system_prefix = Some(system_prefix(standing.as_deref()));
+        self.system_prefix = Some(system_prefix(
+            standing.as_deref(),
+            context.skill_catalogue.as_deref(),
+        ));
         self.context = Some(presented_context(&capsule));
         self.context_payload = Some(context);
 
@@ -553,6 +559,20 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                 super::memory::deriver_revision(),
             )?;
             self.memory_selected = true;
+        }
+        if let Some(manifest) = &selected.skill_manifest {
+            // Offered whenever the profile carries a skill, so the journal is
+            // the only evidence that it was: validate the contract, not the
+            // catalogue.
+            if !super::skill::validate_manifest(manifest) {
+                return Err(replay_invalid("selected skill.read is not the builtin"));
+            }
+            expect(
+                manifest,
+                super::skill::schema(),
+                super::skill::deriver_revision(),
+            )?;
+            self.skill_selected = true;
         }
         self.read_selected = selected.manifest.is_some();
         if selected.epoch.invocation_revisions() != expected_revisions {
@@ -965,12 +985,16 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
                             return Ok(ArtifactReadTurnReplay::Failed { failure });
                         }
 
-                        if call.capability_id != super::memory::ID {
+                        if call.capability_id != super::memory::ID
+                            && call.capability_id != super::skill::ID
+                        {
                             self.read_external_content = true;
                         }
                         let at = request_index as u8;
                         let stopped = if call.capability_id == ditto_web_fetch::ID {
                             Some(self.replay_web_call(at, &call)?)
+                        } else if call.capability_id == super::skill::ID {
+                            Some(self.replay_skill_call(at, &call)?)
                         } else if call.capability_id == super::memory::ID {
                             Some(self.replay_memory_call(at, &call)?)
                         } else if call.capability_id == ditto_artifact_sort::ID {
@@ -1604,6 +1628,7 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             || (self.sort.is_some() && capability_id == ditto_artifact_sort::ID)
             || (self.web.is_some() && capability_id == ditto_web_fetch::ID)
             || (self.memory_selected && capability_id == super::memory::ID)
+            || (self.skill_selected && capability_id == super::skill::ID)
     }
 
     fn take(&mut self, kind: &str, actor: EventActor) -> Result<&'turn EventRecord, ReplayError> {
@@ -2002,6 +2027,7 @@ fn rebuild_selection(
             ditto_artifact_sort::ID => Ok(ditto_artifact_sort::manifest()),
             ditto_web_fetch::ID => Ok(ditto_web_fetch::manifest()),
             super::memory::ID => Ok(super::memory::manifest()),
+            super::skill::ID => Ok(super::skill::manifest()),
             _ => Err(replay_invalid("selected contract is not a builtin")),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2029,6 +2055,7 @@ fn rebuild_selection(
         sort_manifest: take(ditto_artifact_sort::ID),
         web_manifest: take(ditto_web_fetch::ID),
         memory_manifest: take(super::memory::ID),
+        skill_manifest: take(super::skill::ID),
         epoch,
     })
 }

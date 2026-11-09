@@ -14,6 +14,7 @@ use thiserror::Error;
 const MAX_POLICY_ID_BYTES: usize = 256;
 const STATIC_ARTIFACT_POLICY_ID: &str = "builtin.artifact-read.no-approval.v1";
 const STATIC_MEMORY_SEARCH_POLICY_ID: &str = "builtin.memory-search.no-approval.v1";
+const STATIC_SKILL_READ_POLICY_ID: &str = "builtin.skill-read.no-approval.v1";
 const STATIC_ARTIFACT_PERMIT_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +139,18 @@ impl StaticPolicy {
         Self {
             id: STATIC_MEMORY_SEARCH_POLICY_ID.into(),
             capability_id: "memory.manage".into(),
+            effect_ceiling: EffectProfile::read_content(),
+            resources: BTreeSet::new(),
+            permit_ttl: Duration::seconds(STATIC_ARTIFACT_PERMIT_SECONDS),
+        }
+    }
+
+    /// No-approval policy for a `skill.read`: a read of this profile's own
+    /// skill document, which names no resource and changes nothing (ADR 0046).
+    pub fn skill_read() -> Self {
+        Self {
+            id: STATIC_SKILL_READ_POLICY_ID.into(),
+            capability_id: "skill.read".into(),
             effect_ceiling: EffectProfile::read_content(),
             resources: BTreeSet::new(),
             permit_ttl: Duration::seconds(STATIC_ARTIFACT_PERMIT_SECONDS),
