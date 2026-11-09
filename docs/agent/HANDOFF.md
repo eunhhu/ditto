@@ -224,7 +224,13 @@ and checks establish a new fact.
   without a daemon. Live: a `photo-triage` skill listed as one line plus its
   description, `show` returned the body, and `show ../etc` exited 1 with
   `it must start with a lowercase letter or digit`.
-- Tests: `ditto-profile` 10 passed (6 new), `ditto-cli` 12 + 11 passed.
+- `DittoKernel::skill_headers()` and `skill_body(name)` answer both questions from
+  the served profile's data root, reading the directory through each call: an
+  installation changes a few times a year, and a cache would only add a way to be
+  stale. A malformed skill makes the catalogue unreadable rather than silently
+  shorter.
+- Tests: `ditto-profile` 10 passed (6 new), `ditto-cli` 12 + 11 passed, kernel
+  `skills` 3 passed.
 - **Not done:** the header is not yet in the request prefix and there is no
   `skill.read` capability. That is the rest of P3; the format is fixed first
   because it is what a model-written skill would have to obey.
