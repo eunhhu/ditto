@@ -650,6 +650,24 @@ three requests trying synonyms before it abstains. The next slice is therefore t
 render the selection's mode - a complete set, or how many of how many - into the
 capsule, so an absence can be read instead of searched.
 
+### Lookups in one reply
+
+The retries are rational - a different word can reach a memory the first one
+missed - so the instruction now asks for several lookups in one reply instead of
+one reply per word. No claim about absence, only batching.
+
+| memory case | before | batched |
+| --- | --- | --- |
+| P1 name | 1.60 | 1.60 |
+| P2 venue | 2.30 | 2.50 |
+| P5 absent fact | 3.30 | 2.50 |
+| family | 1.84 | 1.72 |
+| recall@5 | 1.000 | 1.000 |
+
+21 of 50 turns sent more than one call in a single reply. P5 improves, P2's
+long_use cell moved the other way on five samples; recall is untouched, which is
+the property that matters for a wording change.
+
 ### Rejected: telling the model that the selection is exhaustive
 
 The obvious next step was to have the turn say "every stored memory matching this
