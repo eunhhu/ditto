@@ -2062,6 +2062,10 @@ def null_reason_errors(record: dict, nullable: list[str], where: str) -> list[st
     if len(set(reasons)) != len(reasons):
         errors.append(f"{where}: duplicate null reasons")
     for path in nullable:
+        # A budget for another family does not carry this field at all; absence is
+        # not a null that owes a reason (the manifest check owns that requirement).
+        if path.strip("/").split("/")[0] not in record:
+            continue
         is_null = pointer(record, path) is None
         if is_null and path not in reasons:
             errors.append(f"{where}: {path} is null without a reason")

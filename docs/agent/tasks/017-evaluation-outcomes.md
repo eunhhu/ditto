@@ -608,6 +608,12 @@ differs from the frozen one.
 | spend | $0.1326 | $0.1287 |
 | recall@5 | 1.000 | 1.000 |
 
+This run was started without `--agent-check-exit`, so its `integrity` gate reports
+the canonical check as unrecorded and the report validates only as
+`readiness=blocked`; the canary itself was run separately and passed at `ef8c64e`,
+whose only difference from the measured tree is documentation. Every later run
+passes the flag.
+
 The only change from campaign 12 is the instruction that asks for several lookups
 in one reply. Memory answers were read again: the rule pass flagged 25 of 110 and
 every one is a correct answer the matcher's literal atoms could not see - P3

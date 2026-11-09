@@ -344,6 +344,16 @@ class FailureLog(unittest.TestCase):
         self.assertEqual(runner.failure_logs, [])
 
 
+class NullableFields(unittest.TestCase):
+    def test_a_field_absent_from_a_record_is_not_a_null_that_owes_a_reason(self):
+        record = {"family": "memory", "null_reasons": []}
+        errors = ev.null_reason_errors(record, ["max_p95_admission_ms"], "budget memory/clean")
+        self.assertEqual(errors, [], "a family without the field is not missing a reason")
+        present = {"family": "schedule", "max_p95_admission_ms": None, "null_reasons": []}
+        errors = ev.null_reason_errors(present, ["max_p95_daemon_admission_ms"], "budget")
+        self.assertEqual(errors, [], "a record without the field is skipped, not failed")
+
+
 class AdmissionDefinition(unittest.TestCase):
     """ADR 0043: admission is the daemon's span, not the store's fsync tail."""
 
