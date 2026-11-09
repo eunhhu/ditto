@@ -594,6 +594,29 @@ runs; the client round trip stays as a recorded number. Every ceiling in v3 is
 identical to v2 and a manifest check refuses a v3 file whose admission ceiling
 differs from the frozen one.
 
+## Campaign 13 (lookups batched in one reply)
+
+| measure | campaign 12 | campaign 13 |
+| --- | --- | --- |
+| observed attempts | 130 / 130 | 130 / 130 |
+| model requests per turn | 1.75 | **1.65** |
+| prompt family | 2.06 | 1.86 |
+| tool family | 1.60 | 1.50 |
+| mixed family | 1.45 | 1.40 |
+| schedule family | 1.75 | 1.75 |
+| input tokens per turn | 2,629 | 2,561 |
+| spend | $0.1326 | $0.1287 |
+| recall@5 | 1.000 | 1.000 |
+
+The only change from campaign 12 is the instruction that asks for several lookups
+in one reply. Memory answers were read again: the rule pass flagged 25 of 110 and
+every one is a correct answer the matcher's literal atoms could not see - P3
+writes "on top of the fridge" for "above the fridge", P5 abstains without
+inventing a policy number, T2 and T4 show the sorted lines and say deduplication
+was not permitted. One T2 answer corrects itself mid-answer ("<- no, correction
+below") and is recorded at clarity 1: the content is right, the answer is not
+clean. The fixed 20% sample was reviewed separately and agreed.
+
 ## Campaign 12 (budgets v3: admission measured where the turn is admitted)
 
 First run graded under `budgets-v3`. **All eight gates pass** on this run: the
