@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod skill;
+
 /// The profile an installation has before anyone asks for a second one. Its root
 /// is the data directory itself, so an existing install keeps its data.
 pub const DEFAULT_PROFILE: &str = "default";

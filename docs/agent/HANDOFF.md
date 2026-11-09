@@ -212,6 +212,26 @@ and checks establish a new fact.
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
 
+## Latest verified slice: a profile carries skills as documents (ADR 0046, Task 044 P3, first half)
+
+- `crates/profile::skill` owns the format: `<profile>/skills/<name>/SKILL.md` with
+  a closed `---` frontmatter holding `name` and a one-line `description` (1-200
+  characters), then the body (at most 64 KiB). Names are validated (a-z, 0-9, `-`,
+  `_`, at most 64, first character alphanumeric), so `../etc` is refused by name
+  rather than by a path check. A malformed skill is reported with its path and
+  reason, never skipped, and the declared name must match its directory.
+- `ditto skills list|show --profile --data-dir` reads the catalogue on this host
+  without a daemon. Live: a `photo-triage` skill listed as one line plus its
+  description, `show` returned the body, and `show ../etc` exited 1 with
+  `it must start with a lowercase letter or digit`.
+- Tests: `ditto-profile` 10 passed (6 new), `ditto-cli` 12 + 11 passed.
+- **Not done:** the header is not yet in the request prefix and there is no
+  `skill.read` capability. That is the rest of P3; the format is fixed first
+  because it is what a model-written skill would have to obey.
+- **Design note (ADR 0046):** installing a skill grants no effect, so reading one
+  needs no lease; what a skill does is still whatever capability the model then
+  invokes.
+
 ## Latest verified slice: standing instructions are journaled (ADR 0045, Task 044 P2)
 
 - `instructions.recorded` is a durable document: `DittoKernel::set_instructions`
