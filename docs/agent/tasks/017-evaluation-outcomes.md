@@ -650,6 +650,35 @@ three requests trying synonyms before it abstains. The next slice is therefore t
 render the selection's mode - a complete set, or how many of how many - into the
 capsule, so an absence can be read instead of searched.
 
+### Rejected: telling the model that the selection is exhaustive
+
+The obvious next step was to have the turn say "every stored memory matching this
+message is already in the context, so searching again will not add any". It was
+implemented as a per-turn note derived from the receipt (no exclusions for the
+token budget), tested, and measured over the memory family.
+
+| memory case | before | with the note |
+| --- | --- | --- |
+| P1 name | 1.60 | 1.00 |
+| P2 venue | 2.30 | 1.00 |
+| P3, P4 | 1.00 | 1.00 |
+| P5 absent fact | 3.30 | 2.10 |
+| family | 1.84 | 1.22 |
+| recall@5 | 1.000 | **0.750** |
+
+The gain was bought with wrong answers. In the long_use profile the store holds
+"The canine's name is Miso." while the question says "pet dog", so the selection
+correctly holds nothing by word overlap; the note then told the model that
+nothing matching was stored, and all five P1 and all five P2 attempts answered
+"I don't have that stored" instead of searching the other word and finding it.
+
+The lesson is a rule for this repository: **a lexical selection cannot assert
+absence**. Saying "nothing matches" turns a search the model would have retried
+into a confident wrong answer, because the miss that matters is precisely the one
+word overlap cannot see. The note is reverted; the instruction change that lets
+the model answer from a context that already holds the fact stays, since it only
+ever fires when the fact is present.
+
 ### What that one miss says about the memory family
 
 P1/long_use#4 compiled no nodes at all and then searched "dog", "pet", "puppy"
