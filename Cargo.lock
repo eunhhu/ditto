@@ -427,6 +427,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ditto-profile",
  "ditto-protocol",
  "futures-util",
  "libc",
@@ -478,11 +479,13 @@ dependencies = [
  "ditto-kernel",
  "ditto-model",
  "ditto-model-openai",
+ "ditto-profile",
  "ditto-protocol",
  "futures-core",
  "futures-util",
  "reqwest",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -521,6 +524,7 @@ dependencies = [
  "ditto-event-store",
  "ditto-model",
  "ditto-policy",
+ "ditto-profile",
  "ditto-protocol",
  "ditto-retrieval",
  "ditto-web-fetch",
@@ -582,6 +586,10 @@ dependencies = [
  "serde_json",
  "thiserror",
 ]
+
+[[package]]
+name = "ditto-profile"
+version = "0.1.0"
 
 [[package]]
 name = "ditto-protocol"

@@ -1059,6 +1059,10 @@ impl ContextSelection {
 }
 
 const TASK_RELEVANCE_REASON: &str = "task-relevance";
+/// The turn supplied this node itself, from a source it was already granted
+/// (ADR 0041). It takes no part in ranking, so it carries no score and sorts
+/// after everything the compiler selected.
+pub const PREFETCH_ATTACHMENT_REASON: &str = "prefetch-attachment";
 const COMPLETE_SET_REASON: &str = "complete-set";
 
 #[derive(Debug, Clone, Copy)]
@@ -1096,6 +1100,63 @@ impl ContextCompiler {
 
     /// Compile trusted candidates under an explicit selection contract.
     pub fn compile_with(
+        &self,
+        selection: ContextSelection,
+        signature: &TaskSignature,
+        candidates: impl IntoIterator<Item = ContextCandidate>,
+        token_budget: Option<u32>,
+        now: DateTime<Utc>,
+    ) -> Result<CompiledContext, ContextCompileError> {
+        // Filled by `compile_with_closure`; a plain compile never recompiles.
+        self.compile_once(selection, signature, candidates, token_budget, now)
+    }
+
+    /// Compile, then bring along the memories the included ones point at.
+    ///
+    /// A memory that places an object shares no word with a request that names
+    /// the object, so the complete set drops it and the model answers half a
+    /// two-hop fact. The second pass marks up to `closure_limit` such nodes
+    /// required, which costs one in-process recompile and no model call.
+    pub fn compile_with_closure(
+        &self,
+        selection: ContextSelection,
+        signature: &TaskSignature,
+        candidates: impl IntoIterator<Item = ContextCandidate>,
+        token_budget: Option<u32>,
+        now: DateTime<Utc>,
+        closure_limit: usize,
+    ) -> Result<CompiledContext, ContextCompileError> {
+        let candidates = candidates.into_iter().collect::<Vec<_>>();
+        let compiled =
+            self.compile_once(selection, signature, candidates.clone(), token_budget, now)?;
+        let selected = compiled
+            .nodes
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        let targets = pointer_closure(&selected, &candidates, closure_limit);
+        if targets.is_empty() {
+            return Ok(compiled);
+        }
+        let closed = candidates
+            .into_iter()
+            .map(|candidate| {
+                if targets.iter().any(|target| target == &candidate.node.id) {
+                    ContextCandidate {
+                        node: candidate.node,
+                        directive: ContextDirective::PolicyRequired {
+                            reason: POINTER_CLOSURE_REASON.into(),
+                        },
+                    }
+                } else {
+                    candidate
+                }
+            })
+            .collect::<Vec<_>>();
+        self.compile_once(selection, signature, closed, token_budget, now)
+    }
+
+    fn compile_once(
         &self,
         selection: ContextSelection,
         signature: &TaskSignature,
@@ -1411,7 +1472,13 @@ impl ContextCompiler {
                     actual: receipt.token_cost,
                 });
             }
-            if receipt.score.to_bits() != expected_score.to_bits() {
+            if receipt.reason == PREFETCH_ATTACHMENT_REASON {
+                if receipt.score != 0.0 {
+                    return Err(CompiledContextValidationError::ScoreMismatch {
+                        node_id: node.id.clone(),
+                    });
+                }
+            } else if receipt.score.to_bits() != expected_score.to_bits() {
                 return Err(CompiledContextValidationError::ScoreMismatch {
                     node_id: node.id.clone(),
                 });
@@ -1759,7 +1826,13 @@ impl ContextCompiler {
                     actual: receipt.token_cost,
                 });
             }
-            if receipt.score.to_bits() != expected_score.to_bits() {
+            if receipt.reason == PREFETCH_ATTACHMENT_REASON {
+                if receipt.score != 0.0 {
+                    return Err(CompiledContextValidationError::ScoreMismatch {
+                        node_id: node.id.clone(),
+                    });
+                }
+            } else if receipt.score.to_bits() != expected_score.to_bits() {
                 return Err(CompiledContextValidationError::ScoreMismatch {
                     node_id: node.id.clone(),
                 });
@@ -2196,10 +2269,20 @@ fn receipt_entry(
 }
 
 fn receipt_reason_priority(reason: &str, selection: ContextSelection) -> Option<u8> {
+    if reason == COMPLETE_SET_REASON && selection != ContextSelection::CompleteSet {
+        return None;
+    }
+    receipt_priority(reason)
+}
+
+/// The canonical order rank of a receipt reason. Included nodes are ordered by
+/// (priority, score, node id), so anything that adds a node to a finished
+/// compilation needs this to place it (ADR 0041).
+pub fn receipt_priority(reason: &str) -> Option<u8> {
     match reason {
-        TASK_RELEVANCE_REASON => Some(0),
-        COMPLETE_SET_REASON if selection == ContextSelection::CompleteSet => Some(0),
+        TASK_RELEVANCE_REASON | COMPLETE_SET_REASON => Some(0),
         "user-pinned" => Some(1),
+        PREFETCH_ATTACHMENT_REASON => Some(3),
         _ if reason
             .strip_prefix("policy-required: ")
             .is_some_and(|policy_reason| !policy_reason.trim().is_empty()) =>
@@ -2215,11 +2298,18 @@ fn relevance_score(
     query_tokens: &HashSet<String>,
     selection: ContextSelection,
 ) -> f32 {
-    let node_tokens = selection.tokens(&node.summary);
+    recall_score(node, query_tokens, &selection.tokens(&node.summary))
+}
+
+fn recall_score(
+    node: &ContextNode,
+    query_tokens: &HashSet<String>,
+    node_tokens: &HashSet<String>,
+) -> f32 {
     let overlap = if query_tokens.is_empty() {
         0.0
     } else {
-        query_tokens.intersection(&node_tokens).count() as f32 / query_tokens.len() as f32
+        query_tokens.intersection(node_tokens).count() as f32 / query_tokens.len() as f32
     };
 
     if overlap == 0.0 {
@@ -2246,10 +2336,13 @@ pub fn lexical_recall<'a>(
     nodes: impl IntoIterator<Item = &'a ContextNode>,
 ) -> Vec<&'a ContextNode> {
     let selection = ContextSelection::CompleteSet;
-    let query_tokens = selection.tokens(query);
+    let query_tokens = singular_tokens(selection.tokens(query));
     let mut scored = nodes
         .into_iter()
-        .map(|node| (relevance_score(node, &query_tokens, selection), node))
+        .map(|node| {
+            let node_tokens = singular_tokens(selection.tokens(&node.summary));
+            (recall_score(node, &query_tokens, &node_tokens), node)
+        })
         .filter(|(score, _)| *score > 0.0)
         .collect::<Vec<_>>();
     scored.sort_by(|(left_score, left), (right_score, right)| {
@@ -2258,6 +2351,77 @@ pub fn lexical_recall<'a>(
             .then_with(|| left.id.cmp(&right.id))
     });
     scored.into_iter().map(|(_, node)| node).collect()
+}
+
+/// The receipt reason a pointer target carries: it is required because another
+/// included memory named it, not because it matches the request.
+pub const POINTER_CLOSURE_REASON: &str = "memory pointer";
+
+/// The nodes a selected memory points at: a candidate that shares a word with a
+/// selected node where that word is rare among the candidates, so a place an
+/// object was named after is not mistaken for a word everyone uses. One hop,
+/// best first by how many rare words it shares, then by ID.
+///
+/// The caller recompiles with the result marked [`ContextDirective::PolicyRequired`],
+/// which is how a memory that only makes sense next to another one reaches the
+/// model without a search (ADR 0029, two-hop memories).
+pub fn pointer_closure(
+    selected: &[String],
+    candidates: &[ContextCandidate],
+    limit: usize,
+) -> Vec<String> {
+    if selected.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let selection = ContextSelection::CompleteSet;
+    let token_sets = candidates
+        .iter()
+        .map(|candidate| singular_tokens(selection.tokens(&candidate.node.summary)))
+        .collect::<Vec<_>>();
+    if token_sets.is_empty() {
+        return Vec::new();
+    }
+    let mut frequency: HashMap<&str, usize> = HashMap::new();
+    for tokens in &token_sets {
+        for token in tokens {
+            *frequency.entry(token.as_str()).or_default() += 1;
+        }
+    }
+    let selected_ids = selected.iter().map(String::as_str).collect::<HashSet<_>>();
+    let selected_tokens = candidates
+        .iter()
+        .zip(&token_sets)
+        .filter(|(candidate, _)| selected_ids.contains(candidate.node.id.as_str()))
+        .map(|(_, tokens)| tokens)
+        .collect::<Vec<_>>();
+    if selected_tokens.is_empty() {
+        return Vec::new();
+    }
+    // A word shared by more than two candidates is not a pointer: it is a topic.
+    const RARE: usize = 2;
+    let mut scored = candidates
+        .iter()
+        .zip(&token_sets)
+        .filter(|(candidate, _)| !selected_ids.contains(candidate.node.id.as_str()))
+        .filter_map(|(candidate, tokens)| {
+            let shared = tokens
+                .iter()
+                .filter(|token| frequency.get(token.as_str()).copied().unwrap_or(0) <= RARE)
+                .filter(|token| selected_tokens.iter().any(|known| known.contains(*token)))
+                .count();
+            (shared > 0).then_some((shared, candidate.node.id.clone()))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_shared, left_id), (right_shared, right_id)| {
+        right_shared
+            .cmp(left_shared)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, node_id)| node_id)
+        .collect()
 }
 
 fn v2_relevance(node: &ContextNode, query: &TaskQuery) -> Result<(f32, bool), RetrievalError> {
@@ -2350,6 +2514,37 @@ fn tokenize(input: &str) -> HashSet<String> {
         .filter(|token| token.chars().count() > 1)
         .map(str::to_lowercase)
         .collect()
+}
+
+/// Memory search matches a word and its plural: "flight" finds "My flights
+/// originate in Lakeside". Only regular English plural endings are folded,
+/// so a search never matches a different word; the context compiler keeps
+/// exact words, since its selection is part of the complete-set contract.
+fn singular_tokens(tokens: HashSet<String>) -> HashSet<String> {
+    tokens.into_iter().map(|token| singular(&token)).collect()
+}
+
+fn singular(token: &str) -> String {
+    let length = token.chars().count();
+    if length > 4 && token.ends_with("ies") {
+        return format!("{}y", &token[..token.len() - 3]);
+    }
+    if length > 4
+        && ["ches", "shes", "sses", "xes", "zes"]
+            .iter()
+            .any(|ending| token.ends_with(ending))
+    {
+        return token[..token.len() - 2].to_owned();
+    }
+    if length > 3
+        && token.ends_with('s')
+        && !["ss", "us", "is"]
+            .iter()
+            .any(|ending| token.ends_with(ending))
+    {
+        return token[..token.len() - 1].to_owned();
+    }
+    token.to_owned()
 }
 
 /// English function words that identify no fact. Spatial, temporal and
@@ -2507,6 +2702,40 @@ mod tests {
         assert!(ids("what is the").is_empty());
         assert_eq!(ids("Miso?"), ["b-miso"]);
         assert!(ids("").is_empty());
+        // A word finds its regular plural and the plural finds the word.
+        assert_eq!(ids("dogs"), ["a-mochi", "b-miso", "c-dog"]);
+        assert_eq!(ids("parks"), ["c-dog"]);
+        let flights = [node("x-flight", "My flights originate in Lakeside.")];
+        let found = |query: &str| lexical_recall(query, &flights).len();
+        assert_eq!(found("departure city flight travel"), 1);
+        assert_eq!(found("which city do I depart from"), 0);
+        // Words that only look plural stay themselves.
+        assert_eq!(super::singular("bus"), "bus");
+        assert_eq!(super::singular("glass"), "glass");
+        assert_eq!(super::singular("boxes"), "box");
+        assert_eq!(super::singular("cities"), "city");
+        assert_eq!(super::singular("is"), "is");
+    }
+
+    #[test]
+    fn a_pointer_memory_follows_the_memory_that_names_it() {
+        let candidates = vec![
+            ContextCandidate::ranked(node("key", "I keep the spare key in the saffron tin")),
+            ContextCandidate::ranked(node("tin", "The saffron tin sits above the fridge")),
+            ContextCandidate::ranked(node("piano", "My piano lesson happens every Tuesday")),
+        ];
+        let targets = super::pointer_closure(&["key".to_string()], &candidates, 2);
+        assert_eq!(targets, ["tin"]);
+    }
+
+    #[test]
+    fn a_word_three_memories_share_is_a_topic_not_a_pointer() {
+        let candidates = vec![
+            ContextCandidate::ranked(node("one", "The meeting moved to Thursday")),
+            ContextCandidate::ranked(node("two", "The meeting has an agenda")),
+            ContextCandidate::ranked(node("three", "The meeting room is upstairs")),
+        ];
+        assert!(super::pointer_closure(&["one".to_string()], &candidates, 2).is_empty());
     }
 
     fn node(id: &str, summary: &str) -> ContextNode {

@@ -8,7 +8,7 @@ use super::*;
 use ditto_kernel::{ReplayedReadOnlyTurn, TrustedContextNodeDraft};
 use ditto_protocol::{AgentRunResponse, AgentRunStatus, MemoryQuery, UserMemory};
 
-fn tool_results(request: &ModelRequest) -> Vec<Value> {
+pub(super) fn tool_results(request: &ModelRequest) -> Vec<Value> {
     request
         .turn
         .conversation
@@ -93,6 +93,48 @@ fn fill_past_the_budget(kernel: &DittoKernel) {
             None,
         );
     }
+}
+
+#[tokio::test]
+async fn a_memory_that_places_an_object_comes_with_the_memory_that_names_it() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let key = save_memory(
+        kernel,
+        "personal",
+        "I keep the spare key in the saffron tin",
+        None,
+    );
+    let tin = save_memory(
+        kernel,
+        "personal",
+        "The saffron tin sits above the fridge",
+        None,
+    );
+    let piano = save_memory(
+        kernel,
+        "personal",
+        "My piano lesson happens every Tuesday",
+        None,
+    );
+    fill_past_the_budget(kernel);
+
+    // "Where is my spare key?" shares no word with the memory that places the
+    // tin, and the model would answer "in the saffron tin" without searching.
+    let (status, driver) = ask(
+        kernel,
+        "Where is my spare key?",
+        vec![final_script(&["Above the fridge."])],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let ids = context_ids(&driver.requests()[0]);
+    assert!(ids.contains(&key), "{ids:?}");
+    assert!(
+        ids.contains(&tin),
+        "a memory that places the object travels with it: {ids:?}"
+    );
+    assert!(!ids.contains(&piano), "{ids:?}");
 }
 
 #[tokio::test]
@@ -194,6 +236,41 @@ async fn a_search_finds_a_memory_the_context_budget_left_out() {
     let mut requery = events.clone();
     requery[requested].payload["normalized"]["query"] = json!("pebbles");
     assert!(replay_artifact_read_turn(&requery, &status.turn_id).is_err());
+}
+
+#[tokio::test]
+async fn a_fourth_search_in_one_turn_is_refused() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    save_memory(
+        kernel,
+        "personal",
+        "The reading group meets at the Birch Room",
+        None,
+    );
+    let (status, driver) = ask(
+        kernel,
+        "Where should I go for the reading group get-together?",
+        vec![
+            search("reading group"),
+            search("get-together venue"),
+            search("where to go"),
+            search("meeting place"),
+            final_script(&["The Birch Room."]),
+        ],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let results = tool_results(driver.requests().last().unwrap());
+    for found in &results[..3] {
+        assert!(found["memories"].is_array(), "{found}");
+    }
+    // A turn searches three times: the fact, a pointer it named, and one more
+    // wording when a query matched nothing. Past that the model is rephrasing a
+    // question it already asked.
+    assert_eq!(results[3], json!({ "error": "limit_reached" }));
+    kernel.shutdown_agent_runs().await.unwrap();
+    replays(&fixture, &status.turn_id);
 }
 
 #[tokio::test]

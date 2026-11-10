@@ -60,6 +60,26 @@ Still open from the earlier frontier:
 - The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
   the measurement gate before any claim of parity with other assistants.
 
+## Comparison frontier (2026-11-06)
+
+The user asked to compare Ditto with Hermes, OpenMausBot and Harness² and to
+specify the improvements. The mechanism-by-mechanism result is
+[comparison-2026-11.md](../design/comparison-2026-11.md). In order:
+
+1. [038](tasks/038-korean-and-ranked-memory-search.md) Memory search that
+   matches Korean and ranks rare words, plus a reviewable correction record -
+   next, because the user writes Korean and a particle currently breaks the
+   match; measurable on a frozen suite v2.
+2. [039](tasks/039-improvement-compiler-first-slice.md) The improvement
+   compiler's first evidence-gated slice - the designed loop that does not exist,
+   and the one place another project has measured evidence for (+11.5 points
+   from one step; -10 when the edit has no execution evidence).
+3. [041](tasks/041-hermes-baseline.md) A measured Hermes baseline on the same
+   memory workload - the goal is replacement, and every Ditto number is still
+   absolute.
+4. [040](tasks/040-durable-work-items.md) A durable work item for a long
+   delegated task - after the first release, ADR first.
+
 ## Completed
 
 One line per slice; each task file and its evidence hold the details.

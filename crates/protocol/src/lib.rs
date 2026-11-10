@@ -155,6 +155,9 @@ pub mod event_kind {
     pub const TURN_FAILED: &str = "turn.failed";
     pub const CONTEXT_NODE_RECORDED: &str = "context.node.recorded";
     pub const CONVERSATION_RESET: &str = "conversation.reset";
+    /// The profile's standing instructions, superseded by the next one
+    /// (ADR 0045): journaled, so a turn replays against the text it was given.
+    pub const INSTRUCTIONS_RECORDED: &str = "instructions.recorded";
 }
 
 #[cfg(test)]

@@ -235,5 +235,6 @@ Two parts are deferred:
   Running several at once needs every tool's journal in phases (all requests,
   then all starts, then all results) and matching replay, for a gain only in
   turns that call several tools; revisit when such turns are measured to
-  matter.
+  matter. (Measured in Task 017: [ADR 0038](0038-ready-calls-run-in-order.md)
+  runs up to four ready calls of a response one after another.)
 

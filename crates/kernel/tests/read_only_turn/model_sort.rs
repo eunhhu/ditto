@@ -105,6 +105,37 @@ async fn model_sort_continues_with_verified_output_and_survives_restart() {
 }
 
 #[tokio::test]
+async fn a_sort_hands_back_the_lines_it_produced() {
+    let fixture = Fixture::new();
+    let command = permitted(true);
+    let input = worker::input_reference(INPUT.as_bytes());
+    // The sort result carries the order, so the model answers in the second
+    // request instead of spending a third one reading back what it sorted.
+    let driver = ScriptedDriver::new(vec![
+        sort_call("sort", &input, true),
+        final_script(&["Sorted: a, b."]),
+    ]);
+    let accepted = fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    assert_eq!(accepted.sort.unwrap().state, AgentSortState::NotRun);
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(
+        status.status,
+        AgentRunStatus::Unverified,
+        "{:?}",
+        fixture.events_for_session("personal")
+    );
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 2, "the model did not need a read-back");
+    let result = super::memory::tool_results(&requests[1])[0].clone();
+    assert_eq!(result["output_lines"], 2, "{result}");
+    assert_eq!(result["lines"], json!(["a", "b"]), "{result}");
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+}
+
+#[tokio::test]
 async fn invalid_or_unpermitted_calls_preserve_one_shot_lease_and_repeats_cannot_overwrite_result()
 {
     let fixture = Fixture::new();
@@ -139,12 +170,18 @@ async fn invalid_or_unpermitted_calls_preserve_one_shot_lease_and_repeats_cannot
         .iter()
         .filter(|e| e.kind == event_kind::TOOL_OUTPUT)
         .collect();
-    assert_eq!(outputs.len(), 5);
+    // The turn's own sort runs first (ADR 0041), so its output carries no
+    // refusal code and every later output is the model's.
+    assert_eq!(outputs.len(), 6);
+    assert_eq!(
+        outputs[0].payload["result"]["code"],
+        serde_json::Value::Null
+    );
     for (index, code) in [
-        (0, "invalid_arguments"),
-        (1, "permission_denied"),
+        (1, "invalid_arguments"),
         (2, "permission_denied"),
-        (4, "lease_exhausted"),
+        (3, "permission_denied"),
+        (5, "lease_exhausted"),
     ] {
         assert_eq!(outputs[index].payload["result"]["code"], code);
         assert_eq!(outputs[index].payload["claimed"], false);
@@ -156,12 +193,13 @@ async fn invalid_or_unpermitted_calls_preserve_one_shot_lease_and_repeats_cannot
             .count(),
         1
     );
+    // Five calls by the model, plus the turn's own prefetched sort (ADR 0041).
     assert_eq!(
         replay_artifact_read_turn(&events, &accepted.turn_id)
             .unwrap()
             .tool_calls
             .len(),
-        5
+        6
     );
 }
 
@@ -216,7 +254,9 @@ async fn attachment_and_permission_are_retry_identity_and_bad_input_never_admits
         .start_agent_run(command.clone(), Arc::new(driver.clone()))
         .unwrap();
     let status = terminal(&fixture.kernel, &command).await;
-    assert_eq!(status.sort.unwrap().state, AgentSortState::NotRun);
+    // The grant's sort runs at the start of the turn (ADR 0041), so a turn whose
+    // model never asks for one still carries a verified sort.
+    assert_eq!(status.sort.unwrap().state, AgentSortState::Verified);
     let count = fixture.kernel.event_count().unwrap();
     for mutation in 0..3 {
         let mut changed = command.clone();
@@ -297,20 +337,22 @@ async fn cancellation_before_authorization_and_after_claim_never_publishes_succe
         let status = terminal(&fixture.kernel, &command).await;
         assert_eq!(status.failure_code.as_deref(), Some("cancelled"));
         let sort = status.sort.unwrap();
-        assert_eq!(
-            sort.state,
-            if checkpoint == event_kind::TOOL_STARTED {
-                AgentSortState::Failed
-            } else {
-                AgentSortState::NotRun
-            }
-        );
+        // The granted sort already ran before the model asked (ADR 0041), so a
+        // cancelled turn reports it as attempted-and-unfinished rather than
+        // never started, and never publishes its output.
+        assert_eq!(sort.state, AgentSortState::Failed);
         assert!(sort.output.is_none());
         fixture.kernel.shutdown_agent_runs().await.unwrap();
         let events = fixture.events_for_session("personal");
         let replay = replay_artifact_read_turn(&events, &accepted.turn_id).unwrap();
-        assert_eq!(replay.tool_calls.len(), 1);
-        assert_eq!(driver.requests().len(), 1);
+        // The turn's own sort is the only work in flight. Whether the
+        // cancellation lands before or after it is journaled is a race, so the
+        // replay invariant is that at most that one call is recorded and no
+        // output is published (asserted above).
+        assert!(replay.tool_calls.len() <= 1);
+        // The cancelled turn may not reach the model at all: the turn's own sort
+        // emits the very event the cancellation waits for.
+        assert!(driver.requests().len() <= 1);
         assert!(
             !events
                 .iter()
@@ -531,4 +573,239 @@ fn runtime_loss_after_sort_preserves_verified_result_without_reissuing_effect() 
     );
     assert_eq!(kernel.event_count().unwrap(), count);
     assert_eq!(driver.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn the_attachment_is_compiled_before_the_model_asks_for_it() {
+    let fixture = Fixture::new();
+    let command = permitted(true);
+    let input = worker::input_reference(INPUT.as_bytes());
+    // A permission that allows deduplicating fixes no sort: the model decides
+    // whether the request wants one, so the harness only compiles the text.
+    let driver = ScriptedDriver::new(vec![
+        sort_call("sort", &input, true),
+        final_script(&["Sorted the attachment."]),
+    ]);
+    let accepted = fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(status.status, AgentRunStatus::Unverified);
+    assert_eq!(
+        status.sort.as_ref().unwrap().state,
+        AgentSortState::Verified
+    );
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 2);
+    let compiled = serde_json::to_string(&requests[0].turn.context).unwrap();
+    assert!(
+        compiled.contains("the attachment this turn was given"),
+        "the compiled context names the prefetched attachment: {compiled}"
+    );
+    assert!(
+        compiled.contains("b\\na\\nb"),
+        "the compiled context carries the attachment text: {compiled}"
+    );
+    assert!(!compiled.contains("sorted at the start of the turn"));
+    assert!(compiled.contains(&input));
+    let events = fixture.events_for_session("personal");
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == event_kind::TOOL_REQUESTED && e.actor == EventActor::System),
+        "nothing is prefetched when the permission does not fix the sort"
+    );
+    let replay = replay_artifact_read_turn(&events, &accepted.turn_id).unwrap();
+    assert_eq!(replay.requests.len(), 2);
+    assert_eq!(replay.tool_calls.len(), 1);
+}
+
+#[tokio::test]
+async fn a_granted_sort_runs_before_the_first_request_and_the_model_only_answers() {
+    let fixture = Fixture::new();
+    let command = permitted(false);
+    let input = worker::input_reference(INPUT.as_bytes());
+    let output = worker::input_reference(b"a\nb\nb\n");
+    let driver = ScriptedDriver::new(vec![final_script(&["Sorted: a, b, b."])]);
+    let accepted = fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(
+        status.status,
+        AgentRunStatus::Unverified,
+        "{:?}",
+        fixture.events_for_session("personal")
+    );
+    let sort = status.sort.as_ref().unwrap();
+    assert_eq!(sort.state, AgentSortState::Verified);
+    assert_eq!(sort.output.as_deref(), Some("a\nb\nb\n"));
+    assert_eq!(sort.output_reference.as_deref(), Some(output.as_str()));
+
+    // One model request: the answer.
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 1);
+    let context = serde_json::to_string(&requests[0].turn.context).unwrap();
+    assert!(
+        context.contains("sorted at the start of the turn"),
+        "{context}"
+    );
+    assert!(
+        context.contains("all 3 lines in order:\\na\\nb\\nb"),
+        "{context}"
+    );
+    // The tool stays offered, byte for byte as without a prefetch.
+    let tools = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tools,
+        [
+            "artifact.read",
+            "artifact.sort",
+            "web.browse",
+            "memory.manage"
+        ]
+    );
+    // The conversation carries no synthetic tool exchange.
+    assert!(
+        !requests[0]
+            .turn
+            .conversation
+            .iter()
+            .any(|item| matches!(item, ConversationItem::ToolResult { .. }))
+    );
+    assert!(
+        serde_json::to_string(&requests[0].turn.conversation)
+            .unwrap()
+            .contains(&input)
+    );
+
+    // The journal: the system's prefetch precedes the compilation that holds
+    // its result, reusing the tool events, and the lease is spent once.
+    let events = fixture.events_for_session("personal");
+    let kinds = events
+        .iter()
+        .map(|event| event.kind.as_str())
+        .skip_while(|kind| *kind != event_kind::TOOL_REQUESTED)
+        .take(6)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &kinds[..3],
+        [
+            event_kind::TOOL_REQUESTED,
+            event_kind::TOOL_STARTED,
+            event_kind::ARTIFACT_CREATED,
+        ],
+        "{kinds:?}"
+    );
+    let requested = events
+        .iter()
+        .find(|e| e.kind == event_kind::TOOL_REQUESTED)
+        .unwrap();
+    assert_eq!(requested.actor, EventActor::System);
+    assert_eq!(requested.payload["origin"], "prefetch");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == event_kind::TOOL_STARTED)
+            .count(),
+        1
+    );
+    let position = |kind: &str| events.iter().position(|e| e.kind == kind).unwrap();
+    assert!(position(event_kind::TOOL_OUTPUT) < position(event_kind::CONTEXT_COMPILED));
+    assert!(position(event_kind::CONTEXT_COMPILED) < position(event_kind::MODEL_REQUESTED));
+
+    // Replay derives the same context and request digest from the journal.
+    let replay = replay_artifact_read_turn(&events, &accepted.turn_id).unwrap();
+    assert_eq!(replay.requests.len(), 1);
+    assert_eq!(replay.tool_calls.len(), 1);
+    assert_eq!(
+        replay.requests[0].request.turn.context,
+        requests[0].turn.context
+    );
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+    let count = fixture.kernel.event_count().unwrap();
+    drop(fixture.kernel);
+    let reopened = DittoKernel::open(fixture.config).unwrap();
+    assert_eq!(reopened.inspect_agent_run(query(&command)).unwrap(), status);
+    assert_eq!(reopened.event_count().unwrap(), count);
+}
+
+#[tokio::test]
+async fn a_redo_of_the_prefetched_sort_is_a_refusal_the_model_reads() {
+    let fixture = Fixture::new();
+    let command = permitted(false);
+    let input = worker::input_reference(INPUT.as_bytes());
+    let driver = ScriptedDriver::new(vec![
+        sort_call("again", &input, false),
+        final_script(&["It was already sorted: a, b, b."]),
+    ]);
+    let accepted = fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(
+        status.status,
+        AgentRunStatus::Unverified,
+        "{:?}",
+        fixture.events_for_session("personal")
+    );
+    assert_eq!(
+        status.sort.as_ref().unwrap().state,
+        AgentSortState::Verified
+    );
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 2);
+    let result = super::memory::tool_results(&requests[1])[0].clone();
+    assert_eq!(result["error"], "lease_exhausted", "{result}");
+    let events = fixture.events_for_session("personal");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == event_kind::TOOL_STARTED)
+            .count(),
+        1,
+        "the refusal spent no claim"
+    );
+    let replay = replay_artifact_read_turn(&events, &accepted.turn_id).unwrap();
+    assert_eq!(replay.requests.len(), 2);
+    assert_eq!(replay.tool_calls.len(), 2);
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+}
+
+#[tokio::test]
+async fn memories_and_the_turns_own_nodes_replay_together() {
+    let fixture = Fixture::new();
+    super::agent_runs::save_memory(&fixture.kernel, "personal", "I like tea", None);
+    let command = permitted(false);
+    let driver = ScriptedDriver::new(vec![final_script(&["Sorted. You like tea."])]);
+    let accepted = fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(status.status, AgentRunStatus::Unverified);
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 1);
+    let context = serde_json::to_string(&requests[0].turn.context).unwrap();
+    assert!(context.contains("I like tea"), "{context}");
+    assert!(
+        context.contains("the attachment this turn was given"),
+        "{context}"
+    );
+    assert!(
+        context.contains("sorted at the start of the turn"),
+        "{context}"
+    );
+    let events = fixture.events_for_session("personal");
+    let replay = replay_artifact_read_turn(&events, &accepted.turn_id)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(replay.requests.len(), 1);
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
 }

@@ -1,0 +1,12 @@
+{
+  "name": "p2-search-stop-d",
+  "note": "P2/long_use#2 in campaign 4 burned all 8 requests on seven reworded memory searches (reading group, book club, Birch Room, get-together venue, party venue pub restaurant, reading, gathering place meeting) and failed with bound_exceeded. The guidance only says to search; it never says when to stop. This adds a stop rule to the same sentence.",
+  "edits": [
+    {
+      "file": "crates/kernel/src/turn/shared.rs",
+      "find": "and when a memory points to something else, such as a place or an object, search for that too.",
+      "replace": "and when a memory points to something else, such as a place or an object, search for that too. Two searches are usually enough: once a search has returned the memory that answers the request, use it and answer instead of searching again with reworded queries."
+    }
+  ],
+  "cases": ["P2"]
+}

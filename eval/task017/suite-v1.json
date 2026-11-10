@@ -1,0 +1,639 @@
+{
+  "record_type": "suite",
+  "schema_version": 1,
+  "suite_id": "task017-v1",
+  "profiles": [
+    {
+      "profile_id": "clean",
+      "unrelated_memories": 0,
+      "unrelated_memory_template": null,
+      "inert_capability_headers": 0,
+      "inert_header_fixture_sha256": null
+    },
+    {
+      "profile_id": "long_use",
+      "unrelated_memories": 1000,
+      "unrelated_memory_template": "Unrelated archive note {index}: catalogue entry {index} lists a grey pebble.",
+      "inert_capability_headers": 256,
+      "inert_header_fixture_sha256": "2473ca52621dc1cd7ed7509d3274c9f3f268163bc163320d05a5c632c29922bc"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "P1",
+      "family": "memory",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [
+        {
+          "label": "p1-miso",
+          "session": "task",
+          "text": "The canine's name is Miso.",
+          "replaces": null
+        }
+      ],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "What do I call my pet dog?",
+      "oracle": {
+        "required_memory_labels": [
+          "p1-miso"
+        ],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "Miso"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "P2",
+      "family": "memory",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [
+        {
+          "label": "p2-alder",
+          "session": "task",
+          "text": "The reading group meets at Alder Hall.",
+          "replaces": null
+        },
+        {
+          "label": "p2-birch",
+          "session": "task",
+          "text": "Our book club now gathers in Birch Room.",
+          "replaces": "p2-alder"
+        }
+      ],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "Where should I go for the reading group get-together?",
+      "oracle": {
+        "required_memory_labels": [
+          "p2-birch"
+        ],
+        "forbidden_memory_labels": [
+          "p2-alder"
+        ],
+        "required_answer_atoms": [
+          "Birch Room"
+        ],
+        "forbidden_answer_atoms": [
+          "Alder Hall"
+        ],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "P3",
+      "family": "memory",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [
+        {
+          "label": "p3-key",
+          "session": "task",
+          "text": "The spare key is inside the saffron tin.",
+          "replaces": null
+        },
+        {
+          "label": "p3-tin",
+          "session": "task",
+          "text": "The saffron tin sits above the fridge.",
+          "replaces": null
+        }
+      ],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "Where is the backup house key kept?",
+      "oracle": {
+        "required_memory_labels": [
+          "p3-key",
+          "p3-tin"
+        ],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "inside the saffron tin",
+          "above the fridge"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "P4",
+      "family": "memory",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [
+        {
+          "label": "p4-iona",
+          "session": "task",
+          "text": "The household contact is Iona.",
+          "replaces": null
+        },
+        {
+          "label": "p4-mara",
+          "session": "other",
+          "text": "The household contact is Mara.",
+          "replaces": null
+        }
+      ],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "Who is my household contact?",
+      "oracle": {
+        "required_memory_labels": [
+          "p4-iona"
+        ],
+        "forbidden_memory_labels": [
+          "p4-mara"
+        ],
+        "required_answer_atoms": [
+          "Iona"
+        ],
+        "forbidden_answer_atoms": [
+          "Mara"
+        ],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "P5",
+      "family": "memory",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "What is my home insurance policy number?",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "the policy number is unknown"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": true,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "T1",
+      "family": "tool",
+      "profiles": [
+        "clean"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": [
+        "pear",
+        "apple",
+        "pear"
+      ],
+      "deduplicate_allowed": true,
+      "schedule": null,
+      "request": "Sort the attached lines alphabetically and remove duplicates.",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": [
+          "apple",
+          "pear"
+        ],
+        "expected_effect_count": 1,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "T2",
+      "family": "tool",
+      "profiles": [
+        "clean"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": [
+        "pear",
+        "apple",
+        "pear"
+      ],
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "Sort the attached lines alphabetically and remove duplicates.",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "deduplication needs permission"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "T3",
+      "family": "tool",
+      "profiles": [
+        "clean"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": [
+        "delta",
+        "alpha",
+        "delta",
+        "charlie"
+      ],
+      "deduplicate_allowed": true,
+      "schedule": null,
+      "request": "Put the attached tags in alphabetical order and drop repeated tags.",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": [
+          "alpha",
+          "charlie",
+          "delta"
+        ],
+        "expected_effect_count": 1,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "T4",
+      "family": "tool",
+      "profiles": [
+        "clean"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": [
+        "kiwi",
+        "fig",
+        "kiwi"
+      ],
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "Alphabetize the attached fruit list and delete the duplicate lines.",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "deduplication needs permission"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "S1",
+      "family": "schedule",
+      "profiles": [
+        "clean"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": {
+        "kind": "once",
+        "due_offset_ms": 20000,
+        "interval_ms": null,
+        "occurrences": 1
+      },
+      "request": "What is two plus two?",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": 1,
+        "answer_grade_required": false
+      }
+    },
+    {
+      "case_id": "S2",
+      "family": "schedule",
+      "profiles": [
+        "clean"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": {
+        "kind": "finite_repeat",
+        "due_offset_ms": 20000,
+        "interval_ms": 60000,
+        "occurrences": 3
+      },
+      "request": "Return the literal word amber.",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": 3,
+        "answer_grade_required": false
+      }
+    },
+    {
+      "case_id": "S3",
+      "family": "schedule",
+      "profiles": [
+        "clean"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": {
+        "kind": "once",
+        "due_offset_ms": 20000,
+        "interval_ms": null,
+        "occurrences": 1
+      },
+      "request": "What is three plus four?",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": 1,
+        "answer_grade_required": false
+      }
+    },
+    {
+      "case_id": "S4",
+      "family": "schedule",
+      "profiles": [
+        "clean"
+      ],
+      "repetitions": 5,
+      "seeds": [],
+      "attachment_lines": null,
+      "deduplicate_allowed": false,
+      "schedule": {
+        "kind": "finite_repeat",
+        "due_offset_ms": 20000,
+        "interval_ms": 60000,
+        "occurrences": 2
+      },
+      "request": "Return the literal word teal.",
+      "oracle": {
+        "required_memory_labels": [],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": null,
+        "expected_effect_count": 0,
+        "expected_schedule_claims": 2,
+        "answer_grade_required": false
+      }
+    },
+    {
+      "case_id": "X1",
+      "family": "mixed",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [
+        {
+          "label": "x1-lakeside",
+          "session": "task",
+          "text": "My flights originate in Lakeside.",
+          "replaces": null
+        }
+      ],
+      "attachment_lines": [
+        "scarf",
+        "charger",
+        "passport"
+      ],
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "Alphabetize this list and tell me which city I depart from.",
+      "oracle": {
+        "required_memory_labels": [
+          "x1-lakeside"
+        ],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "Lakeside"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": [
+          "charger",
+          "passport",
+          "scarf"
+        ],
+        "expected_effect_count": 1,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "X2",
+      "family": "mixed",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [
+        {
+          "label": "x2-crate",
+          "session": "task",
+          "text": "My bike lives in the green crate.",
+          "replaces": null
+        }
+      ],
+      "attachment_lines": [
+        "post office",
+        "bakery",
+        "laundry"
+      ],
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "Alphabetize the attached errands and remind me where my bike is stored.",
+      "oracle": {
+        "required_memory_labels": [
+          "x2-crate"
+        ],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "the green crate"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": [
+          "bakery",
+          "laundry",
+          "post office"
+        ],
+        "expected_effect_count": 1,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "X3",
+      "family": "mixed",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [
+        {
+          "label": "x3-tuesday",
+          "session": "task",
+          "text": "My piano lesson happens every Tuesday.",
+          "replaces": null
+        }
+      ],
+      "attachment_lines": [
+        "Rui",
+        "Ana",
+        "Rui",
+        "Bo"
+      ],
+      "deduplicate_allowed": true,
+      "schedule": null,
+      "request": "Sort the attached guest names, drop repeats, and tell me which weekday my piano lesson is.",
+      "oracle": {
+        "required_memory_labels": [
+          "x3-tuesday"
+        ],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "Tuesday"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": [
+          "Ana",
+          "Bo",
+          "Rui"
+        ],
+        "expected_effect_count": 1,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    },
+    {
+      "case_id": "X4",
+      "family": "mixed",
+      "profiles": [
+        "clean",
+        "long_use"
+      ],
+      "repetitions": 5,
+      "seeds": [
+        {
+          "label": "x4-otto",
+          "session": "task",
+          "text": "My landlord is named Otto.",
+          "replaces": null
+        }
+      ],
+      "attachment_lines": [
+        "vacuum",
+        "dishes",
+        "mopping"
+      ],
+      "deduplicate_allowed": false,
+      "schedule": null,
+      "request": "Order the attached chores alphabetically and say what my landlord is called.",
+      "oracle": {
+        "required_memory_labels": [
+          "x4-otto"
+        ],
+        "forbidden_memory_labels": [],
+        "required_answer_atoms": [
+          "Otto"
+        ],
+        "forbidden_answer_atoms": [],
+        "must_abstain": false,
+        "expected_artifact_lines": [
+          "dishes",
+          "mopping",
+          "vacuum"
+        ],
+        "expected_effect_count": 1,
+        "expected_schedule_claims": null,
+        "answer_grade_required": true
+      }
+    }
+  ]
+}

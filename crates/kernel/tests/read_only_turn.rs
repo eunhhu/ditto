@@ -16,7 +16,9 @@ use ditto_context::{
     EpistemicStatus,
 };
 use ditto_event_store::EventStore;
-use ditto_kernel::turn::{TURN_PAYLOAD_VERSION, TurnFailureEvidence, TurnFailureReason};
+use ditto_kernel::turn::{
+    MAX_READY_CALLS_PER_REQUEST, TURN_PAYLOAD_VERSION, TurnFailureEvidence, TurnFailureReason,
+};
 use ditto_kernel::{
     ArtifactReadTurnReplay, ArtifactReadTurnStatus, ArtifactWriteContext, DittoKernel,
     ExecutionOutputPayload, KernelConfig, KernelError, ModelOutputPayload, ReadOnlyTurnControl,
@@ -36,6 +38,8 @@ use tempfile::TempDir;
 
 #[path = "read_only_turn/agent_runs.rs"]
 mod agent_runs;
+#[path = "read_only_turn/instructions.rs"]
+mod instructions;
 #[path = "read_only_turn/memory.rs"]
 mod memory;
 #[path = "read_only_turn/model_sort.rs"]
@@ -1204,44 +1208,93 @@ async fn ready_call_with_non_tool_finish_and_multiple_ready_calls_fail_before_ex
             .iter()
             .any(|event| event.kind == event_kind::EXECUTION_STARTED)
     );
+}
 
+/// Several ready calls in one response, which providers return even when
+/// parallel calls are forbidden: each runs in call order with its own
+/// lifecycle, every result reaches the next request, and replay agrees.
+#[tokio::test]
+async fn ready_calls_of_one_response_run_in_order_and_replay() {
     let fixture = Fixture::new();
     let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));
-    let args = artifact_arguments(&reference, 0, 1);
-    let first = call_id("call-1");
-    let second = call_id("call-2");
-    let driver = ScriptedDriver::new(vec![vec![
-        ModelEvent::ToolCallStarted {
-            call_id: first.clone(),
-            capability_id: ARTIFACT_READ_ID.into(),
-        },
-        ModelEvent::ToolCallArgumentDelta {
-            call_id: first.clone(),
-            delta: serde_json::to_string(&args).expect("args"),
-        },
-        ModelEvent::ToolCallReady {
-            call_id: first,
-            capability_id: ARTIFACT_READ_ID.into(),
-            arguments: args.clone(),
-        },
-        ModelEvent::ToolCallStarted {
-            call_id: second.clone(),
-            capability_id: ARTIFACT_READ_ID.into(),
-        },
-        ModelEvent::ToolCallArgumentDelta {
-            call_id: second.clone(),
-            delta: serde_json::to_string(&args).expect("args"),
-        },
-        ModelEvent::ToolCallReady {
-            call_id: second,
-            capability_id: ARTIFACT_READ_ID.into(),
-            arguments: args,
-        },
-        ModelEvent::Completed {
-            finish_reason: FinishReason::ToolCalls,
-            continuation: None,
-        },
-    ]]);
+    let mut script = Vec::new();
+    for (id, offset) in [("call-1", 0), ("call-2", 3)] {
+        let mut call = tool_request_script(
+            id,
+            ARTIFACT_READ_ID,
+            artifact_arguments(&reference, offset, 3),
+            FinishReason::ToolCalls,
+        );
+        call.pop();
+        script.extend(call);
+    }
+    script.push(ModelEvent::Completed {
+        finish_reason: FinishReason::ToolCalls,
+        continuation: None,
+    });
+    let driver = ScriptedDriver::new(vec![script, final_script(&["abc", "def"])]);
+    let outcome = fixture
+        .kernel
+        .run_artifact_read_turn(
+            command("session-1", "task-1"),
+            Vec::new(),
+            &driver,
+            CancellationToken::new(),
+            ReadOnlyTurnControl::default(),
+        )
+        .await
+        .expect("both calls run");
+    assert_eq!(outcome.request_count, 2);
+    assert_eq!(outcome.tool_call_count, 2);
+    assert_eq!(outcome.response, "abcdef");
+
+    let results = driver.requests()[1]
+        .turn
+        .conversation
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::ToolResult { call_id, .. } => Some(call_id.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results, ["call-1", "call-2"]);
+    let snapshot = fixture.events_for_task("task-1");
+    let started = snapshot
+        .iter()
+        .filter(|event| event.kind == event_kind::EXECUTION_STARTED)
+        .map(|event| {
+            event.payload["call_id"]
+                .as_str()
+                .expect("call id")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(started, ["call-1", "call-2"]);
+    let replayed = replay_artifact_read_turn(&snapshot, &outcome.turn_id).expect("replay");
+    assert!(matches!(
+        replayed.terminal,
+        ArtifactReadTurnReplay::Finished { .. }
+    ));
+
+    // Past the per-request bound the response fails before any execution.
+    let fixture = Fixture::new();
+    let reference = fixture.store(b"abcdef", "session-1", Some("task-1"));
+    let mut script = Vec::new();
+    for index in 0..=MAX_READY_CALLS_PER_REQUEST {
+        let mut call = tool_request_script(
+            &format!("call-{index}"),
+            ARTIFACT_READ_ID,
+            artifact_arguments(&reference, 0, 1),
+            FinishReason::ToolCalls,
+        );
+        call.pop();
+        script.extend(call);
+    }
+    script.push(ModelEvent::Completed {
+        finish_reason: FinishReason::ToolCalls,
+        continuation: None,
+    });
+    let driver = ScriptedDriver::new(vec![script]);
     let error = fixture
         .kernel
         .run_artifact_read_turn(
@@ -1252,15 +1305,22 @@ async fn ready_call_with_non_tool_finish_and_multiple_ready_calls_fail_before_ex
             ReadOnlyTurnControl::default(),
         )
         .await
-        .expect_err("parallel ready calls must fail");
+        .expect_err("too many ready calls must fail");
+    let TurnRunError::Failed(failure) = error else {
+        panic!("expected durable protocol failure");
+    };
+    assert_eq!(failure.code, TurnFailureCode::Protocol);
+    let snapshot = fixture.events_for_task("task-1");
     assert!(
-        matches!(error, TurnRunError::Failed(ref failure) if failure.code == TurnFailureCode::Protocol)
-    );
-    assert!(
-        !fixture
-            .events_for_task("task-1")
+        !snapshot
             .iter()
             .any(|event| event.kind == event_kind::EXECUTION_STARTED)
+    );
+    assert_eq!(
+        replay_artifact_read_turn(&snapshot, &failure.turn_id)
+            .expect("replay bound failure")
+            .terminal,
+        ArtifactReadTurnReplay::Failed { failure: *failure }
     );
 }
 
@@ -1878,10 +1938,13 @@ async fn a_held_provider_cannot_cross_the_model_output_deadline() {
         .run_artifact_read_turn(
             command("session-1", "task-1"),
             Vec::new(),
-            &DelayedDriver::new(std::time::Duration::from_secs(2)),
+            &DelayedDriver::new(std::time::Duration::from_secs(10)),
             CancellationToken::new(),
             ReadOnlyTurnControl {
-                deadline: Some(Utc::now() + ChronoDuration::seconds(1)),
+                // Building the request takes a moment on a loaded machine; a
+                // one-second deadline could expire before the request went out,
+                // which tests a different failure than the one under test.
+                deadline: Some(Utc::now() + ChronoDuration::seconds(3)),
             },
         )
         .await

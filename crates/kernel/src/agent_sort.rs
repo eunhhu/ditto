@@ -150,7 +150,11 @@ impl DittoKernel {
                 {
                     return Err(AgentRunError::Storage);
                 }
-                last_output_index = Some(output.request_index);
+                // A prefetched sort answers no model request, so it takes no
+                // place in their order (ADR 0041).
+                if request.origin == tool::ToolOrigin::Model {
+                    last_output_index = Some(output.request_index);
+                }
                 if start.is_none()
                     && let SortToolResult::Error { code } = &result
                 {

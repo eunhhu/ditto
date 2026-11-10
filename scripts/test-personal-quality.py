@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import re
+import pathlib
 import unittest
 from unittest import mock
 
@@ -307,14 +309,34 @@ class AssessmentTests(unittest.TestCase):
         script = str(Path(self.quality.__file__))
         for args in (["--history-size", "0"], ["--history-size", "5001"],
                      ["--samples", "1"], ["--samples", "101"]):
+            # The assertion is the exit code and the message, not wall time: a
+            # five second cap turns interpreter start-up under load into a
+            # spurious failure.
             result = subprocess.run([sys.executable, script, "--output", "unused.json", *args],
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertIn("history-size must be", result.stderr)
         result = subprocess.run([sys.executable, "-O", script, "--output", "unused.json"],
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("without -O", result.stderr)
+
+
+class PayloadVersionAgreement(unittest.TestCase):
+    """The assessor reads the journal itself, so its copy of the turn payload
+    version must be the kernel's. It drifted once and three reconciliation tests
+    failed with "model request identity mismatch", which looks like a product
+    bug rather than a stale constant."""
+
+    def test_the_assessors_payload_version_is_the_kernels(self):
+        source = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "crates/kernel/src/turn/types.rs"
+        ).read_text()
+        kernel = int(
+            re.search(r"TURN_PAYLOAD_VERSION: u16 = (\d+);", source).group(1)
+        )
+        self.assertEqual(module("quality").TURN_PAYLOAD_VERSION, kernel)
 
 
 class WorkflowTests(unittest.TestCase):

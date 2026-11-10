@@ -26,9 +26,11 @@ mod agent_sort;
 mod context_admission;
 mod context_retrieval;
 mod conversation;
+pub mod instructions;
 mod memory;
 mod recurrence;
 mod schedule;
+mod skills;
 mod sort_run;
 pub mod turn;
 pub use agent_run::AgentRunError;
@@ -131,6 +133,8 @@ impl KernelError {
 #[derive(Clone)]
 pub struct DittoKernel {
     inner: Arc<KernelInner>,
+    /// The data root this kernel serves - one profile, never a shared store.
+    data_dir: PathBuf,
 }
 
 struct KernelInner {
@@ -197,6 +201,7 @@ impl DittoKernel {
         let (event_sender, _) = broadcast::channel(config.event_buffer.max(16));
 
         Ok(Self {
+            data_dir: config.data_dir.clone(),
             inner: Arc::new(KernelInner {
                 events,
                 artifacts,

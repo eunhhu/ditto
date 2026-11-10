@@ -3,11 +3,14 @@ use clap::{Parser, Subcommand};
 use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
 mod chat;
+mod instructions;
 mod memory;
 mod presentation;
+mod profiles;
 mod repeats;
 mod runs;
 mod schedules;
+mod skills;
 mod sorts;
 mod telegram;
 
@@ -47,6 +50,21 @@ enum Command {
     ScheduleStatus(runs::RunIdentity),
     /// Cancel a pending schedule or its active execution.
     ScheduleCancel(runs::RunIdentity),
+    /// Read or replace the profile's standing instructions (ADR 0045).
+    Instructions {
+        #[command(subcommand)]
+        command: instructions::InstructionsCommand,
+    },
+    /// Read a profile's skills: the header catalogue, or one body.
+    Skills {
+        #[command(subcommand)]
+        command: skills::SkillCommand,
+    },
+    /// Administer local profiles: which data roots this host can serve (ADR 0044).
+    Profile {
+        #[command(subcommand)]
+        command: profiles::ProfileCommand,
+    },
     /// List pending schedules in a session (maximum 100 per data directory).
     ScheduleList {
         #[arg(long, default_value = "personal")]
@@ -143,6 +161,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         human: cli.human,
     };
     match cli.command {
+        Command::Instructions { command } => instructions::run(&client, view, command).await?,
+        Command::Skills { command } => skills::run(command, view).await?,
+        Command::Profile { command } => profiles::run(command, view).await?,
         Command::Repeat(args) => repeats::create(&client, view, args).await?,
         Command::RepeatStatus(identity) => repeats::inspect(&client, view, identity).await?,
         Command::RepeatCancel(identity) => repeats::cancel(&client, view, identity).await?,

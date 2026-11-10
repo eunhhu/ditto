@@ -45,6 +45,46 @@ and checks establish a new fact.
   retrievable with `git show 58b2b02:docs/agent/tasks/<report>.json`; their
   evidence files record the digests. The canary rejects tracked
   `docs/**/*.json` and any tracked file above 1 MiB.
+- On 2026-11-06 the user asked for a comparison with Hermes, OpenMausBot and
+  Harness² and for the improvements to be specified. The mechanism comparison is
+  [design/comparison-2026-11.md](../design/comparison-2026-11.md); Tasks 038,
+  039, 040 and 041 are drafted specs and **no part of them is implemented**.
+  The same day's measured facts: calibration 3 over 130 attempts recorded
+  128/130 verified turns, Recall@5 45/45 clean and 43/45 with 1,000 distractor
+  memories, and `eval/task017/budgets-v1.json` is frozen from it (Task 037).
+- [Task 042](tasks/042-harness-only-self-improvement.md) owns harness-only
+  self-improvement at post-training scale. Implemented so far: only
+  `scripts/probe_variant.py` with `scripts/test-probe-variant.py` (apply a
+  variant, run its cases, compare against a base run, revert byte-exactly). Two
+  candidate variants are written down in `eval/variants/` and **neither has been
+  probed yet**.
+- The eval runner now keeps a store's daemon log under `<out>/failures/` when a
+  store fails, because campaign 1 lost the only log of its own failure.
+- Campaign 1 (130 attempts, 123 verified) is **not a valid readiness run**: an
+  `agent-check.sh` build ran during it, which loaded the CPU that the latency
+  gate measures, and one store's daemon failed to start inside its 60 s window.
+  Its report is kept in scratch as evidence for that diagnosis; the readiness
+  number has to come from a clean run.
+- Campaign 2 (130 attempts) is **also invalid, for a worse reason**: it measured
+  a binary that predated the tree. `capabilities.selected` shows only
+  `web.browse` in every memory attempt, so the model answered "I don't have a
+  memory search available in this session" and Recall@5 collapsed to 0.500 while
+  the answers looked fine. A clean rebuild restored `memory.manage` selection
+  and memory calls in all five attempts of the case. The runner now builds the
+  daemon itself (`--no-build` exists for tests) and exits when the binary's
+  mtime is older than the newest Rust or capability source.
+- Campaign 3 is therefore the first readiness candidate: built by the runner,
+  with `--agent-check-exit 0` and the frozen budget.
+- First harness probes (Task 042) on the memory two-hop case: base 10/10 answers
+  with Recall@5 18/20; the pointer-as-stopping-rule variant 10/10 and 17/20; the
+  retrieval-hint variant 10/10 and 15/20 (safety gate flagged unused body
+  loads). Both are `KEEP_BASE`. The case's answers were never wrong — only its
+  recall — so the family is saturated for wording edits.
+- Case-level gates now need ten repetitions to apply their 0.80/0.90 rate;
+  below that they block only under 0.40 (`case_threshold` in
+  `scripts/eval_task017.py`), because `X1`/`long_use` scored 3/5 and then 5/5 on
+  consecutive runs of the same binary.
+
 
 ## Current system
 
@@ -129,7 +169,8 @@ and checks establish a new fact.
   eight model requests, journals versioned transitions before publication and
   replays without provider, artifact or network I/O. Agent tool calls share
   one `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
-  There is one turn contract, version 14 (ADR 0034): replay rejects turns
+  There is one turn contract, version 15 (ADR 0034; 0038 runs the ready
+  calls of a response in order): replay rejects turns
   recorded under any other version, while status and thread history still
   read their answers.
   The contract carries typed failure reasons (ADR 0021), the thread's recent
@@ -170,6 +211,184 @@ and checks establish a new fact.
   version-6 ID-ordered presentation, and schema 5 (Task 027) binds each
   driver observation to its journaled request digest. None of these measures answer quality,
   semantic recall at scale, tool-task success, live cost or v0.1 readiness.
+
+## Latest verified slice: a profile carries skills as documents (ADR 0046, Task 044 P3, first half)
+
+- `crates/profile::skill` owns the format: `<profile>/skills/<name>/SKILL.md` with
+  a closed `---` frontmatter holding `name` and a one-line `description` (1-200
+  characters), then the body (at most 64 KiB). Names are validated (a-z, 0-9, `-`,
+  `_`, at most 64, first character alphanumeric), so `../etc` is refused by name
+  rather than by a path check. A malformed skill is reported with its path and
+  reason, never skipped, and the declared name must match its directory.
+- `ditto skills list|show --profile --data-dir` reads the catalogue on this host
+  without a daemon. Live: a `photo-triage` skill listed as one line plus its
+  description, `show` returned the body, and `show ../etc` exited 1 with
+  `it must start with a lowercase letter or digit`.
+- `DittoKernel::skill_headers()` and `skill_body(name)` answer both questions from
+  the served profile's data root, reading the directory through each call: an
+  installation changes a few times a year, and a cache would only add a way to be
+  stale. A malformed skill makes the catalogue unreadable rather than silently
+  shorter.
+- Tests: `ditto-profile` 10 passed (6 new), `ditto-cli` 12 + 11 passed, kernel
+  `skills` 3 passed.
+- **Not done:** the header is not yet in the request prefix and there is no
+  `skill.read` capability. That is the rest of P3; the format is fixed first
+  because it is what a model-written skill would have to obey.
+- **Design note (ADR 0046):** installing a skill grants no effect, so reading one
+  needs no lease; what a skill does is still whatever capability the model then
+  invokes.
+
+## Latest verified slice: standing instructions are journaled (ADR 0045, Task 044 P2)
+
+- `instructions.recorded` is a durable document: `DittoKernel::set_instructions`
+  journals the text with the event id it supersedes, `instructions_in_force(seq)`
+  reads the last one at or before a sequence. 2000 characters is the limit, and an
+  overlong text is refused by name rather than truncated.
+- The turn pins it after the six core instructions as one segment, recorded in the
+  turn's own `context.compiled` (`standing_instructions`, payload version 17), so
+  replay reproduces the request and a later edit cannot change what an old turn
+  was told. Verified: `instructions::the_standing_instructions_lead_the_request_and_replay_keeps_the_old_text`.
+- Blank instructions pin nothing - an empty profile adds no segment and costs no
+  prefix space.
+- Routes: `GET /v1/instructions` (in force, or `null`), `PUT /v1/instructions`
+  (`{"text": ...}`, 201 with the document, 400 over the limit). CLI:
+  `ditto instructions show|set --text|--file|clear`. Live check against
+  `127.0.0.1:8901`: set returned seq 2, show echoed the text, clear returned
+  `no standing instructions`.
+- Tests: `read_only_turn` 109 passed; daemon `instructions` route test 1 passed.
+
+## Latest verified slice: a profile is a directory (ADR 0044, Task 044 P1)
+
+- `crates/profile` owns the boundary: `validate` (a-z, 0-9, `-`, `_`, at most 32
+  characters, first character alphanumeric), `root` (`default` is the data root
+  itself, every other name is `<data>/profiles/<name>`), `list`, `create`.
+- `ditto-daemon --profile <name>` (env `DITTO_PROFILE`) resolves the data root
+  before the kernel is built and logs `serving one profile` with both values.
+  Verified live: `DITTO_PROFILE=minchae DITTO_DATA_DIR=/tmp/dprof2` listened on
+  8899 and wrote to `/tmp/dprof2/profiles/minchae`.
+- `ditto profile list` and `ditto profile path <name>` read the data root on this
+  host (JSON by default, `--human` for a table). `../etc` is refused by the name
+  rule, not by a path check.
+- Isolation is by construction and tested: a file written under one root does not
+  exist under the other (`two_profiles_live_in_two_directories`).
+- Platform design and slice order: [design/platform-surface.md](../design/platform-surface.md).
+  Durable documents, session state and turn state are separated by ADR 0045;
+  verified by construction - the compiler's candidates come only from
+  `context.node.recorded` events, so a tool result cannot enter tomorrow's capsule.
+
+## Latest work: Task 038, two hops and a lighter tool call
+
+Two changes, both measured on the Task 017 suite.
+
+**A memory that places an object travels with the memory that names it.** The
+capsule was selected by word overlap with the request, so "the saffron tin sits
+above the fridge" shared nothing with "where is my spare key" and was dropped;
+P3 answered "inside the saffron tin" in half its long-use attempts with one
+model call and no search. `ContextCompiler::compile_with_closure` now recompiles
+once in process, marking up to two such nodes `policy-required: memory pointer`
+(ADR 0029). A pointer needs a word that at most two candidate summaries share,
+so a topic word does not drag in unrelated memories. No model call and no new
+receipt reason.
+
+Measured (`probe-closure`, P1-P5, 50 attempts, $0.09): P3 long-use recall
+5/10 -> 9/9, long-use recall over valid attempts 0.889 -> 1.000. Ten attempts
+failed with an empty provider response (one call, no token usage, ~8 s), which
+is upstream and not the change; the ratios above exclude them.
+
+**A sort returns the lines it sorted** (ADR 0040, turn contract 16). Artifact
+turns spent four requests where three carried work: the model read the sorted
+artifact back only because the sort result named a reference. The verified
+result now carries up to eight lines, 120 characters each, and the model
+answers from it.
+
+`read_only_turn` is 103 tests; `ditto-kernel` suite green.
+
+**Campaign 6 recorded the two changes on a bad provider day.** 130 attempts,
+112 observed, 18 lost to empty responses (14%). Semantic passed at recall 1.000
+on both profiles, artifact turns fell from 3.50 to 2.78 model requests, and all
+turns from 2.66 to 2.34. The tool and cost_latency gates failed on the same 18
+attempts (9 artifact attempts never reached a tool call; two genuine misses,
+T3/clean#4 and X4/long_use#5), so readiness is still `fail` pending a repeat on
+a healthy provider. Do not read campaign 6 as a harness regression.
+
+**Campaign 7 lost 28 attempts the same way** (21.5%, same signature: one
+request, no token usage, no failure reason), so the evaluation runner now
+re-asks exactly that signature up to two more times and records
+`transport_retries`. Two campaigns whose loss rate moves from 0 to 14 to 21.5
+percent on identical code measure the provider, not Ditto, and a gate verdict
+must not depend on it.
+
+**Campaign 9 is the readable one.** 129 of 130 observed after the retry, spend
+$0.1826, and seven of eight gates decided: integrity, safety, semantic, tool,
+schedule and resource pass; `answer` needs the second review; `cost_latency`
+fails at p95 29.9 s clean and 45.5 s long_use against the frozen 27.5 s. Input
+tokens per turn fell 4343 -> 3560 and requests 2.66 -> 2.34 since campaign 5,
+while the median turn went 8.1 s -> 13.4 s, so the ceiling is measuring the
+provider's day rather than the harness. Do not widen the ceiling to make the
+gate pass; re-measure it deliberately or run in a faster window.
+
+## State: campaign 12 passes all eight gates
+
+130 of 130 attempts observed under `budgets-v3`; 1.75 model requests per turn
+(prompt 2.06, tool 1.60, mixed 1.45, schedule 1.75), turn p50 4.0 s, $0.1326 for
+the run, daemon admission p95 1.0 ms. The answer gate cleared after the reading
+of 29 rule-flagged items and the agreed 20% second-review sample. Remaining
+distance to the Task 043 bar (1.3 requests per turn) is the memory family at
+1.90 and the tool family at 1.60.
+
+## Latest verified slice: admission is the daemon's span (ADR 0043)
+
+`budgets-v3` gates `daemon_admission_ms` (journal: claimed occurrence to admitted
+turn, 0-1 ms measured) and keeps the client's command round trip as a recorded
+number, because that round trip is the store's fsync tail on this host (p50 0.74 ms
+on tmpfs, 2.35 ms on the SD card). No ceiling changed; a manifest check refuses a
+v3 file that relaxes admission. `scripts/test-eval-task017.py` covers it with 41
+tests.
+
+## Latest verified slice: Task 017, the cost_latency split (ADR 0042)
+
+`budgets-v2.json` (schema version 2) gates the `cost_latency` family on
+`harness_ms` - the turn's completion less the sum of its model request spans,
+recorded in the existing `resources.ditto_overhead_ms` field - together with the
+model round trips and the input tokens, while the absolute turn time and the
+provider's own span are recorded with a same-day baseline and do not gate.
+`budgets-v1.json` keeps its meaning and stays readable; every ceiling in v2
+equals its v1 value, so nothing was loosened. `scripts/test-eval-task017.py`
+covers the split (35 tests). Not yet exercised by a full campaign: the next run
+is the first that grades under v2.
+
+The granted `artifact.sort` now runs at the start of the turn (ADR 0041
+amendment): it is performed from the grant's own arguments when the grant does
+not allow deduplication, its output enters the compilation in canonical receipt
+order, and the tool events that produce it are journaled before that compilation
+so replay derives the same context. The accepted consequences are that a
+cancelled turn may already carry a published sort, and that the model cannot
+re-sort because the one-shot lease is spent. Three `model_sort` tests were
+rewritten to that contract; the cancellation test now asserts the race-free
+invariants (no published output, at most one recorded call, at most one model
+request) instead of a fixed event count.
+
+## Latest work: Task 042, a harness-side search budget
+
+- A turn makes at most three `memory.search` calls; a fourth returns
+  `limit_reached` without searching ([ADR 0029](../adr/0029-memory-search-tool.md)).
+  The tool stays on the surface, so the prompt prefix and the stable-surface
+  invariant are unchanged, and replay recomputes both the search and the
+  refusal. The turn-scoped counter lives in `TurnScope.memory_searches`, and
+  `tool_replay` carries `memory_search_count` so journals recorded before the
+  budget still replay.
+- Why: one `P2`/`long_use` turn in campaign 4 spent seven reworded searches
+  (`reading group`, `book club`, `Birch Room`, `get-together venue`, `party
+  venue pub restaurant`, `reading`, `gathering place meeting`) after it had
+  already read the fact, and failed `bound_exceeded` with no answer.
+- Measured against the alternative: prompt edits asking the model to stop cut
+  that loop but also stopped a legitimate pointer hop (`P3` recall 17/20 to
+  15/20), and a pointer-aware wording raised requests from 5.2 to 6.2. Two
+  searches lost a fact a third query would have found (recall 5/5 to 4/5);
+  three restored it at 4.8 requests and a 10.7 s median against 5.2 and 11.4 s.
+  Five attempts per profile, so this is recorded as a bound, not a gain; the
+  loop did not reproduce in any later round.
+- Kernel tests: 101 in `read_only_turn`, `agent-check.sh` exit 0.
 
 ## Latest verified slice: Task 036
 

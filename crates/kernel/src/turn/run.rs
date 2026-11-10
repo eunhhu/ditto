@@ -17,7 +17,8 @@ use ditto_capability::{
 };
 use ditto_context::{
     CompiledContext, ContextCandidate, ContextCapsule, ContextCompileError, ContextCompiler,
-    ContextSelection, TaskSignature,
+    ContextLens, ContextNode, ContextNodeKind, ContextOrigin, ContextScope, ContextSelection,
+    EpistemicStatus, TaskSignature,
 };
 use ditto_model::{
     CancellationToken, ContentPart, ConversationItem, ExecutionEpochId, FinishReason,
@@ -49,9 +50,9 @@ use super::types::{
     CapabilityRequestedPayload, ContextCompiledPayload, ExecutionOutputPayload,
     ExecutionStartedPayload, MAX_ASSISTANT_TEXT_BYTES, MAX_MODEL_EVENTS_PER_REQUEST,
     MAX_MODEL_OUTPUT_BYTES_PER_REQUEST, MAX_MODEL_OUTPUT_EVENT_BYTES, MAX_MODEL_REQUESTS,
-    MAX_TURN_DURATION, ModelOutputPayload, ModelRequestDigestPayload, ReadOnlyTurnControl,
-    TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode, TurnFailureEvidence,
-    TurnFailureReason, TurnFinishedPayload, TurnRunError,
+    MAX_READY_CALLS_PER_REQUEST, MAX_TURN_DURATION, ModelOutputPayload, ModelRequestDigestPayload,
+    ReadOnlyTurnControl, TURN_PAYLOAD_VERSION, TurnFailedPayload, TurnFailure, TurnFailureCode,
+    TurnFailureEvidence, TurnFailureReason, TurnFinishedPayload, TurnRunError,
 };
 
 #[derive(Clone)]
@@ -78,6 +79,8 @@ pub(super) struct TurnScope {
     web_grant: super::web::WebGrant,
     /// Whether `memory.manage` is offered: to every agent run.
     memory_offered: bool,
+    /// Searches this turn has made against the per-turn budget.
+    memory_searches: Cell<u8>,
     /// Prelude transitions awaiting the turn's next append, which commits
     /// them with it in one transaction (ADR 0028 Phase B).
     staged: RefCell<Vec<(String, NewEvent)>>,
@@ -149,7 +152,7 @@ struct TurnTotals {
 /// The validated terminal state of one model request.
 struct ModelResponse {
     finish_reason: FinishReason,
-    ready_call: Option<ReadyCall>,
+    ready_calls: Vec<ReadyCall>,
     text: String,
 }
 
@@ -160,6 +163,11 @@ struct ModelResponse {
 const TEXT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(48);
 /// A chunk commits before it would pass this much text.
 const TEXT_CHUNK_BYTES: usize = 2 * 1_024;
+
+/// The attachment text a turn compiles into its context before its first model
+/// request (ADR 0041). Bounded, because it shares the capsule's token ceiling
+/// with the memories the turn selected.
+const PREFETCH_ATTACHMENT_BYTES: usize = 1_500;
 
 /// Coalesced text awaiting its commit, with its pre-assigned event ID so later
 /// transitions can name it as their cause.
@@ -337,6 +345,7 @@ impl DittoKernel {
                 super::web::WebGrant::default()
             },
             memory_offered: agent_run.is_some(),
+            memory_searches: Cell::new(0),
             staged: RefCell::default(),
             pending_text: RefCell::default(),
         };
@@ -409,9 +418,23 @@ impl DittoKernel {
         };
 
         self.ensure_live(&run, Checkpoint::BeforeContextCompilation, None, None)?;
-        let (capsule, history, in_flight) =
-            self.compile_turn_context(&mut run, &text, context_candidates, &input_event)?;
+        // The attachment this turn was granted is part of its compiled context,
+        // so it is recorded with the compilation and replayed from it (ADR 0041).
+        let prefetched = self.prefetched_attachment(&run, &input_event)?;
+        // File content in the context is file content read: memory writes are
+        // refused from here on, as after a tool read (ADR 0031).
+        run.read_external_content = prefetched.is_some();
+        let (capsule, history, in_flight) = self.compile_turn_context(
+            &mut run,
+            &text,
+            context_candidates,
+            &input_event,
+            prefetched,
+        )?;
         let tools = self.select_turn_tools(&mut run, &input_event)?;
+        let capsule = self
+            .prefetch_sort(&mut run, &tools, &input_event, capsule)
+            .await?;
         let text = latest_user_text(&text, run.accepted_at, run.utc_offset_minutes, &in_flight)
             .ok_or(TurnRunError::Internal("host UTC offset is out of range"))?;
         self.run_model_requests(&mut run, text, history, capsule, tools)
@@ -427,6 +450,7 @@ impl DittoKernel {
         text: &str,
         context_candidates: Option<impl IntoIterator<Item = ContextCandidate>>,
         input_event: &EventRecord,
+        prefetched: Option<ContextNode>,
     ) -> Result<(ContextCapsule, Vec<HistoryExchange>, Vec<InFlight>), TurnRunError> {
         let (context_candidates, sources_verified, snapshot) = match context_candidates {
             Some(candidates) => (candidates.into_iter().collect(), false, None),
@@ -452,12 +476,13 @@ impl DittoKernel {
             },
         };
         let compiled = ContextCompiler::default()
-            .compile_with(
+            .compile_with_closure(
                 ContextSelection::CompleteSet,
                 &turn_signature(text),
                 context_candidates,
                 None,
                 run.accepted_at,
+                super::memory::MAX_POINTER_MEMORIES,
             )
             .map_err(|error| match context_compile_reason(&error) {
                 Some(reason) => self.fail_with(run, reason, error.to_string(), None, None),
@@ -469,6 +494,13 @@ impl DittoKernel {
                     None,
                 ),
             })?;
+        // The prefetched attachment rides with the compilation rather than
+        // competing for its budget, so a turn that carries an attachment cannot
+        // push a memory the turn needs out of the selection (ADR 0041).
+        let mut compiled = compiled;
+        if let Some(node) = prefetched {
+            append_prefetched(&mut compiled, node);
+        }
         let capsule = ContextCapsule::from(&compiled);
         let provenance_through_seq = self.latest_event_seq()?;
         // Session-wide sources were checked once when the context was taken.
@@ -501,7 +533,11 @@ impl DittoKernel {
         };
         let utc_offset_minutes = local_utc_offset_minutes(run.accepted_at);
         run.utc_offset_minutes = utc_offset_minutes;
-        run.system_prefix = system_prefix();
+        let standing = self
+            .instructions_in_force(input_event.seq)
+            .map_err(TurnRunError::Kernel)?
+            .and_then(|document| document.segment());
+        run.system_prefix = system_prefix(standing.as_deref());
         let payload = ContextCompiledPayload {
             event_version: TURN_PAYLOAD_VERSION,
             turn_id: run.scope.turn_id.clone(),
@@ -511,6 +547,7 @@ impl DittoKernel {
                 .iter()
                 .map(|exchange| exchange.turn_id.clone())
                 .collect(),
+            standing_instructions: standing.clone(),
             utc_offset_minutes,
         };
         self.stage_turn_event(
@@ -885,7 +922,10 @@ impl DittoKernel {
             text,
             run.scope.sort.as_ref(),
         ));
-        let mut totals = TurnTotals::default();
+        let mut totals = TurnTotals {
+            tool_calls: run.scope.tool_call_count.get(),
+            ..TurnTotals::default()
+        };
 
         for request_index in 0..MAX_MODEL_REQUESTS {
             let index = Some(request_index as u8);
@@ -908,10 +948,10 @@ impl DittoKernel {
                 .stream_model_response(run, request_index, &request, &mut conversation, &mut totals)
                 .await?;
             if response.finish_reason == FinishReason::ToolCalls {
-                self.execute_tool_call(
+                self.execute_tool_calls(
                     run,
                     request_index,
-                    response.ready_call,
+                    response.ready_calls,
                     &tools,
                     &mut conversation,
                     &mut totals,
@@ -929,6 +969,174 @@ impl DittoKernel {
 
     /// Build, validate, and journal one model request before driver I/O.
     /// Returns the request and its durable `model.requested` timestamp.
+    /// The attachment a sort permission names, as a context node the turn
+    /// compiles before its first model request (ADR 0041).
+    ///
+    /// The reference is fixed at admission and the artifact is content-addressed,
+    /// so the text is a property of the events already journaled: it compiles
+    /// with the rest of the context and replays from the recorded compilation.
+    /// What it buys is the round trip the model would otherwise spend asking
+    /// for text the harness is holding.
+    fn prefetched_attachment(
+        &self,
+        run: &TurnRun<'_>,
+        input_event: &EventRecord,
+    ) -> Result<Option<ContextNode>, TurnRunError> {
+        let Some(grant) = run.scope.sort.as_ref() else {
+            return Ok(None);
+        };
+        let reference = grant.reference.clone();
+        let Ok(artifact) = ArtifactRef::new(reference.clone()) else {
+            return Ok(None);
+        };
+        let Ok(Some(source)) = self.artifact_creation(&run.scope.session_id, &reference) else {
+            return Ok(None);
+        };
+        let Ok(read) = self.inner.artifacts.read_verified_range_with_object_limit(
+            &artifact,
+            0,
+            PREFETCH_ATTACHMENT_BYTES,
+            PREFETCH_ATTACHMENT_BYTES as u64,
+        ) else {
+            return Ok(None);
+        };
+        let Ok(text) = std::str::from_utf8(read.bytes()) else {
+            return Ok(None);
+        };
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ContextNode {
+            id: format!("prefetch_attachment_{}", input_event.seq),
+            kind: ContextNodeKind::Resource,
+            summary: format!(
+                "the attachment this turn was given, read in full at the start of the turn \
+                 ({} bytes, reference {reference}):\n{text}",
+                read.bytes().len()
+            ),
+            origin: ContextOrigin::System,
+            epistemic: EpistemicStatus::Verified,
+            scope: ContextScope::Session,
+            lens: ContextLens::Task,
+            confidence: 1.0,
+            source_event_ids: vec![source.event_id.clone()],
+            supersedes: Vec::new(),
+            valid_from: None,
+            valid_until: None,
+        }))
+    }
+
+    /// Run the sort the user's permission fixes before the first model request
+    /// and compile its first ordered lines into the context (ADR 0041).
+    ///
+    /// It is the sort's one claim: the same lease, process, verifier and
+    /// `tool.*` events the model's own call would use, recorded by the system
+    /// as a prefetch. The events precede the compilation that holds their
+    /// result, so the prelude staged so far commits after them; a later call
+    /// by the model finds the lease spent and reads a refusal. The result
+    /// joins the conversation only through the context, so the request after
+    /// it differs from a model's call by nothing but that context.
+    async fn prefetch_sort(
+        &self,
+        run: &mut TurnRun<'_>,
+        tools: &TurnTools,
+        input_event: &EventRecord,
+        capsule: ContextCapsule,
+    ) -> Result<ContextCapsule, TurnRunError> {
+        // A turn already cancelled before it began does no work at all, so the
+        // granted sort is not performed for it either.
+        if run.cancellation.is_cancelled() {
+            return Ok(capsule);
+        }
+        let Some(grant) = run.scope.sort.clone() else {
+            return Ok(capsule);
+        };
+        let Some(arguments) = grant.prefetch_arguments().filter(|_| run.scope.agent_run) else {
+            return Ok(capsule);
+        };
+        let (Some(binding), Ok(call_id)) = (
+            tools.live_epoch.invocable_binding(ditto_artifact_sort::ID),
+            ProviderCallId::new(super::sort::prefetch_call_id(&run.scope.turn_id)),
+        ) else {
+            return Ok(capsule);
+        };
+        let call = ReadyCall {
+            call_id,
+            capability_id: ditto_artifact_sort::ID.to_owned(),
+            arguments: serde_json::to_value(&arguments)?,
+        };
+        // The prelude is staged for the next append; hold it back so the
+        // sort's events come first and the compilation follows its result.
+        let held = run.scope.staged.take();
+        let mut cause = input_event.event_id.clone();
+        let outcome = self
+            .run_sort_call(
+                &mut run.scope,
+                &mut cause,
+                0,
+                &call,
+                binding,
+                &tools.authorizer,
+                run.cancellation.clone(),
+                run.deadline,
+                super::tool::ToolOrigin::Prefetch,
+            )
+            .await;
+        *run.scope.staged.borrow_mut() = held;
+        let result = outcome?;
+        run.scope
+            .tool_call_count
+            .set(run.scope.tool_call_count.get().saturating_add(1));
+        let node = super::sort::prefetch_node(&grant, input_event.seq, &result);
+        let mut staged = run.scope.staged.borrow_mut();
+        let (_, event) = staged
+            .iter_mut()
+            .find(|(_, event)| event.kind == event_kind::CONTEXT_COMPILED)
+            .ok_or(TurnRunError::Internal("the compilation is not staged"))?;
+        event.causation_id = Some(cause);
+        let Some(node) = node else {
+            return Ok(capsule);
+        };
+        let mut payload: ContextCompiledPayload = serde_json::from_value(event.payload.clone())?;
+        append_prefetched(&mut payload.compiled, node);
+        event.payload = serde_json::to_value(&payload)?;
+        run.read_external_content = true;
+        Ok(ContextCapsule::from(&payload.compiled))
+    }
+
+    /// The `artifact.created` event that makes `reference` readable in this
+    /// session, when there is one.
+    fn artifact_creation(
+        &self,
+        session: &str,
+        reference: &str,
+    ) -> Result<Option<EventRecord>, KernelError> {
+        let high_water = self.inner.events.latest_seq()?;
+        let mut query = EventQuery {
+            session_id: Some(session.to_owned()),
+            ..EventQuery::default()
+        };
+        loop {
+            query.limit = Some(1_000);
+            let page = self.list_events_through(&query, high_water)?;
+            if page.is_empty() {
+                return Ok(None);
+            }
+            let last_seq = page.last().map_or(0, |event| event.seq);
+            if let Some(found) = page.into_iter().find(|event| {
+                event.kind == event_kind::ARTIFACT_CREATED
+                    && event.actor == EventActor::System
+                    && event.payload.get("reference").and_then(Value::as_str) == Some(reference)
+            }) {
+                return Ok(Some(found));
+            }
+            if last_seq >= high_water {
+                return Ok(None);
+            }
+            query.after_seq = Some(last_seq);
+        }
+    }
+
     fn dispatch_model_request(
         &self,
         run: &mut TurnRun<'_>,
@@ -1014,7 +1222,7 @@ impl DittoKernel {
         // its own, and the two together never pass the request's bound.
         let mut model_output_bytes = 0_usize;
         let mut tool_buffer = ToolCallBuffer::default();
-        let mut ready_call: Option<ReadyCall> = None;
+        let mut ready_calls: Vec<ReadyCall> = Vec::new();
         let mut request_text = String::new();
         // When text last became durable. Text after a quiet interval commits
         // at once, so coalescing never delays the first words of a burst.
@@ -1218,11 +1426,13 @@ impl DittoKernel {
                     arguments,
                 } => {
                     self.ensure_known_capability(run, index, call_id, capability_id)?;
-                    if ready_call.is_some() {
+                    if ready_calls.len() == MAX_READY_CALLS_PER_REQUEST {
                         return Err(self.fail(
                             run,
                             TurnFailureCode::Protocol,
-                            "a model request produced more than one ready tool call",
+                            format!(
+                                "a model request produced more than {MAX_READY_CALLS_PER_REQUEST} ready tool calls"
+                            ),
                             index,
                             Some(call_id.clone()),
                         ));
@@ -1245,7 +1455,7 @@ impl DittoKernel {
                             Some(call_id.clone()),
                         ));
                     }
-                    ready_call = Some(ReadyCall {
+                    ready_calls.push(ReadyCall {
                         call_id: call_id.clone(),
                         capability_id: capability_id.clone(),
                         arguments: arguments.clone(),
@@ -1309,7 +1519,7 @@ impl DittoKernel {
                     }
                     return Ok(ModelResponse {
                         finish_reason: finish_reason.clone(),
-                        ready_call,
+                        ready_calls,
                         text: request_text,
                     });
                 }
@@ -1318,19 +1528,21 @@ impl DittoKernel {
         }
     }
 
-    /// Execute the one ready call of a `ToolCalls` terminal and append its
-    /// structured result to the conversation.
-    async fn execute_tool_call(
+    /// Execute the ready calls of a `ToolCalls` terminal one after another,
+    /// in the order the model produced them, appending each structured
+    /// result to the conversation. Providers may return several calls even
+    /// when parallel calls are forbidden; each keeps its own lifecycle.
+    async fn execute_tool_calls(
         &self,
         run: &mut TurnRun<'_>,
         request_index: usize,
-        ready_call: Option<ReadyCall>,
+        ready_calls: Vec<ReadyCall>,
         tools: &TurnTools,
         conversation: &mut Vec<ConversationItem>,
         totals: &mut TurnTotals,
     ) -> Result<(), TurnRunError> {
         let index = Some(request_index as u8);
-        let Some(call) = ready_call else {
+        let Some(first) = ready_calls.first() else {
             return Err(self.fail(
                 run,
                 TurnFailureCode::Protocol,
@@ -1340,14 +1552,33 @@ impl DittoKernel {
             ));
         };
         if request_index + 1 >= MAX_MODEL_REQUESTS {
+            let call_id = first.call_id.clone();
             return Err(self.fail(
                 run,
                 TurnFailureCode::BoundExceeded,
                 format!("turn exhausted the {MAX_MODEL_REQUESTS}-request limit"),
                 index,
-                Some(call.call_id),
+                Some(call_id),
             ));
         }
+        for call in ready_calls {
+            self.execute_tool_call(run, request_index, call, tools, conversation, totals)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Execute one ready call and append its structured result.
+    async fn execute_tool_call(
+        &self,
+        run: &mut TurnRun<'_>,
+        request_index: usize,
+        call: ReadyCall,
+        tools: &TurnTools,
+        conversation: &mut Vec<ConversationItem>,
+        totals: &mut TurnTotals,
+    ) -> Result<(), TurnRunError> {
+        let index = Some(request_index as u8);
 
         // Give cancellation a deterministic checkpoint after the provider
         // terminal and before any capability request is journaled.
@@ -1416,6 +1647,7 @@ impl DittoKernel {
                     &tools.authorizer,
                     run.cancellation.clone(),
                     run.deadline,
+                    super::tool::ToolOrigin::Model,
                 )
                 .await?;
             (result.model_value(), result.is_error())
@@ -1649,7 +1881,7 @@ impl DittoKernel {
         totals: &TurnTotals,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
         let index = Some(request_index as u8);
-        if let Some(call) = response.ready_call {
+        if let Some(call) = response.ready_calls.into_iter().next() {
             return Err(self.fail(
                 run,
                 TurnFailureCode::Protocol,
@@ -2094,6 +2326,41 @@ impl DittoKernel {
             ),
         ))
     }
+}
+
+/// Add a node the turn supplied itself to a compilation with the canonical
+/// receipt reason (ADR 0041). Included nodes are ordered by (priority, score,
+/// node id), so the node is placed where it sorts instead of appended: appending
+/// it would leave the receipt out of canonical order.
+fn append_prefetched(compiled: &mut CompiledContext, node: ContextNode) {
+    let token_cost = ditto_context::ContextCapsuleItem::from(&node).token_cost();
+    let entry = ditto_context::ContextReceiptEntry {
+        node_id: node.id.clone(),
+        source_event_ids: node.source_event_ids.clone(),
+        epistemic: node.epistemic,
+        reason: ditto_context::PREFETCH_ATTACHMENT_REASON.into(),
+        score: 0.0,
+        token_cost,
+    };
+    let priority = ditto_context::receipt_priority(&entry.reason).unwrap_or(u8::MAX);
+    let index = compiled
+        .receipt
+        .included
+        .iter()
+        .position(|existing| {
+            let existing_priority =
+                ditto_context::receipt_priority(&existing.reason).unwrap_or(u8::MAX);
+            // Canonical order is descending priority, then descending score,
+            // then ascending node id.
+            existing_priority < priority
+                || (existing_priority == priority
+                    && (existing.score < 0.0
+                        || (existing.score == 0.0 && existing.node_id > entry.node_id)))
+        })
+        .unwrap_or(compiled.receipt.included.len());
+    compiled.receipt.included.insert(index, entry);
+    compiled.receipt.total_token_cost += token_cost;
+    compiled.nodes.insert(index, node);
 }
 
 fn turn_event<T: Serialize>(

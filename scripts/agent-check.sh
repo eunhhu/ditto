@@ -31,6 +31,8 @@ cargo test --locked -p ditto-daemon client_tests::built_cli_telegram_gateway_rel
 cargo test --locked -p ditto-daemon client_tests::built_cli_chat_threads_remembers_and_resets -- --exact --ignored
 python3 scripts/test-personal-baseline.py
 python3 scripts/test-personal-quality.py
+python3 scripts/test-eval-task017.py
+python3 scripts/test-probe-variant.py
 node scripts/test-web.js
 baseline_report=$(mktemp "${TMPDIR:-/tmp}/ditto-baseline-gate.XXXXXX")
 quality_report=""

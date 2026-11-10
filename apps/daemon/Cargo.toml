@@ -15,9 +15,11 @@ ditto-capability = { path = "../../crates/capability" }
 ditto-kernel = { path = "../../crates/kernel" }
 ditto-model = { path = "../../crates/model" }
 ditto-model-openai = { path = "../../crates/model-openai" }
+ditto-profile = { path = "../../crates/profile" }
 ditto-protocol = { path = "../../crates/protocol" }
 futures-core.workspace = true
 futures-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

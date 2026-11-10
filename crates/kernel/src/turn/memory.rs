@@ -35,6 +35,17 @@ const MAX_QUERY_CHARS: usize = 200;
 pub const MAX_MEMORY_TEXT_CHARS: usize = 500;
 /// Memory writes one turn may make.
 pub const MAX_MEMORY_WRITES: u32 = 3;
+/// Memory searches one turn may make: the fact, a pointer it names, and one
+/// more worded differently when a query matched nothing. A measured turn that
+/// stopped at two searches lost a fact a third query would have found, and one
+/// that was allowed seven kept rephrasing until it ran out of requests without
+/// answering (ADR 0029, per-turn search budget).
+pub const MAX_MEMORY_SEARCHES: u32 = 3;
+
+/// Memories a compiled capsule may add because an included memory named the
+/// object they place. A two-hop fact is usually one pointer; two leaves room for
+/// a fact that names two things without turning the capsule into a dump.
+pub const MAX_POINTER_MEMORIES: usize = 2;
 /// The lease that bounds a turn's memory writes.
 pub(crate) const LEASE_ID: &str = "agent-memory";
 /// A memory Ditto inferred is likely, not asserted by the user.

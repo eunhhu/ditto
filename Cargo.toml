@@ -14,6 +14,7 @@ members = [
   "crates/model",
   "crates/model-openai",
   "crates/policy",
+  "crates/profile",
   "crates/protocol",
   "crates/retrieval",
   "crates/web-fetch",

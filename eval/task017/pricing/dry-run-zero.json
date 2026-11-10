@@ -1,0 +1,8 @@
+{
+  "basis": "local scripted dry-run fixture model; no provider, no charge",
+  "dated": "2026-11-06",
+  "model": "dry-run-fixture",
+  "provider": "none",
+  "usd_per_input_token": "0",
+  "usd_per_output_token": "0"
+}

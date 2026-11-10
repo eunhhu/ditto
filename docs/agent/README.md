@@ -17,6 +17,7 @@ smallest useful working set.
 | Tests, CI, release confidence | [`QUALITY-GATES.md`](QUALITY-GATES.md) |
 | Architecture or public contract | [`../architecture.md`](../architecture.md), relevant [`../adr`](../adr), and [`DECISIONS.md`](DECISIONS.md) |
 | Runtime speed, concurrency, streaming, prompt layout | [`../design/realtime-harness.md`](../design/realtime-harness.md) |
+| Comparison with another agent and its open tasks | [`../design/comparison-2026-11.md`](../design/comparison-2026-11.md) |
 | Event protocol | [`../specs/event-protocol.md`](../specs/event-protocol.md) |
 | Context compiler | [`../specs/context-ir.md`](../specs/context-ir.md) |
 | Capability retrieval/runtime | [`../specs/capability-manifest.md`](../specs/capability-manifest.md) |

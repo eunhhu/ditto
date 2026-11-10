@@ -3,8 +3,10 @@
 //! journal `tool.started`, then journal `tool.output`.
 use super::super::memory as memory_tool;
 use super::super::memory::{MemoryAction, MemoryDeriver, MemoryRefusal, MemoryResult};
-use super::super::sort::{SortToolError, SortToolResult};
-use super::super::tool::{LeaseRefusal, STOPPED, ToolOutput, ToolRequested, ToolStarted};
+use super::super::sort::{SortToolError, SortToolResult, result_lines};
+use super::super::tool::{
+    LeaseRefusal, STOPPED, ToolOrigin, ToolOutput, ToolRequested, ToolStarted,
+};
 use super::super::web::{self, WebResult, WebToolError};
 use super::*;
 use crate::TrustedContextNodeDraft;
@@ -85,10 +87,11 @@ impl DittoKernel {
         request_index: u8,
         call: &ReadyCall,
         invocation: Option<&CanonicalInvocation>,
+        origin: ToolOrigin,
     ) -> Result<EventRecord, TurnRunError> {
         let event = self.append_turn_payload(
             scope,
-            EventActor::Model,
+            origin.actor(),
             event_kind::TOOL_REQUESTED,
             &ToolRequested {
                 event_version: 1,
@@ -98,6 +101,7 @@ impl DittoKernel {
                 capability_id: call.capability_id.clone(),
                 arguments: call.arguments.clone(),
                 normalized: invocation.map(|invocation| invocation.normalized_arguments().clone()),
+                origin,
             },
             Some(cause.clone()),
             Some(call.call_id.to_string()),
@@ -221,7 +225,14 @@ impl DittoKernel {
         let access = self.web_access();
         let invocation = compile_call(binding, call, &access.deriver())?;
         let request: Option<WebRequest> = normalized(invocation.as_ref())?;
-        self.tool_requested(scope, cause, request_index, call, invocation.as_ref())?;
+        self.tool_requested(
+            scope,
+            cause,
+            request_index,
+            call,
+            invocation.as_ref(),
+            ToolOrigin::Model,
+        )?;
         self.tool_checkpoint(scope, cause, &cancellation, deadline, request_index, call)
             .await?;
         let claimed = match (
@@ -314,24 +325,45 @@ impl DittoKernel {
     ) -> Result<MemoryResult, TurnRunError> {
         let invocation = compile_call(binding, call, &MemoryDeriver::default())?;
         let action: Option<MemoryAction> = normalized(invocation.as_ref())?;
-        let requested =
-            self.tool_requested(scope, cause, request_index, call, invocation.as_ref())?;
+        let requested = self.tool_requested(
+            scope,
+            cause,
+            request_index,
+            call,
+            invocation.as_ref(),
+            ToolOrigin::Model,
+        )?;
         self.tool_checkpoint(scope, cause, &cancellation, deadline, request_index, call)
             .await?;
         let result = match (invocation, action) {
             (Some(invocation), Some(MemoryAction::Search { query })) => {
-                let now = Utc::now();
-                match authorizer.authorize_static(&invocation, &StaticPolicy::memory_search(), now)
-                {
-                    Ok(AuthorizationOutcome::Permitted(permit))
-                        if permit.validate(&invocation, now).is_ok() =>
-                    {
-                        MemoryResult::search(&query, space)
+                // A turn searches twice at most: the first search for the fact,
+                // the second to follow a pointer it named. Refusing past that
+                // keeps the tool surface stable while stopping the rephrasing
+                // loop that spent the whole request budget without answering.
+                let used = scope.memory_searches.get();
+                if u32::from(used) >= memory_tool::MAX_MEMORY_SEARCHES {
+                    MemoryResult::Refused {
+                        code: MemoryRefusal::LimitReached,
                     }
-                    _ => {
-                        return Err(TurnRunError::Internal(
-                            "memory search static policy contradicted its contract",
-                        ));
+                } else {
+                    let now = Utc::now();
+                    match authorizer.authorize_static(
+                        &invocation,
+                        &StaticPolicy::memory_search(),
+                        now,
+                    ) {
+                        Ok(AuthorizationOutcome::Permitted(permit))
+                            if permit.validate(&invocation, now).is_ok() =>
+                        {
+                            scope.memory_searches.set(used + 1);
+                            MemoryResult::search(&query, space)
+                        }
+                        _ => {
+                            return Err(TurnRunError::Internal(
+                                "memory search static policy contradicted its contract",
+                            ));
+                        }
                     }
                 }
             }
@@ -454,6 +486,7 @@ impl DittoKernel {
         authorizer: &InvocationAuthorizer,
         cancellation: CancellationToken,
         deadline: DateTime<Utc>,
+        origin: ToolOrigin,
     ) -> Result<SortToolResult, TurnRunError> {
         let grant = scope
             .sort
@@ -461,9 +494,20 @@ impl DittoKernel {
             .ok_or(TurnRunError::Internal("missing sort permission"))?;
         let invocation = compile_call(binding, call, &worker::SortDeriver::default())?;
         let arguments: Option<SortArguments> = normalized(invocation.as_ref())?;
-        self.tool_requested(scope, cause, request_index, call, invocation.as_ref())?;
-        self.tool_checkpoint(scope, cause, &cancellation, deadline, request_index, call)
-            .await?;
+        self.tool_requested(
+            scope,
+            cause,
+            request_index,
+            call,
+            invocation.as_ref(),
+            origin,
+        )?;
+        // A prefetched call has no model request to stop; cancellation reaches
+        // its process through the token and the turn at its next checkpoint.
+        if origin == ToolOrigin::Model {
+            self.tool_checkpoint(scope, cause, &cancellation, deadline, request_index, call)
+                .await?;
+        }
         let claimed = match (invocation, arguments) {
             (Some(invocation), Some(arguments)) if grant.permits(&arguments) => {
                 match claim(authorizer, &invocation, "agent-sort")? {
@@ -546,6 +590,7 @@ impl DittoKernel {
                         verifier: worker::VERIFIER.into(),
                         input_lines: output.input_lines(),
                         output_lines: output.output_lines(),
+                        lines: result_lines(output.bytes()),
                     },
                     Some(stored.event.event_id),
                 )

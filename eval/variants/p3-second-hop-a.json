@@ -1,0 +1,12 @@
+{
+  "name": "p3-second-hop-a",
+  "note": "Task 042 candidate A: make the follow-a-pointer rule a stopping rule, not a suggestion.",
+  "edits": [
+    {
+      "file": "crates/kernel/src/turn/shared.rs",
+      "find": "and when a memory points to something else, such as a place or an object, search for that too.",
+      "replace": "and when a memory points to something else, such as a place or an object, that thing is not yet located: search for it before you answer, and keep following until the user's question is answered or a search finds nothing."
+    }
+  ],
+  "cases": ["P3"]
+}

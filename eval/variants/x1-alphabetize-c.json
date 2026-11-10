@@ -1,0 +1,17 @@
+{
+  "name": "x1-alphabetize-c",
+  "note": "Task 042 candidate C: the request says 'alphabetize', the retrieval hints only say 'sort', so the sort capability never pages in and the model answers from context with no artifact (campaign 1: X1 long_use 3/5, calls=1, no artifact).",
+  "edits": [
+    {
+      "file": "capabilities/core/artifact-sort/capability.toml",
+      "find": "intents = [\"sort a list\", \"remove duplicate lines\"]",
+      "replace": "intents = [\"sort a list\", \"alphabetize or order a list the user gave\", \"sort the lines of a file the user named\", \"remove duplicate lines\"]"
+    },
+    {
+      "file": "capabilities/core/artifact-sort/capability.toml",
+      "find": "aliases = [\"sort lines\", \"deduplicate list\"]",
+      "replace": "aliases = [\"sort lines\", \"alphabetize\", \"put in alphabetical order\", \"deduplicate list\"]"
+    }
+  ],
+  "cases": ["X1"]
+}
