@@ -374,6 +374,44 @@ of 29 rule-flagged items and the agreed 20% second-review sample. Remaining
 distance to the Task 043 bar (1.3 requests per turn) is the memory family at
 1.90 and the tool family at 1.60.
 
+## Latest verified slice: the sort permission states the user's choice (ADR 0047)
+
+`AgentSortPermission` carries `deduplicate` next to `allow_deduplicate`. A
+permission whose owner asked for the deduplicated order (`deduplicate: true`)
+prefetches `unique: true` before the first model request; one that only permits
+either order prefetches nothing and leaves the choice to the model; one that
+forbids deduplication prefetches `unique: false` as before. `deduplicate`
+without `allow_deduplicate` is rejected at admission, `SortGrant` carries the
+choice into replay, and `permission_matches` compares it so a retry that changes
+the choice conflicts instead of reusing the stored artifact. The user message
+also reports `already_ran`, `calls_used: 1` and the context node id when the turn
+already ran the sort, so a model does not spend a request rediscovering a spent
+lease.
+
+Why: the campaign's requests above one per turn sat in three groups - memory
+verification (21 turns), sorts whose permission allowed deduplication (19 turns),
+and one attachment read. The sorted group's messages say "remove duplicates",
+"drop repeated tags", "drop repeats": the harness was declining to act on what
+the user had written. This is a permission field, not intent inference - the
+client reads the message and sets the flag, and the suite declares
+`deduplicate_requested` per case.
+
+Evidence: `crates/kernel/tests/read_only_turn/model_sort.rs`
+(`a_permission_that_asks_for_deduplication_runs_the_sort_before_the_model` - one
+model request, `a\nb\n` verified from `b\na\nb`, the permission blob naming the
+node; `a_permission_that_only_allows_deduplication_leaves_the_choice_to_the_model`
+- two requests, unchanged behavior). `read_only_turn` 115 passed,
+`./scripts/agent-check.sh` exit 0.
+
+Measured on T1, T3, X3, X1 (30 attempts, release daemon, `--agent-check-exit 0`):
+35 requests = 1.17 per attempt, recall 20/20. T1 [1,1,1,1,1], T3 [1,1,1,1,1],
+X3/clean [1,1,1,1,1], X3/long_use [1,1,1,1,1], X1/clean [1,1,1,1,1]; X1/long_use
+stays [2,2,2,2,2] because that case's memory question is a separate lookup, not a
+sort. Campaign 15 before this slice: 145 turns / 192 requests = 1.324 requests per
+turn, recall 1.000, every decided gate passing except `answer`, which waits on
+the 22-item second-review sample. This slice removes 19 requests from that
+campaign's shape, which projects to 1.19.
+
 ## Latest verified slice: one memory search carries every wording (ADR 0029)
 
 `memory.manage` search takes `queries` - up to four wordings for the same fact,

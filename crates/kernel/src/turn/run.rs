@@ -942,9 +942,16 @@ impl DittoKernel {
         tools: TurnTools,
     ) -> Result<ArtifactReadTurnOutcome, TurnRunError> {
         let mut conversation = history_messages(&history);
+        let prefetched_sort = capsule
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .find(|id| id.starts_with(super::sort::PREFETCH_SORT_NODE_PREFIX))
+            .map(str::to_owned);
         conversation.extend(super::sort::initial_conversation(
             text,
             run.scope.sort.as_ref(),
+            prefetched_sort.as_deref(),
         ));
         let mut totals = TurnTotals {
             tool_calls: run.scope.tool_call_count.get(),

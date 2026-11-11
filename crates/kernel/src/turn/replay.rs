@@ -348,7 +348,11 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             .unwrap_or_default();
         let sort = input.agent_run.and_then(|metadata| metadata.sort);
         let input_text = input.text;
-        let conversation = super::sort::initial_conversation(input_text.clone(), sort.as_ref());
+        // Placeholder: the conversation is rebuilt from the recorded compilation
+        // once the capsule's receipts are known, and that rebuild is what the
+        // request digest is compared against.
+        let conversation =
+            super::sort::initial_conversation(input_text.clone(), sort.as_ref(), None);
         Ok(Self {
             version: None,
             agent_run,
@@ -426,9 +430,18 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
         )
         .ok_or_else(|| replay_invalid("context.compiled time offset is out of range"))?;
         let mut conversation = history_messages(&history);
+        let prefetched_sort = context
+            .compiled
+            .receipt
+            .included
+            .iter()
+            .map(|entry| entry.node_id.as_str())
+            .find(|id| id.starts_with(super::sort::PREFETCH_SORT_NODE_PREFIX))
+            .map(str::to_owned);
         conversation.extend(super::sort::initial_conversation(
             latest,
             self.sort.as_ref(),
+            prefetched_sort.as_deref(),
         ));
         self.conversation = conversation;
         let standing = context.standing_instructions.clone();

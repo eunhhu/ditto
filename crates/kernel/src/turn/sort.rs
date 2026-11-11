@@ -72,6 +72,8 @@ pub(crate) struct SortGrant {
     pub reference: String,
     pub source_event_id: String,
     pub allow_deduplicate: bool,
+    #[serde(default)]
+    pub deduplicate: bool,
 }
 
 impl SortGrant {
@@ -94,10 +96,19 @@ impl SortGrant {
     /// The one sort the permission itself fixes (ADR 0041). Deduplicating is
     /// something the user's request decides and only the model reads it, so a
     /// permission that allows it fixes nothing and nothing is prefetched.
+    /// The sort the permission fixes, or none when the choice is the model's.
+    ///
+    /// A permission that forbids deduplication fixes `unique: false`; one whose
+    /// owner explicitly asked for it fixes `unique: true`. Permission to
+    /// deduplicate without that request leaves the choice open, and the harness
+    /// does not spend the one-shot lease on a guess.
     pub fn prefetch_arguments(&self) -> Option<SortArguments> {
-        (!self.allow_deduplicate).then(|| SortArguments {
+        if self.allow_deduplicate && !self.deduplicate {
+            return None;
+        }
+        Some(SortArguments {
             reference: self.reference.clone(),
-            unique: false,
+            unique: self.deduplicate,
         })
     }
 
@@ -126,6 +137,7 @@ pub(crate) fn permission_matches(
         (Some(grant), Some(permission)) => {
             grant.reference == worker::input_reference(permission.text.as_bytes())
                 && grant.allow_deduplicate == permission.allow_deduplicate
+                && grant.deduplicate == permission.deduplicate
         }
         _ => false,
     }
@@ -134,14 +146,29 @@ pub(crate) fn permission_matches(
 pub(super) fn initial_conversation(
     text: String,
     grant: Option<&SortGrant>,
+    prefetched: Option<&str>,
 ) -> Vec<ConversationItem> {
     let mut content = vec![ContentPart::Text { text }];
     if let Some(grant) = grant {
-        content.push(ContentPart::Structured { value: json!({
-            "attachment": {"reference":grant.reference},
-            "user_permission": {"capability":"artifact.sort", "maximum_calls":1,
-                "allow_deduplicate":grant.allow_deduplicate, "expires":"end of this bounded turn"}
-        }) });
+        // When the turn already ran the sort, the ordered lines are in the
+        // context and the lease is spent: say so, or the model spends a request
+        // asking for a sort it is about to be refused.
+        let permission = match prefetched {
+            Some(node) => json!({"capability":"artifact.sort", "maximum_calls":1, "calls_used":1,
+                "allow_deduplicate":grant.allow_deduplicate, "deduplicate":grant.deduplicate,
+                "expires":"end of this bounded turn",
+                "already_ran":true, "result_in_context":node,
+                "note":"this sort already ran at the start of the turn; its ordered lines are in the                        context under that id, and calling artifact.sort again is refused"}),
+            None => json!({"capability":"artifact.sort", "maximum_calls":1,
+                "allow_deduplicate":grant.allow_deduplicate, "deduplicate":grant.deduplicate,
+                "expires":"end of this bounded turn"}),
+        };
+        content.push(ContentPart::Structured {
+            value: json!({
+                "attachment": {"reference":grant.reference},
+                "user_permission": permission
+            }),
+        });
     }
     vec![ConversationItem::Message {
         role: MessageRole::User,

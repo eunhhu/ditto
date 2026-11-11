@@ -11,6 +11,7 @@ fn permitted(allow_deduplicate: bool) -> StartAgentRunCommand {
         sort: Some(AgentSortPermission {
             text: INPUT.into(),
             allow_deduplicate,
+            deduplicate: false,
         }),
         ..start_command("sort the attachment")
     }
@@ -808,4 +809,63 @@ async fn memories_and_the_turns_own_nodes_replay_together() {
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(replay.requests.len(), 1);
     fixture.kernel.shutdown_agent_runs().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_permission_that_asks_for_deduplication_runs_the_sort_before_the_model() {
+    let fixture = Fixture::new();
+    let command = StartAgentRunCommand {
+        sort: Some(AgentSortPermission {
+            text: INPUT.into(),
+            allow_deduplicate: true,
+            deduplicate: true,
+        }),
+        ..start_command("sort the attachment and remove duplicates")
+    };
+    let driver = ScriptedDriver::new(vec![final_script(&["Sorted without repeats: a, b."])]);
+    fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(
+        status.status,
+        AgentRunStatus::Unverified,
+        "{:?}",
+        fixture.events_for_session("personal")
+    );
+    let sort = status.sort.as_ref().unwrap();
+    assert_eq!(sort.state, AgentSortState::Verified);
+    // The user asked for the deduplicated order, so the prefetch ran unique.
+    assert_eq!(sort.output.as_deref(), Some("a\nb\n"));
+    // One request: the answer. The model never spends one asking for a sort the
+    // turn already ran.
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 1);
+    let conversation = serde_json::to_string(&requests[0].turn.conversation).unwrap();
+    assert!(
+        conversation.contains("\"deduplicate\":true"),
+        "{conversation}"
+    );
+    assert!(conversation.contains("already_ran"), "{conversation}");
+}
+
+#[tokio::test]
+async fn a_permission_that_only_allows_deduplication_leaves_the_choice_to_the_model() {
+    let fixture = Fixture::new();
+    let command = permitted(true);
+    let input = worker::input_reference(INPUT.as_bytes());
+    let driver = ScriptedDriver::new(vec![
+        sort_call("s1", &input, true),
+        final_script(&["a, b."]),
+    ]);
+    fixture
+        .kernel
+        .start_agent_run(command.clone(), Arc::new(driver.clone()))
+        .unwrap();
+    let status = terminal(&fixture.kernel, &command).await;
+    assert_eq!(status.status, AgentRunStatus::Unverified);
+    // The harness did not guess: the model asked, and it answered once with the
+    // result in hand.
+    assert_eq!(driver.requests().len(), 2);
 }

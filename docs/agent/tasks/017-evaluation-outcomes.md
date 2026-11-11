@@ -225,7 +225,7 @@ declared semantics; `not_applicable` is distinct from missing measurement.
     },
     "case": {
       "type": "object", "additionalProperties": false,
-      "required": ["case_id", "family", "profiles", "repetitions", "seeds", "attachment_lines", "deduplicate_allowed", "schedule", "request", "oracle"],
+      "required": ["case_id", "family", "profiles", "repetitions", "seeds", "attachment_lines", "deduplicate_allowed", "deduplicate_requested", "schedule", "request", "oracle"],
       "properties": {
         "case_id": {"$ref": "#/$defs/id"},
         "family": {"enum": ["memory", "tool", "schedule", "mixed"]},
@@ -234,6 +234,7 @@ declared semantics; `not_applicable` is distinct from missing measurement.
         "seeds": {"type": "array", "items": {"$ref": "#/$defs/seed"}},
         "attachment_lines": {"type": ["array", "null"], "items": {"type": "string"}},
         "deduplicate_allowed": {"type": "boolean"},
+        "deduplicate_requested": {"type": "boolean"},
         "schedule": {"oneOf": [{"$ref": "#/$defs/schedule"}, {"type": "null"}]},
         "request": {"type": "string", "minLength": 1},
         "oracle": {

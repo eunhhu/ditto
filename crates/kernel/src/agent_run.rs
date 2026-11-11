@@ -272,6 +272,11 @@ impl DittoKernel {
         let text = normalize_input_text(&command.text)
             .map_err(|_| AgentRunError::Invalid("text is empty or invalid"))?;
         if let Some(permission) = &command.sort {
+            if permission.deduplicate && !permission.allow_deduplicate {
+                return Err(AgentRunError::Invalid(
+                    "a deduplicated sort requires allow_deduplicate",
+                ));
+            }
             ditto_artifact_sort::validate_input(permission.text.as_bytes()).map_err(|_| {
                 AgentRunError::Invalid(
                     "sort attachment exceeds 64 KiB / 4096 UTF-8 lines or contains NUL",
@@ -344,6 +349,7 @@ impl DittoKernel {
                     reference: stored.metadata.reference.to_string(),
                     source_event_id: stored.event.event_id,
                     allow_deduplicate: permission.allow_deduplicate,
+                    deduplicate: permission.deduplicate,
                 })
             })
             .transpose()?;

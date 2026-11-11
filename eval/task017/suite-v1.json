@@ -53,7 +53,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "P2",
@@ -99,7 +100,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "P3",
@@ -143,7 +145,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "P4",
@@ -189,7 +192,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "P5",
@@ -216,7 +220,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "T1",
@@ -247,7 +252,8 @@
         "expected_effect_count": 1,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": true
     },
     {
       "case_id": "T2",
@@ -277,7 +283,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "T3",
@@ -310,7 +317,8 @@
         "expected_effect_count": 1,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": true
     },
     {
       "case_id": "T4",
@@ -340,7 +348,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "S1",
@@ -369,7 +378,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": 1,
         "answer_grade_required": false
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "S2",
@@ -398,7 +408,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": 3,
         "answer_grade_required": false
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "S3",
@@ -427,7 +438,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": 1,
         "answer_grade_required": false
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "S4",
@@ -456,7 +468,8 @@
         "expected_effect_count": 0,
         "expected_schedule_claims": 2,
         "answer_grade_required": false
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "X1",
@@ -500,7 +513,8 @@
         "expected_effect_count": 1,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "X2",
@@ -544,7 +558,8 @@
         "expected_effect_count": 1,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     },
     {
       "case_id": "X3",
@@ -589,7 +604,8 @@
         "expected_effect_count": 1,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": true
     },
     {
       "case_id": "X4",
@@ -633,7 +649,8 @@
         "expected_effect_count": 1,
         "expected_schedule_claims": null,
         "answer_grade_required": true
-      }
+      },
+      "deduplicate_requested": false
     }
   ]
 }

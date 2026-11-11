@@ -57,7 +57,14 @@ pub struct StartAgentRunCommand {
 #[serde(deny_unknown_fields)]
 pub struct AgentSortPermission {
     pub text: String,
+    /// The user permits a deduplicated order.
     pub allow_deduplicate: bool,
+    /// The user asked for the deduplicated order rather than leaving the choice
+    /// to the model. The harness prefetches only the sort the permission fixes,
+    /// so this is what lets a "remove duplicates" request run before the first
+    /// model request instead of costing a round trip (ADR 0047).
+    #[serde(default)]
+    pub deduplicate: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
