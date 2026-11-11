@@ -403,6 +403,16 @@ node; `a_permission_that_only_allows_deduplication_leaves_the_choice_to_the_mode
 - two requests, unchanged behavior). `read_only_turn` 115 passed,
 `./scripts/agent-check.sh` exit 0.
 
+Campaign 16 (full 130 attempts, release daemon, `--agent-check-exit 0`, budgets-v3):
+**145 turns / 170 requests = 1.172 requests per turn** - memory 1.40, mixed 1.12,
+schedule 1.00, tool 1.00. Recall@5 1.000 (90/90), spend $0.1013 ($0.00070 per turn),
+2,220 tokens per turn, completion p50 5.4s, first useful progress p50 5.3s against
+a 5.5s model time (harness overhead p50 35ms, 0.9% of model time), zero
+independent-verification failures. Every gate passes except `answer`, which waits
+on the second-review sample; the 110 graded answers needed 26 rule-based misses
+adjudicated by reading (P5 abstentions, T2/T4 reporting that deduplication was not
+permitted, P3/P2 paraphrase).
+
 Measured on T1, T3, X3, X1 (30 attempts, release daemon, `--agent-check-exit 0`):
 35 requests = 1.17 per attempt, recall 20/20. T1 [1,1,1,1,1], T3 [1,1,1,1,1],
 X3/clean [1,1,1,1,1], X3/long_use [1,1,1,1,1], X1/clean [1,1,1,1,1]; X1/long_use
