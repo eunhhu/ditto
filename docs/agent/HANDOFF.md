@@ -374,6 +374,20 @@ of 29 rule-flagged items and the agreed 20% second-review sample. Remaining
 distance to the Task 043 bar (1.3 requests per turn) is the memory family at
 1.90 and the tool family at 1.60.
 
+## Latest verified slice: installing a package is pinned (ADR 0048)
+
+`capability::install` is the first P4 act: `install(root, manifest_bytes,
+expected_digest)` writes `capability.toml` verbatim plus the header generated
+from it, and only when the manifest hashes to the digest the caller named.
+Re-installing the same digest is a no-op; a different digest for an installed id
+is `Conflict` and leaves the installed bytes untouched (an upgrade is its own
+review); `uninstall(root, id, expected_digest)` removes only the named digest and
+refuses an id that moved on. Six tests in `crates/capability/src/install.rs`
+cover the negative paths (unpinned digest writes nothing, wrong-digest removal
+keeps the package, conflicting install keeps the old bytes) and one loads the
+installed root through `CapabilityCatalog::load`. Not a daemon route yet - the
+event and lease that would expose it are the rest of P4.
+
 ## Latest verified slice: the sort permission states the user's choice (ADR 0047)
 
 `AgentSortPermission` carries `deduplicate` next to `allow_deduplicate`. A
