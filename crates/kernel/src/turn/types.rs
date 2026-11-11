@@ -16,7 +16,7 @@ use crate::KernelError;
 /// recorded under an earlier contract stay in the journal, and their answers
 /// stay readable in run status and conversation history, but replay rejects
 /// them.
-pub const TURN_PAYLOAD_VERSION: u16 = 17;
+pub const TURN_PAYLOAD_VERSION: u16 = 19;
 /// Oldest contract whose terminal events run status still reads: their
 /// shape has not changed.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;
@@ -48,6 +48,10 @@ pub struct ContextCompiledPayload {
     /// current profile. Absent means the turn had none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standing_instructions: Option<String>,
+    /// The skill catalogue this turn was given, as text: a skill installed or
+    /// edited later must not rewrite what an old turn said (ADR 0046).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_catalogue: Option<String>,
 }
 
 /// The selection in full, as replay rebuilds it from the recorded references.
@@ -65,6 +69,9 @@ pub struct CapabilitiesSelectedPayload {
     pub web_manifest: Option<CapabilityManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_manifest: Option<CapabilityManifest>,
+    /// `skill.read`, offered whenever this profile carries a skill (ADR 0046).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_manifest: Option<CapabilityManifest>,
     pub epoch: ExecutionEpochEvidence,
 }
 

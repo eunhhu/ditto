@@ -48,12 +48,26 @@ description: Sort a folder of photos into dated albums.
 ## Consequences
 
 - The header catalogue is a pinned segment, ordered by name, so its bytes are
-  stable while the installation does not change. A skill installed mid-session
+  stable while the installation does not change. It is capped at 4,000
+  characters: past that, descriptions are dropped before any name, and a
+  catalogue that cannot fit even as names refuses the turn (a model shown half a
+  catalogue cannot know what it was not shown). A skill installed mid-session
   appears at the next turn, which is the same rule as standing instructions.
 - Replay does not read the skills directory: a turn records the header text it
   was given, exactly as it records standing instructions (ADR 0045).
 - `ditto skills list|show --profile --data-dir` answers the filesystem question
   without a daemon, like `ditto profile`.
-- The read tool is a builtin capability in the next slice; this ADR fixes the
-  document format and the disclosure level first, because those are the parts a
-  model-written skill would have to obey.
+- `skill.read` is a builtin capability (`capabilities/core/skill-read`) offered
+  only when the profile carries at least one skill: an empty catalogue costs no
+  tool surface. Its contract is content access, no mutation, local, and it names
+  no resource, so the static no-approval policy can permit it without a lease.
+- A refusal is a tool result, not a turn failure: `unknown_skill` and
+  `invalid_arguments` reach the model as `{"error": ...}` with `is_error` set, so
+  a model that guessed a name can recover in the same turn.
+- The result has one wire shape and one model view: replay rebuilds the
+  conversation from the journal, so two spellings of the same result would make
+  every recorded turn disagree with itself.
+- Replay checks a recorded read against its arguments and the format limits
+  rather than re-reading the directory: a skill body is external mutable state
+  that may have changed since the turn, so the journal, not the filesystem, is
+  the record of what the document said.

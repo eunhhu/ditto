@@ -166,11 +166,14 @@ pub(super) struct ReadyCall {
     pub(super) capability_id: String,
     pub(super) arguments: Value,
 }
-/// The system instructions of every turn.
-pub(super) fn system_prefix(profile: Option<&str>) -> StableSystemPrefix {
+/// The system instructions of every turn: the core ones, then the profile's
+/// standing instructions, then the skills it carries (ADR 0045, ADR 0046).
+pub(super) fn system_prefix(profile: Option<&str>, skills: Option<&str>) -> StableSystemPrefix {
     let mut segments = INSTRUCTIONS.map(str::to_owned).to_vec();
-    if let Some(segment) = profile.filter(|segment| !segment.trim().is_empty()) {
-        segments.push(segment.to_owned());
+    for segment in [profile, skills].into_iter().flatten() {
+        if !segment.trim().is_empty() {
+            segments.push(segment.to_owned());
+        }
     }
     StableSystemPrefix { segments }
 }

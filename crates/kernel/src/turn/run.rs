@@ -81,6 +81,10 @@ pub(super) struct TurnScope {
     memory_offered: bool,
     /// Searches this turn has made against the per-turn budget.
     memory_searches: Cell<u8>,
+    /// Whether `skill.read` is offered: whenever this profile carries a skill
+    /// (ADR 0046). Installing a skill grants no effect, so nothing else gates
+    /// it.
+    skill_offered: bool,
     /// Prelude transitions awaiting the turn's next append, which commits
     /// them with it in one transaction (ADR 0028 Phase B).
     staged: RefCell<Vec<(String, NewEvent)>>,
@@ -278,6 +282,7 @@ pub(crate) struct ToolContracts {
     sort: OnceLock<InvocableContract>,
     web: OnceLock<InvocableContract>,
     memory: OnceLock<InvocableContract>,
+    skills: OnceLock<InvocableContract>,
 }
 
 fn cached_contract<E>(
@@ -319,6 +324,11 @@ impl DittoKernel {
         agent_run: Option<crate::agent_run::AgentRunMetadata>,
     ) -> Result<AdmittedReadOnlyTurn, KernelError> {
         let text = normalize_input_text(&command.text)?;
+        // A skill document that cannot be parsed stops the turn here, by name,
+        // rather than leaving the model with a catalogue it cannot trust.
+        let skills = self
+            .skill_headers()
+            .map_err(|error| KernelError::InvalidCommand(error.to_string()))?;
 
         let scope = TurnScope {
             turn_id: format!("turn_{}", Ulid::new()),
@@ -346,6 +356,7 @@ impl DittoKernel {
             },
             memory_offered: agent_run.is_some(),
             memory_searches: Cell::new(0),
+            skill_offered: !skills.is_empty(),
             staged: RefCell::default(),
             pending_text: RefCell::default(),
         };
@@ -537,7 +548,10 @@ impl DittoKernel {
             .instructions_in_force(input_event.seq)
             .map_err(TurnRunError::Kernel)?
             .and_then(|document| document.segment());
-        run.system_prefix = system_prefix(standing.as_deref());
+        let skills = self.skill_headers().map_err(TurnRunError::Kernel)?;
+        let catalogue =
+            super::skill::catalogue_segment(&skills).map_err(KernelError::InvalidCommand)?;
+        run.system_prefix = system_prefix(standing.as_deref(), catalogue.as_deref());
         let payload = ContextCompiledPayload {
             event_version: TURN_PAYLOAD_VERSION,
             turn_id: run.scope.turn_id.clone(),
@@ -548,6 +562,7 @@ impl DittoKernel {
                 .map(|exchange| exchange.turn_id.clone())
                 .collect(),
             standing_instructions: standing.clone(),
+            skill_catalogue: catalogue.clone(),
             utc_offset_minutes,
         };
         self.stage_turn_event(
@@ -679,7 +694,16 @@ impl DittoKernel {
             super::memory::deriver_revision(),
         );
         run.scope.memory_offered = memory.is_some();
-        let contracts = [read, sort, web, memory]
+        let skill = self.optional_contract(
+            run.scope.skill_offered,
+            &self.inner.tool_contracts.skills,
+            super::skill::ID,
+            super::skill::validate_manifest,
+            super::skill::schema,
+            super::skill::deriver_revision(),
+        );
+        run.scope.skill_offered = skill.is_some();
+        let contracts = [read, sort, web, memory, skill]
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
@@ -1591,7 +1615,7 @@ impl DittoKernel {
         )?;
         // Web pages and file contents may carry instructions: from the first
         // such call on, memory writes are refused (ADR 0031).
-        if call.capability_id != super::memory::ID {
+        if call.capability_id != super::memory::ID && call.capability_id != super::skill::ID {
             run.read_external_content = true;
         }
         let at = request_index as u8;
@@ -1631,6 +1655,20 @@ impl DittoKernel {
                     space,
                     run.read_external_content,
                     &mut run.memory_writes,
+                    run.cancellation.clone(),
+                    run.deadline,
+                )
+                .await?;
+            (result.model_value(), result.is_error())
+        } else if call.capability_id == super::skill::ID {
+            let result = self
+                .run_skill_call(
+                    &mut run.scope,
+                    &mut run.cause,
+                    at,
+                    &call,
+                    binding?,
+                    &tools.authorizer,
                     run.cancellation.clone(),
                     run.deadline,
                 )
@@ -1947,6 +1985,7 @@ impl DittoKernel {
             || (run.scope.sort.is_some() && capability_id == ditto_artifact_sort::ID)
             || (run.scope.web_offered && capability_id == ditto_web_fetch::ID)
             || (run.scope.memory_offered && capability_id == super::memory::ID)
+            || (run.scope.skill_offered && capability_id == super::skill::ID)
         {
             return Ok(());
         }

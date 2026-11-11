@@ -2,6 +2,7 @@ pub(crate) mod memory;
 mod replay;
 mod run;
 mod shared;
+pub(crate) mod skill;
 pub(crate) mod sort;
 mod thread;
 pub(crate) mod tool;
@@ -14,6 +15,7 @@ pub use memory::{
 pub use replay::replay_artifact_read_turn;
 pub(crate) use run::ToolContracts;
 pub use shared::request_sha256;
+pub use skill::{SkillAction, SkillRefusal};
 pub use sort::{SortToolError, SortToolResult};
 pub(crate) use thread::ThreadReuse;
 pub use tool::{ReplayedToolCall, ToolOutput, ToolRequested, ToolStarted};

@@ -2,6 +2,7 @@
 //! provider, network or process I/O: the recorded results are the results,
 //! checked against each tool's rules.
 use super::super::memory::{self as memory_tool, MemoryAction, MemoryResult};
+use super::super::skill::{self as skill_tool, SkillResult};
 use super::super::sort::{self as sort_tool, SortToolResult};
 use super::super::tool::{
     self as tool, ReplayedToolCall, STOPPED, ToolOutput, ToolRequested, ToolStarted,
@@ -393,6 +394,56 @@ impl<'turn> ReplayProjector<'turn, '_> {
     /// Replay one `memory.manage` call: a search replay recomputes, or a
     /// write whose decision replay recomputes and whose `memory.written`
     /// event and context node it checks.
+    /// One recorded `skill.read`: the request, its lifecycle, and the result it
+    /// journaled.
+    ///
+    /// The body is the profile's document, which is external mutable state: it
+    /// can change after the turn, so replay checks the result against the
+    /// recorded arguments and the format limits rather than rereading the file.
+    /// The journal is the record of what the document said (ADR 0046).
+    pub(super) fn replay_skill_call(
+        &mut self,
+        request_index: u8,
+        call: &ReadyCall,
+    ) -> Result<Option<TurnFailure>, ReplayError> {
+        if !self.skill_selected {
+            return Err(replay_invalid("skill.read was not selected"));
+        }
+        let action = skill_tool::normalize_call(&call.arguments);
+        let (requested, request) =
+            self.take_tool_request(request_index, call, action.as_ref().map(|a| json!(a)))?;
+        if let Some(failure) = self.take_tool_stop(request_index, call, &request)? {
+            return Ok(Some(failure));
+        }
+        let (output_event, output, result): (_, _, SkillResult) =
+            self.take_tool_output(&request, requested, None)?;
+        let consistent = match (&action, &result) {
+            (Some(action), SkillResult::Read { name, body }) => {
+                name == &action.name && body.len() <= skill_tool::MAX_BODY_BYTES_LIMIT
+            }
+            (Some(_), SkillResult::Refused { error }) => {
+                *error == skill_tool::SkillRefusal::UnknownSkill
+            }
+            (None, SkillResult::Refused { error }) => {
+                *error == skill_tool::SkillRefusal::InvalidArguments
+            }
+            (None, SkillResult::Read { .. }) => false,
+        };
+        if !consistent {
+            return Err(replay_invalid(
+                "skill.read output contradicts its arguments",
+            ));
+        }
+        let record = ReplayedToolCall {
+            requested: request,
+            started: None,
+            output: Some(output),
+        };
+        self.record_tool_call(call, record, result.model_value(), result.is_error());
+        let _ = output_event;
+        Ok(None)
+    }
+
     pub(super) fn replay_memory_call(
         &mut self,
         request_index: u8,
