@@ -25,12 +25,16 @@ use serde_json::{Value, json};
 use super::tool::{ToolOutput, ToolRequested};
 
 pub const ID: &str = "memory.manage";
-pub(crate) const VERSION: &str = "0.1.0";
+pub(crate) const VERSION: &str = "0.2.0";
 /// Memories one search returns at most.
 pub const MAX_RESULTS: usize = 8;
 /// Memory text one search returns at most, across its results.
 pub const MAX_RESULT_TEXT_BYTES: usize = 8 * 1_024;
 const MAX_QUERY_CHARS: usize = 200;
+/// Wordings one search may carry. The model knows the synonyms a memory may
+/// use; letting it send them together buys one round trip instead of three,
+/// and a search that matches nothing costs the turn a request it cannot spare.
+pub(crate) const MAX_QUERIES: usize = 4;
 /// Characters one remembered fact may hold.
 pub const MAX_MEMORY_TEXT_CHARS: usize = 500;
 /// Memory writes one turn may make.
@@ -82,12 +86,18 @@ pub(crate) fn schema() -> CapabilitySchema {
     CapabilitySchema {
         id: ID.into(),
         version: VERSION.into(),
-        summary: "The user's memories: search them by query for facts missing from DITTO_CONTEXT_V1, remember one short lasting fact as text (replaces: the ID of the memory it updates), or forget the memory with memory_id.".into(),
+        summary: "The user's memories: search them for facts missing from DITTO_CONTEXT_V1 with queries (one call may hold every wording a memory could use), remember one short lasting fact as text (replaces: the ID of the memory it updates), or forget the memory with memory_id.".into(),
         input_schema: json!({
             "type": "object", "additionalProperties": false, "required": ["action"],
             "properties": {
                 "action": {"type": "string", "enum": ["search", "remember", "forget"]},
                 "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS},
+                "queries": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": MAX_QUERIES,
+                    "items": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS}
+                },
                 "text": {"type": "string", "minLength": 1, "maxLength": MAX_MEMORY_TEXT_CHARS},
                 "replaces": memory_id,
                 "memory_id": memory_id
@@ -106,7 +116,10 @@ pub(crate) fn deriver_revision() -> DeriverRevision {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryAction {
     Search {
-        query: String,
+        /// One or more wordings for the same fact; a journal from before the
+        /// plural form holds a single `query` string, which still parses.
+        #[serde(alias = "query", deserialize_with = "one_or_many", default)]
+        queries: Vec<String>,
     },
     Remember {
         text: String,
@@ -128,9 +141,28 @@ impl MemoryAction {
             (!value.is_empty()).then(|| value.to_owned())
         };
         match field("action")? {
-            "search" => Some(Self::Search {
-                query: nonblank("query")?,
-            }),
+            "search" => {
+                let mut queries = Vec::new();
+                match arguments.get("queries") {
+                    Some(Value::Array(items)) => {
+                        for item in items {
+                            let value = item.as_str()?.trim();
+                            if !value.is_empty() && !queries.iter().any(|seen| seen == value) {
+                                queries.push(value.to_owned());
+                            }
+                        }
+                    }
+                    Some(_) => return None,
+                    None => {}
+                }
+                if let Some(single) = nonblank("query")
+                    && !queries.contains(&single)
+                {
+                    queries.push(single);
+                }
+                queries.truncate(MAX_QUERIES);
+                (!queries.is_empty()).then_some(Self::Search { queries })
+            }
             "remember" => Some(Self::Remember {
                 text: nonblank("text")?,
                 replaces: field("replaces").map(str::to_owned),
@@ -154,6 +186,30 @@ impl MemoryAction {
                 memory_id: memory_id.clone(),
             }),
         }
+    }
+}
+
+/// `queries` as one string or a list of them, so a journal written before the
+/// plural form still parses into the same action.
+fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::String(single) => Ok(vec![single]),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                Value::String(text) => Ok(text),
+                other => Err(serde::de::Error::custom(format!(
+                    "a query must be a string, not {other}"
+                ))),
+            })
+            .collect(),
+        other => Err(serde::de::Error::custom(format!(
+            "queries must be a string or a list, not {other}"
+        ))),
     }
 }
 
@@ -328,7 +384,7 @@ impl MemoryResult {
     /// count and text: the user's own assertions and what Ditto inferred
     /// (ADR 0031), marked as such. Nothing derived by another origin may
     /// appear, since the model reads the result as the user's memories.
-    pub(crate) fn search(query: &str, space: &[ContextNode]) -> Self {
+    pub(crate) fn search(queries: &[String], space: &[ContextNode]) -> Self {
         let asserted = space.iter().filter(|node| {
             matches!(
                 (node.origin, node.epistemic),
@@ -339,19 +395,27 @@ impl MemoryResult {
         let searched = asserted.clone().count();
         let mut memories = Vec::new();
         let mut bytes = 0;
-        for node in lexical_recall(query, asserted)
-            .into_iter()
-            .take(MAX_RESULTS)
-        {
-            if bytes + node.summary.len() > MAX_RESULT_TEXT_BYTES {
-                break;
+        let mut seen = BTreeSet::new();
+        // Queries rank in the order given: the user's own words first, then the
+        // wordings a memory is more likely to use. A memory found by more than
+        // one wording appears once, where the better query put it.
+        'queries: for query in queries {
+            for node in lexical_recall(query, asserted.clone()) {
+                if !seen.insert(node.id.as_str()) {
+                    continue;
+                }
+                if bytes + node.summary.len() > MAX_RESULT_TEXT_BYTES
+                    || memories.len() == MAX_RESULTS
+                {
+                    break 'queries;
+                }
+                bytes += node.summary.len();
+                memories.push(RecalledMemory {
+                    id: node.id.clone(),
+                    text: node.summary.clone(),
+                    inferred: node.origin == ContextOrigin::Model,
+                });
             }
-            bytes += node.summary.len();
-            memories.push(RecalledMemory {
-                id: node.id.clone(),
-                text: node.summary.clone(),
-                inferred: node.origin == ContextOrigin::Model,
-            });
         }
         Self::Found {
             memories,
@@ -631,6 +695,11 @@ mod tests {
         }
     }
 
+    /// One wording, as the search speaks it.
+    fn qs(query: &str) -> Vec<String> {
+        vec![query.to_owned()]
+    }
+
     fn ids(result: &MemoryResult) -> Vec<&str> {
         match result {
             MemoryResult::Found { memories, .. } => {
@@ -654,7 +723,7 @@ mod tests {
             node("system", "my dog Leo", System, Asserted),
         ];
         // The user's own assertions rank above what Ditto inferred.
-        let result = MemoryResult::search("dog", &space);
+        let result = MemoryResult::search(&qs("dog"), &space);
         assert_eq!(ids(&result), ["said", "model"]);
         assert!(matches!(result, MemoryResult::Found { searched: 2, .. }));
     }
@@ -671,7 +740,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let result = MemoryResult::search("dog", &many);
+        let result = MemoryResult::search(&qs("dog"), &many);
         assert_eq!(ids(&result).len(), MAX_RESULTS);
         assert_eq!(ids(&result)[0], "m00");
         assert!(matches!(result, MemoryResult::Found { searched: 20, .. }));
@@ -688,7 +757,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(ids(&MemoryResult::search("dog", &large)), ["l0", "l1"]);
+        assert_eq!(ids(&MemoryResult::search(&qs("dog"), &large)), ["l0", "l1"]);
     }
 
     #[test]
@@ -729,7 +798,7 @@ mod tests {
             replaces: None,
         };
         let search = MemoryAction::Search {
-            query: "dog".into(),
+            queries: vec!["dog".into()],
         };
         use MemoryRefusal::*;
         assert_eq!(refusal(None, true, 9, |_| false), Some(InvalidArguments));
@@ -787,7 +856,7 @@ mod tests {
         assert_eq!(
             normalize_call(&json!({"action": "search", "query": " dog "})),
             Some(MemoryAction::Search {
-                query: "dog".into()
+                queries: vec!["dog".into()]
             })
         );
         assert_eq!(

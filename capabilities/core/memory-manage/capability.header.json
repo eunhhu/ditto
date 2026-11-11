@@ -1,8 +1,8 @@
 {
   "header_version": 1,
-  "manifest_sha256": "95075b43f6cd55011041517bda6ded75f3d6ae53397af0f9bdaca7e472dbfe42",
+  "manifest_sha256": "30bece8e5129551a4ff3bda03545d93948ec6a75e158186f738731eca5a40c72",
   "id": "memory.manage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "namespace": "memory",
   "kind": "tool",
   "lifecycle": "active",

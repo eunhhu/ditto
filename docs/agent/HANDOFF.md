@@ -374,6 +374,35 @@ of 29 rule-flagged items and the agreed 20% second-review sample. Remaining
 distance to the Task 043 bar (1.3 requests per turn) is the memory family at
 1.90 and the tool family at 1.60.
 
+## Latest verified slice: one memory search carries every wording (ADR 0029)
+
+`memory.manage` search takes `queries` - up to four wordings for the same fact,
+unioned by memory and ordered by the best query - and the standing instructions
+say to put every wording able to name the fact in that one call. The singular
+`query` still parses, so journals written before the plural form replay
+unchanged, and `MAX_MEMORY_SEARCHES = 3` stays as the backstop. The capability
+is 0.2.0 and its generated header is regenerated in the same commit; a stale
+header fails the turn with `protocol`, which is how the first run of the tests
+found it.
+
+Why: recall is lexical, and the P2 request (`Where should I go for the reading
+group get-together?`) shares no word with its memory (`Our book club now gathers
+in Birch Room`). With one search per turn the model could not reach it (long_use
+recall 0.800, 45-attempt probe), and with free rephrasing it spent 5 requests.
+Carrying the wordings in one call measured 1.69 requests per attempt with recall
+0.967 on P1, P2, P5, X1 and T1; P2/long_use went 5 -> 2 and P5 4 -> 2.
+
+Evidence: `crates/kernel/tests/read_only_turn/memory.rs`
+(`several_wordings_in_one_search_find_a_fact_no_single_wording_would` drives a
+real turn: two requests only, the second wording reaches the fact). Campaign 14
+before the change: 130/130, 1.65 requests per turn (memory 2.06, tool 1.55,
+mixed 1.12, schedule 1.75), integrity now passes because the run carried
+`--agent-check-exit 0`; its `tool` gate failed on X3 0.000 with `Network is
+unreachable` in the same log, and `cost_latency` stayed blocked for the
+`mixed`/`clean` aggregate missing token counts. The schedule family's 1.75 is a
+metric artifact: S2 and S4 attempts each cover several occurrences, which count
+as one attempt.
+
 ## Latest verified slice: admission is the daemon's span (ADR 0043)
 
 `budgets-v3` gates `daemon_admission_ms` (journal: claimed occurrence to admitted

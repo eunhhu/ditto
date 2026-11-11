@@ -461,7 +461,7 @@ impl<'turn> ReplayProjector<'turn, '_> {
         let (event, output, result): (_, _, MemoryResult) =
             self.take_tool_output(&request, requested, None)?;
         let consistent = match &action {
-            Some(MemoryAction::Search { query }) => {
+            Some(MemoryAction::Search { queries }) => {
                 if self.recall_space.is_none() {
                     let context = self
                         .context_payload
@@ -479,7 +479,7 @@ impl<'turn> ReplayProjector<'turn, '_> {
                         code: memory_tool::MemoryRefusal::LimitReached,
                     }
                 } else {
-                    MemoryResult::search(query, self.recall_space.as_deref().unwrap_or_default())
+                    MemoryResult::search(queries, self.recall_space.as_deref().unwrap_or_default())
                 };
                 result == expected
                     || (used >= memory_tool::MAX_MEMORY_SEARCHES
