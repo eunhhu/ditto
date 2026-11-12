@@ -374,6 +374,9 @@ of 29 rule-flagged items and the agreed 20% second-review sample. Remaining
 distance to the Task 043 bar (1.3 requests per turn) is the memory family at
 1.90 and the tool family at 1.60.
 
+Context for the numbers below, including what each change fixed and what is
+still above one request per turn: [Task 043 outcomes](tasks/043-requests-per-turn.md).
+
 ## Latest verified slice: installing a package is pinned (ADR 0048)
 
 `capability::install` is the first P4 act: `install(root, manifest_bytes,
