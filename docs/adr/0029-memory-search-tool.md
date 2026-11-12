@@ -79,12 +79,33 @@ Agent runs are offered a builtin `memory.search` tool:
   at the first search, and replay rebuilds them only for a turn that
   searched, in one pass over the snapshot.
 
+## A search carries several wordings (Task 043)
+
+Recall is lexical, so a request that shares no word with the memory it needs
+(`reading group get-together` against `our book club now gathers in Birch
+Room`) can only be bridged by the model's own synonyms. Measured on the suite,
+letting the model phrase them one search at a time cost 5 requests on that
+case and 4 on the abstain case, and forbidding the second search dropped
+long_use recall to 0.800 while saving nothing (the first search still failed).
+
+So one search call takes `queries`: up to four wordings for the same fact, sent
+together, unioned by memory and ordered by the best query. The model keeps the
+synonym work it is good at and spends one round trip instead of five. The
+singular `query` still parses, so journals written before the plural form
+replay unchanged; `MAX_MEMORY_SEARCHES = 3` stays as the backstop for a turn
+that searches again anyway.
+
+Measured on P1, P2, P5, X1 and T1 (45 attempts): requests per attempt 1.64 to
+1.69 with recall 0.900 to 0.967 - P2/long_use 5 to 2, P5 4 to 2 - because the
+first search now reaches the fact.
+
 ## Consequences
 
 A paraphrased question can reach a memory the budget left out when the model
 searches with its own words; the model decides when to search. Recall remains
 lexical: a search for "pet" still misses "My dog is called Miso" unless the
-model also searches "dog". The model cannot save or change memories.
+model also searches "dog", and a search that carries no matching wording still
+returns nothing. The model cannot save or change memories.
 
 Offering the tool costs every agent-run request 333 bytes of tool definition
 (kept by a prompt cache, since the surface is stable) and every agent turn

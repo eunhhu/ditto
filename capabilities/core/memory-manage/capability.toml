@@ -1,5 +1,5 @@
 id = "memory.manage"
-version = "0.1.0"
+version = "0.2.0"
 namespace = "memory"
 kind = "tool"
 summary = "Keep the user's memories current: search them, remember a lasting fact (replacing an outdated one), or forget one."

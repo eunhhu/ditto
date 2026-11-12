@@ -214,6 +214,7 @@ async fn agent_read_continues_and_replays_without_repeating_tool_or_model_work()
         sort: Some(ditto_protocol::AgentSortPermission {
             text: "b\na".into(),
             allow_deduplicate: false,
+            deduplicate: false,
         }),
         ..start_command(&format!("read {reference}"))
     };

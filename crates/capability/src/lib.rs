@@ -16,6 +16,7 @@ use serde_json::Value;
 use thiserror::Error;
 use ulid::Ulid;
 
+pub mod install;
 mod invocation;
 mod package;
 

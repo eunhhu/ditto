@@ -53,6 +53,15 @@ fn search(query: &str) -> Vec<ModelEvent> {
     )
 }
 
+/// One search carrying several wordings, as the model is told to do: the
+/// request's own words and the words a memory is more likely to use.
+fn search_many(queries: &[&str]) -> Vec<ModelEvent> {
+    call(
+        "memory.manage",
+        json!({ "action": "search", "queries": queries }),
+    )
+}
+
 fn remember(text: &str) -> Vec<ModelEvent> {
     call(
         "memory.manage",
@@ -691,4 +700,41 @@ async fn a_tool_is_offered_only_with_its_package() {
     assert!(driver.requests().is_empty());
     fixture.kernel.shutdown_agent_runs().await.unwrap();
     replay_artifact_read_turn(&fixture.events_for_session("personal"), &status.turn_id).unwrap();
+}
+
+#[tokio::test]
+async fn several_wordings_in_one_search_find_a_fact_no_single_wording_would() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let birch = save_memory(
+        kernel,
+        "personal",
+        "Our book club now gathers in Birch Room",
+        None,
+    );
+    save_memory(kernel, "personal", "My bike is a Touring 520", None);
+
+    // "Where should I go for the reading group get-together?" shares no word
+    // with the memory: only a second wording reaches it, and both travel in one
+    // call so the turn spends one round trip instead of three.
+    let (status, driver) = ask(
+        kernel,
+        "Where should I go for the reading group get-together?",
+        vec![
+            search_many(&["reading group get-together", "book club meeting room"]),
+            final_script(&["Birch Room."]),
+        ],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let found = &tool_results(&driver.requests()[1])[0];
+    let ids = found["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|memory| memory["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![birch], "the second wording reaches the fact");
+    // Two requests: the search and the answer. Nothing searched again.
+    assert_eq!(driver.requests().len(), 2);
 }

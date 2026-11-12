@@ -389,7 +389,7 @@ impl DittoKernel {
         self.tool_checkpoint(scope, cause, &cancellation, deadline, request_index, call)
             .await?;
         let result = match (invocation, action) {
-            (Some(invocation), Some(MemoryAction::Search { query })) => {
+            (Some(invocation), Some(MemoryAction::Search { queries })) => {
                 // A turn searches twice at most: the first search for the fact,
                 // the second to follow a pointer it named. Refusing past that
                 // keeps the tool surface stable while stopping the rephrasing
@@ -410,7 +410,7 @@ impl DittoKernel {
                             if permit.validate(&invocation, now).is_ok() =>
                         {
                             scope.memory_searches.set(used + 1);
-                            MemoryResult::search(&query, space)
+                            MemoryResult::search(&queries, space)
                         }
                         _ => {
                             return Err(TurnRunError::Internal(

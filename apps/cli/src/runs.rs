@@ -17,6 +17,10 @@ pub(super) struct RunArgs {
     /// Also permit removing exact duplicate lines from the attached file.
     #[arg(long, requires = "sort_file")]
     allow_deduplicate: bool,
+    /// Remove exact duplicate lines. States the user's choice, so the run can
+    /// sort before its first model request instead of asking the model to.
+    #[arg(long, requires = "allow_deduplicate")]
+    deduplicate: bool,
     #[arg(long, default_value = "personal")]
     session: String,
     /// Reuse this ID only for an identical request retry.
@@ -56,10 +60,10 @@ pub(super) async fn start(
             let text = super::sorts::read_input(path)?;
             eprintln!(
                 "Permission: sort attached file once; deduplication {} (expires with this run).",
-                if args.allow_deduplicate {
-                    "allowed"
-                } else {
-                    "not allowed"
+                match (args.allow_deduplicate, args.deduplicate) {
+                    (_, true) => "requested",
+                    (true, false) => "allowed, left to the model",
+                    (false, false) => "not allowed",
                 }
             );
             eprintln!(
@@ -70,6 +74,7 @@ pub(super) async fn start(
             Ok::<_, anyhow::Error>(AgentSortPermission {
                 text,
                 allow_deduplicate: args.allow_deduplicate,
+                deduplicate: args.deduplicate,
             })
         })
         .transpose()?;

@@ -1035,8 +1035,12 @@ class Campaign:
         after = daemon.api.ok("/health")["latest_seq"]
         command = {"request_id": request_id, "session_id": session, "text": case["request"]}
         if case["attachment_lines"] is not None:
+            # The permission is the user's choice, so the harness passes the
+            # explicit deduplicate request alongside the allowance: only that
+            # lets the kernel run the sort before the first model request.
             command["sort"] = {"text": line_bytes(case["attachment_lines"]).decode(),
-                               "allow_deduplicate": case["deduplicate_allowed"]}
+                               "allow_deduplicate": case["deduplicate_allowed"],
+                               "deduplicate": case["deduplicate_requested"]}
         wall_start, t0 = wall_of_day(), time.monotonic()
         status = daemon.api.ok("/v1/commands/run", command)
         deadline = t0 + IMMEDIATE_TIMEOUT_S

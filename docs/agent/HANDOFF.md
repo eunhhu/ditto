@@ -374,6 +374,100 @@ of 29 rule-flagged items and the agreed 20% second-review sample. Remaining
 distance to the Task 043 bar (1.3 requests per turn) is the memory family at
 1.90 and the tool family at 1.60.
 
+Context for the numbers below, including what each change fixed and what is
+still above one request per turn: [Task 043 outcomes](tasks/043-requests-per-turn.md).
+
+## Latest verified slice: installing a package is pinned (ADR 0048)
+
+`capability::install` is the first P4 act: `install(root, manifest_bytes,
+expected_digest)` writes `capability.toml` verbatim plus the header generated
+from it, and only when the manifest hashes to the digest the caller named.
+Re-installing the same digest is a no-op; a different digest for an installed id
+is `Conflict` and leaves the installed bytes untouched (an upgrade is its own
+review); `uninstall(root, id, expected_digest)` removes only the named digest and
+refuses an id that moved on. Six tests in `crates/capability/src/install.rs`
+cover the negative paths (unpinned digest writes nothing, wrong-digest removal
+keeps the package, conflicting install keeps the old bytes) and one loads the
+installed root through `CapabilityCatalog::load`. Not a daemon route yet - the
+event and lease that would expose it are the rest of P4.
+
+## Latest verified slice: the sort permission states the user's choice (ADR 0047)
+
+`AgentSortPermission` carries `deduplicate` next to `allow_deduplicate`. A
+permission whose owner asked for the deduplicated order (`deduplicate: true`)
+prefetches `unique: true` before the first model request; one that only permits
+either order prefetches nothing and leaves the choice to the model; one that
+forbids deduplication prefetches `unique: false` as before. `deduplicate`
+without `allow_deduplicate` is rejected at admission, `SortGrant` carries the
+choice into replay, and `permission_matches` compares it so a retry that changes
+the choice conflicts instead of reusing the stored artifact. The user message
+also reports `already_ran`, `calls_used: 1` and the context node id when the turn
+already ran the sort, so a model does not spend a request rediscovering a spent
+lease.
+
+Why: the campaign's requests above one per turn sat in three groups - memory
+verification (21 turns), sorts whose permission allowed deduplication (19 turns),
+and one attachment read. The sorted group's messages say "remove duplicates",
+"drop repeated tags", "drop repeats": the harness was declining to act on what
+the user had written. This is a permission field, not intent inference - the
+client reads the message and sets the flag, and the suite declares
+`deduplicate_requested` per case.
+
+Evidence: `crates/kernel/tests/read_only_turn/model_sort.rs`
+(`a_permission_that_asks_for_deduplication_runs_the_sort_before_the_model` - one
+model request, `a\nb\n` verified from `b\na\nb`, the permission blob naming the
+node; `a_permission_that_only_allows_deduplication_leaves_the_choice_to_the_model`
+- two requests, unchanged behavior). `read_only_turn` 115 passed,
+`./scripts/agent-check.sh` exit 0.
+
+Campaign 16 (full 130 attempts, release daemon, `--agent-check-exit 0`, budgets-v3):
+**145 turns / 170 requests = 1.172 requests per turn** - memory 1.40, mixed 1.12,
+schedule 1.00, tool 1.00. Recall@5 1.000 (90/90), spend $0.1013 ($0.00070 per turn),
+2,220 tokens per turn, completion p50 5.4s, first useful progress p50 5.3s against
+a 5.5s model time (harness overhead p50 35ms, 0.9% of model time), zero
+independent-verification failures. Every gate passes except `answer`, which waits
+on the second-review sample; the 110 graded answers needed 26 rule-based misses
+adjudicated by reading (P5 abstentions, T2/T4 reporting that deduplication was not
+permitted, P3/P2 paraphrase).
+
+Measured on T1, T3, X3, X1 (30 attempts, release daemon, `--agent-check-exit 0`):
+35 requests = 1.17 per attempt, recall 20/20. T1 [1,1,1,1,1], T3 [1,1,1,1,1],
+X3/clean [1,1,1,1,1], X3/long_use [1,1,1,1,1], X1/clean [1,1,1,1,1]; X1/long_use
+stays [2,2,2,2,2] because that case's memory question is a separate lookup, not a
+sort. Campaign 15 before this slice: 145 turns / 192 requests = 1.324 requests per
+turn, recall 1.000, every decided gate passing except `answer`, which waits on
+the 22-item second-review sample. This slice removes 19 requests from that
+campaign's shape, which projects to 1.19.
+
+## Latest verified slice: one memory search carries every wording (ADR 0029)
+
+`memory.manage` search takes `queries` - up to four wordings for the same fact,
+unioned by memory and ordered by the best query - and the standing instructions
+say to put every wording able to name the fact in that one call. The singular
+`query` still parses, so journals written before the plural form replay
+unchanged, and `MAX_MEMORY_SEARCHES = 3` stays as the backstop. The capability
+is 0.2.0 and its generated header is regenerated in the same commit; a stale
+header fails the turn with `protocol`, which is how the first run of the tests
+found it.
+
+Why: recall is lexical, and the P2 request (`Where should I go for the reading
+group get-together?`) shares no word with its memory (`Our book club now gathers
+in Birch Room`). With one search per turn the model could not reach it (long_use
+recall 0.800, 45-attempt probe), and with free rephrasing it spent 5 requests.
+Carrying the wordings in one call measured 1.69 requests per attempt with recall
+0.967 on P1, P2, P5, X1 and T1; P2/long_use went 5 -> 2 and P5 4 -> 2.
+
+Evidence: `crates/kernel/tests/read_only_turn/memory.rs`
+(`several_wordings_in_one_search_find_a_fact_no_single_wording_would` drives a
+real turn: two requests only, the second wording reaches the fact). Campaign 14
+before the change: 130/130, 1.65 requests per turn (memory 2.06, tool 1.55,
+mixed 1.12, schedule 1.75), integrity now passes because the run carried
+`--agent-check-exit 0`; its `tool` gate failed on X3 0.000 with `Network is
+unreachable` in the same log, and `cost_latency` stayed blocked for the
+`mixed`/`clean` aggregate missing token counts. The schedule family's 1.75 is a
+metric artifact: S2 and S4 attempts each cover several occurrences, which count
+as one attempt.
+
 ## Latest verified slice: admission is the daemon's span (ADR 0043)
 
 `budgets-v3` gates `daemon_admission_ms` (journal: claimed occurrence to admitted
