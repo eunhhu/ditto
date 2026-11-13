@@ -20,7 +20,8 @@ Checked against the code on 2026-11-13: main `756f256` plus branch
 
    Store the run as [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
    requires. It is a paid run (campaign 16 spent $0.1013), so it starts when the
-   owner says so.
+   owner says so. The 2026-11-13 review proposed putting it first; the owner has
+   not confirmed that order yet.
 2. [038](tasks/038-korean-and-ranked-memory-search.md) Korean memory search.
    The search half is implemented in turn contract 20. What remains is
    `eval/task017/suite-v2.json` (P6, P7, X5, P8), its paid calibration, Korean

@@ -40,11 +40,18 @@ only after code and checks establish a new fact.
   `git show 58b2b02:docs/agent/tasks/<report>.json`, and their evidence files
   record the digests. The canary rejects tracked `docs/**/*.json` and any
   tracked file above 1 MiB.
-- **Campaign evidence was lost.** The reports cited for campaigns 15 and 16
-  were written to `~/.hermes/cache/scratch` and were gone on 2026-11-13, and no
-  digest was recorded ([Task 043](tasks/043-requests-per-turn.md),
-  "Evidence"). [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence" now states
-  where a campaign must live before it is cited.
+- **No campaign report can be re-inspected.**
+  - Only campaigns 15 and 16 have recorded paths, under
+    `~/.hermes/cache/scratch`, and those were gone on 2026-11-13
+    ([Task 043](tasks/043-requests-per-turn.md), "Evidence").
+  - Campaigns 1–14 and the probes never had a location recorded.
+  - A search of this host (the home directory to depth 9, `/tmp`, `target/`
+    and `.ditto/`) found no directory named `campaign*` or `probe-*`.
+  - No campaign report's SHA-256 is recorded in the repository.
+
+  Every campaign number in the task files is therefore a documented summary,
+  not checkable evidence. [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
+  now states where a campaign must live before it is cited.
 - `target/` holds 38 GB on a 235 GB SD card that is 77% full. It also holds
   the `target/task0xx` measurement directories that the earlier evidence names,
   so it has not been cleaned.
@@ -256,6 +263,16 @@ only after code and checks establish a new fact.
 
 ## Measured state
 
+- **Campaign 12** (budgets v3; Task 017, "Campaign 12") is the only recorded
+  run on which **all eight gates passed**, including `answer`:
+  - 1.75 model requests per turn;
+  - turn p50 4.0 s;
+  - spend $0.1326;
+  - daemon admission p95 1.0 ms.
+
+  For `answer`, the 29 rule-flagged items were read, one retrieval miss was
+  recorded (P1/long_use#4), and the fixed 22-item 20% sample was reviewed
+  separately and agreed, as that file records.
 - **Campaign 16** (contract 19, 130 attempts, 145 turns):
   - 1.172 requests per turn;
   - Recall@5 1.000 (90/90);
@@ -267,8 +284,9 @@ only after code and checks establish a new fact.
 
   Those figures are recorded in
   [Task 043](tasks/043-requests-per-turn.md), but the report is gone and
-  cannot be re-checked. No campaign has measured contract 20, which changes
-  memory search ranking.
+  cannot be re-checked.
+- **Contract 20 is unmeasured.** No campaign has run it, and it changes how
+  memory search ranks.
 - **Task 042 probes** on the memory two-hop case: base 10/10 answers with
   Recall@5 18/20, and both variants were `KEEP_BASE`. That family is saturated
   for wording edits.

@@ -676,10 +676,12 @@ first 1,500 bytes ride with the compilation as a `prefetch-attachment` node.
 A granted sort whose permission fixes its arguments is performed at turn
 start ([ADR 0047](../adr/0047-a-sort-permission-states-the-users-choice.md):
 `unique: false` when deduplication is not allowed, `unique: true` when the
-permission's `deduplicate` says the user asked for it). Its `tool.*` events
-carry `origin: "prefetch"` and the `system` actor, and precede the
-`context.compiled` that holds its result as a `prefetch_sort_<seq>` node.
-`tool.requested` omits `origin` when the model asked.
+permission's `deduplicate` says the user asked for it). Its `tool.requested`
+carries `origin: "prefetch"` and is recorded by the `system` actor, and its
+`tool.started` and `tool.output` keep the `capability` actor. These events
+precede the `context.compiled` that holds the result as a
+`prefetch_sort_<seq>` node. `tool.requested` omits `origin` when the model
+asked.
 
 Version 17 ([ADR 0045](../adr/0045-durable-and-ephemeral-ranges.md)) pins
 the profile's standing instructions in force at acceptance after the core

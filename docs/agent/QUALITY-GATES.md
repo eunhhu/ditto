@@ -146,6 +146,8 @@ when both of these hold:
 A tool's cache or scratch directory does not qualify. Campaigns 15 and 16 were
 written to `~/.hermes/cache/scratch`, recorded without digests, and were gone
 two days later ([Task 043](tasks/043-requests-per-turn.md), "Evidence").
+Campaigns 1–14 never had a location or a digest recorded. As of 2026-11-13,
+no campaign report could be re-inspected.
 
 ## Review questions
 
