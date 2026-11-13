@@ -54,6 +54,11 @@ asked to finish Ditto quickly so it can replace the current assistant
   a stale binary silently dropped `memory.manage` from capability selection, so
   every memory attempt answered "I don't have a memory search available in this
   session" and Recall@5 read 0.500 with no code defect behind it.
+- When a store fails, the runner keeps that store's daemon log under
+  `<out>/failures/`. Campaign 1 (130 attempts, 123 verified, not a valid
+  readiness run) lost the only log of its own failure, a daemon
+  that did not start inside its 60 s window while an `agent-check.sh` build
+  loaded the CPU. That load also voided campaign 1's latency numbers.
 - A per-case rate threshold needs enough attempts to mean anything. The suite
   asks five repetitions per case, where a 3/5 and a 5/5 are two coin flips
   apart — observed directly on `X1`/`long_use`, which scored 3/5 in one run and

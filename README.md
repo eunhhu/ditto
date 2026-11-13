@@ -19,7 +19,8 @@ See [docs/product.md](docs/product.md) for the product intent and [docs/architec
 - **Memory**: save, correct and forget memories from the CLI, HTTP, web app or Telegram; during a run the model may also remember lasting facts, replace outdated ones and forget on request (labelled as its inference, never taken from fetched pages).
 - **Model runs**: provider-neutral model IR with an OpenAI Responses adapter and an OpenAI-compatible `/chat/completions` adapter (local models via Ollama, hosted ones via a key). Durable retry identity, cancellation and restart inspection.
 - **Conversation threads** and an interactive `ditto chat`; up to four answers may run at once in one session.
-- **Two model tools**: `memory.manage` (search / remember / forget) and `web.browse` (read a linked or found page, search through a SearXNG-compatible service), on one journaled tool lifecycle with hard per-answer limits.
+- **Two model tools**: `memory.manage` (search / remember / forget) and `web.browse` (read a linked or found page, search through a SearXNG-compatible service), on one journaled tool lifecycle with hard per-answer limits. Memory search folds Korean particles (`냉장고에` finds `냉장고`) and ranks rare shared words first.
+- **Profiles, standing instructions and skills**: a daemon serves one profile (a data directory); the profile's standing instructions are journaled and pinned to every request; skills are `SKILL.md` documents under `<profile>/skills/` whose one-line headers lead the request and whose bodies the model reads with `skill.read` on demand.
 - **Bounded local sorting** of an attached file through a one-shot process lease with independent verification.
 - **Schedules**: one-shot future requests and finite fixed-interval repeats with durable claims, visible expiry/missed states and no automatic retry.
 - **Local web app** served by the daemon (streamed chat, threads, memories, schedules, a per-answer "Why?" view) behind a strict CSP and loopback host guard.
@@ -99,6 +100,17 @@ cargo run -p ditto-cli -- repeat "Daily summary" \
   --every-seconds 86400 --occurrences 7
 ```
 
+Profiles, standing instructions and skills:
+
+```bash
+cargo run -p ditto-daemon -- --profile work        # serves <data-dir>/profiles/work
+cargo run -p ditto-cli -- profile list             # profiles this data root can serve
+cargo run -p ditto-cli -- instructions set --text "Answer in Korean."
+cargo run -p ditto-cli -- instructions show        # or: clear
+cargo run -p ditto-cli -- skills list --profile work
+cargo run -p ditto-cli -- skills show photo-triage --profile work
+```
+
 Open `http://127.0.0.1:8787/` for the web app. For Telegram, create a bot with @BotFather and run the gateway next to the daemon:
 
 ```bash
@@ -130,6 +142,7 @@ Coding-agent instructions start at [`AGENTS.md`](AGENTS.md) and [`docs/agent/NEX
 | `POST` | `/v1/commands/conversation/reset` · `GET /v1/conversation` | Threads |
 | `POST` | `/v1/commands/memory`, `/v1/commands/memory/forget` · `GET /v1/memories` | Memory |
 | `POST` | `/v1/commands/run`, `/v1/commands/run/cancel` · `GET /v1/runs` | Model runs |
+| `GET` · `PUT` | `/v1/instructions` | The profile's standing instructions |
 | `POST` | `/v1/commands/schedule`, `/v1/commands/schedule/cancel` · `GET /v1/schedules`, `/v1/schedules/pending` | One-shot schedules (loopback only) |
 | `POST` | `/v1/commands/repeat`, `/v1/commands/repeat/cancel` · `GET /v1/repeats`, `/v1/repeats/active` | Repeats (loopback only) |
 | `POST` | `/v1/commands/sort`, `/v1/commands/sort/cancel` · `GET /v1/sorts` | Local sort (loopback only) |
@@ -142,20 +155,21 @@ Contracts are specified in [`docs/specs/`](docs/specs) and decisions in [`docs/a
 
 ```
 apps/
-  cli/          ditto-cli: commands, chat, memory, runs, schedules, sorts, telegram gateway
+  cli/          ditto-cli: commands, chat, memory, runs, schedules, sorts, profiles, instructions, skills, telegram gateway
   daemon/       ditto-daemon: HTTP API, embedded web app, scheduler, baseline harness
 crates/
   kernel/               composition root: admission, runs, scheduler, tool lifecycle
   event-store/          append-only SQLite event spine
   artifact-store/       SHA-256 content-addressed files
   artifact-read/, artifact-sort/   bounded artifact capabilities
-  capability/           capability package headers, discovery, verification
+  capability/           capability package headers, discovery, verification, pinned install
+  profile/              profile data roots and the SKILL.md format
   context/, context-projection/, retrieval/   Context IR, projection cache, working-set retrieval
   model/, model-openai/ provider-neutral model IR and OpenAI(-compatible) adapters
   policy/               effect profiles and lease primitives
   protocol/             public command/event types
   web-fetch/            public-address-only page reads
-capabilities/core/      shipped capability packages (artifact-read, artifact-sort, memory-manage, web-browse, …)
+capabilities/core/      shipped capability packages (artifact-read, artifact-sort, memory-manage, skill-read, web-browse, …)
 docs/                   product, architecture, ADRs, specs, design notes, coding-agent task contracts
 scripts/                quality gate, smoke tests, web e2e, offline baselines
 ```
@@ -166,7 +180,8 @@ All daemon flags can also be set through environment variables.
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `DITTO_DATA_DIR` | daemon | Data directory (default `.ditto`) |
+| `DITTO_DATA_DIR` | daemon, cli `profile`/`skills` | Data directory (default `.ditto`) |
+| `DITTO_PROFILE` | daemon, cli `skills` | Profile to serve or read (default `default`, the data directory itself) |
 | `DITTO_CAPABILITIES_DIR` | daemon | Capability packages root (default `capabilities`) |
 | `DITTO_BIND` | daemon | Listen address (default `127.0.0.1:8787`) |
 | `DITTO_ALLOW_UNAUTHENTICATED_REMOTE` | daemon | Allow a non-loopback bind (unsafe; no auth added) |

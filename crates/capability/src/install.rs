@@ -46,6 +46,16 @@ pub enum InstallError {
     NotInstalled {
         id: String,
     },
+    /// The caller named something that is not a capability id. An id becomes a
+    /// directory name, so only the id grammar may reach the filesystem.
+    InvalidId {
+        id: String,
+    },
+    /// The directory for this id holds a package that names another id.
+    Mismatched {
+        id: String,
+        installed: String,
+    },
     Io(std::io::Error),
 }
 
@@ -66,6 +76,11 @@ impl std::fmt::Display for InstallError {
                 "{id} is installed at {installed}; {offered} needs an upgrade decision"
             ),
             Self::NotInstalled { id } => write!(formatter, "{id} is not installed"),
+            Self::InvalidId { id } => write!(formatter, "{id:?} is not a capability id"),
+            Self::Mismatched { id, installed } => write!(
+                formatter,
+                "the directory for {id} holds a package named {installed}"
+            ),
             Self::Io(error) => write!(formatter, "{error}"),
         }
     }
@@ -105,15 +120,10 @@ pub fn install(
             actual,
         });
     }
+    // The header validated the id against the id grammar, so it is one
+    // directory name inside `root`.
     let directory = root.join(&header.id);
-    let header_path = directory.join(HEADER);
-    if header_path.is_file() {
-        let installed = std::fs::read(&header_path)?;
-        let installed: CapabilityHeader = serde_json::from_slice(&installed).map_err(|_| {
-            InstallError::Invalid(crate::CapabilityError::PackageInvalid(
-                "installed header is malformed",
-            ))
-        })?;
+    if let Some(installed) = installed_at(&directory, &header.id)? {
         if installed.manifest_sha256 == header.manifest_sha256 {
             // The same package, already installed: nothing to write.
             return Ok(InstalledPackage {
@@ -131,7 +141,7 @@ pub fn install(
     }
     std::fs::create_dir_all(&directory)?;
     std::fs::write(directory.join(MANIFEST), manifest_bytes)?;
-    std::fs::write(&header_path, header.to_json()?.as_bytes())?;
+    std::fs::write(directory.join(HEADER), header.to_json()?.as_bytes())?;
     Ok(InstalledPackage {
         id: header.id,
         version: header.version,
@@ -144,26 +154,57 @@ pub fn install(
 ///
 /// A package that moved on since the caller looked is not removed: the digest
 /// the caller named is the only package the removal is about.
+///
+/// `id` must be a capability id: it is joined onto `root` and the result is
+/// removed recursively, so `../elsewhere` or an absolute path is refused before
+/// the filesystem is touched.
 pub fn uninstall(root: &Path, id: &str, expected: &str) -> Result<(), InstallError> {
-    let directory = root.join(id);
-    let header_path = directory.join(HEADER);
-    if !header_path.is_file() {
-        return Err(InstallError::NotInstalled { id: id.to_owned() });
+    if !crate::valid_capability_id(id) {
+        return Err(InstallError::InvalidId { id: id.to_owned() });
     }
-    let bytes = std::fs::read(&header_path)?;
-    let header: CapabilityHeader = serde_json::from_slice(&bytes).map_err(|_| {
-        InstallError::Invalid(crate::CapabilityError::PackageInvalid(
-            "installed header is malformed",
-        ))
-    })?;
-    if header.manifest_sha256 != expected {
+    let directory = root.join(id);
+    let Some(installed) = installed_at(&directory, id)? else {
+        return Err(InstallError::NotInstalled { id: id.to_owned() });
+    };
+    if installed.manifest_sha256 != expected {
         return Err(InstallError::DigestMismatch {
             expected: expected.to_owned(),
-            actual: header.manifest_sha256,
+            actual: installed.manifest_sha256,
         });
     }
     std::fs::remove_dir_all(&directory)?;
     Ok(())
+}
+
+/// The package installed in `directory`, read the way the catalogue reads it:
+/// its header when it has one, otherwise the manifest the header would be
+/// generated from. A package installed without a header (or by an install that
+/// stopped between its two writes) is still installed, so it is neither
+/// silently overwritten nor reported as absent.
+fn installed_at(directory: &Path, id: &str) -> Result<Option<CapabilityHeader>, InstallError> {
+    let header_path = directory.join(HEADER);
+    let manifest_path = directory.join(MANIFEST);
+    let installed = if header_path.is_file() {
+        let bytes = std::fs::read(&header_path)?;
+        let header: CapabilityHeader = serde_json::from_slice(&bytes).map_err(|_| {
+            InstallError::Invalid(crate::CapabilityError::PackageInvalid(
+                "installed header is malformed",
+            ))
+        })?;
+        header.validate()?;
+        header
+    } else if manifest_path.is_file() {
+        CapabilityHeader::from_manifest_bytes(&std::fs::read(&manifest_path)?)?
+    } else {
+        return Ok(None);
+    };
+    if installed.id != id {
+        return Err(InstallError::Mismatched {
+            id: id.to_owned(),
+            installed: installed.id,
+        });
+    }
+    Ok(Some(installed))
 }
 
 #[cfg(test)]
@@ -256,6 +297,95 @@ mod tests {
             matches!(error, InstallError::NotInstalled { .. }),
             "{error}"
         );
+    }
+
+    #[test]
+    fn uninstalling_refuses_a_name_that_is_not_a_capability_id() {
+        let scratch = tempfile::tempdir().unwrap();
+        let registry = scratch.path().join("registry");
+        let elsewhere = scratch.path().join("elsewhere");
+        std::fs::create_dir_all(&registry).unwrap();
+        let bytes = manifest();
+        let pinned = digest(&bytes);
+        // A real package outside the registry, pinned at the digest the caller
+        // names: only the id grammar keeps it out of reach.
+        install(&elsewhere, &bytes, &pinned).unwrap();
+        let outside = elsewhere.join("memory.manage");
+        for id in [
+            "../elsewhere/memory.manage",
+            outside.to_str().unwrap(),
+            "memory.manage/..",
+            "",
+        ] {
+            let error = uninstall(&registry, id, &pinned).unwrap_err();
+            assert!(
+                matches!(error, InstallError::InvalidId { .. }),
+                "{id:?}: {error}"
+            );
+        }
+        assert!(
+            outside.join(MANIFEST).is_file(),
+            "nothing outside was removed"
+        );
+    }
+
+    #[test]
+    fn a_package_without_a_header_is_still_installed() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = manifest();
+        let pinned = digest(&bytes);
+        let directory = root.path().join("memory.manage");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(MANIFEST), &bytes).unwrap();
+
+        // The same digest is the same package: nothing is written.
+        let installed = install(root.path(), &bytes, &pinned).unwrap();
+        assert_eq!(installed.manifest_digest, pinned);
+        assert!(!directory.join(HEADER).exists());
+
+        // Another digest is a conflict, not a silent overwrite.
+        let mut edited = bytes.clone();
+        edited.extend_from_slice(b"\n# upgraded\n");
+        let error = install(root.path(), &edited, &digest(&edited)).unwrap_err();
+        assert!(matches!(error, InstallError::Conflict { .. }), "{error}");
+        assert_eq!(std::fs::read(directory.join(MANIFEST)).unwrap(), bytes);
+
+        // And it can be removed by its digest, and only by its digest.
+        let error = uninstall(root.path(), "memory.manage", &digest(&edited)).unwrap_err();
+        assert!(
+            matches!(error, InstallError::DigestMismatch { .. }),
+            "{error}"
+        );
+        assert!(directory.join(MANIFEST).is_file());
+        uninstall(root.path(), "memory.manage", &pinned).unwrap();
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn a_directory_holding_another_id_is_neither_replaced_nor_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = manifest();
+        let pinned = digest(&bytes);
+        install(root.path(), &bytes, &pinned).unwrap();
+        // The memory.manage package now sits where web.browse would be installed.
+        let squatted = root.path().join("web.browse");
+        std::fs::rename(root.path().join("memory.manage"), &squatted).unwrap();
+        let original = std::fs::read(squatted.join(MANIFEST)).unwrap();
+
+        let error = uninstall(root.path(), "web.browse", &pinned).unwrap_err();
+        assert!(matches!(error, InstallError::Mismatched { .. }), "{error}");
+
+        let web = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../capabilities/core/web-browse/capability.toml"
+        ))
+        .unwrap();
+        let error = install(root.path(), &web, &digest(&web)).unwrap_err();
+        assert!(matches!(error, InstallError::Mismatched { .. }), "{error}");
+
+        // Neither act touched what the directory holds.
+        assert_eq!(std::fs::read(squatted.join(MANIFEST)).unwrap(), original);
+        assert!(squatted.join(HEADER).is_file());
     }
 
     #[test]

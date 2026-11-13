@@ -1,5 +1,32 @@
 # Task 038: Memory search that matches Korean and ranks rare words
 
+## Status (2026-11-13)
+
+**Partly implemented, not complete.**
+
+- **Done, turn contract 20 (ADR 0029, "Korean words and rare words"):**
+  - particle folding with the closed list below;
+  - rarity ranking;
+  - single Hangul syllables as exact search words (an amendment, see Contract);
+  - the unit exit criteria.
+
+  The evidence is four tests in `crates/context/src/lib.rs`
+  (`every_korean_particle_folds_to_its_stem_in_both_directions`,
+  `a_fold_needs_a_two_syllable_stem_and_a_listed_particle`,
+  `single_hangul_syllables_are_search_words`,
+  `a_rare_shared_word_outranks_a_common_one`) and the kernel turn test
+  `a_korean_search_finds_a_memory_through_its_particles_and_replays`.
+
+- **Not done:**
+  - `eval/task017/suite-v2.json` and its paid calibration and recorded run.
+    The Korean Recall@5 exit criterion is therefore unmet, and no frozen v2
+    budget exists.
+  - The correction record (`ditto memory history`, `restore`, `until`).
+
+The version numbers in this spec predate the work. The contract went 19 → 20,
+not 15 → 16, and the amendment landed in ADR 0029, the memory search ADR, not
+in ADR 0038.
+
 Why: the comparison in
 [comparison-2026-11.md](../../design/comparison-2026-11.md) found Ditto's memory
 search to be the weakest of the four systems on two counts that are visible to
@@ -23,6 +50,12 @@ the user, and both are fixable without a new service.
   에게/한테/의/도/만/와/과/로/으로/부터/까지/처럼/보다/라고/이라는/입니다/해요)
   and the remaining stem is at least two characters. The list is a constant with
   a unit test per entry. No dictionary, no network, no model, no new dependency.
+  As implemented, the longest listed particle a word ends with is the one
+  removed, so "집으로" is not folded to "집으".
+- **Single Hangul syllables (amendment, 2026-11-13).** The shared tokenizer
+  drops every one-character token, so a one-syllable noun (집, 차, 키) was not a
+  word at all. The search keeps a lone Hangul syllable as an exact word; it is
+  never a fold target, so "키는" still does not find "키".
 - **Rarity ranking.** Within the candidate set, a matched token contributes
   `1 / (number of candidates containing it)`; ties keep the existing stable
   order. This is a local, recomputable weight — no index, no stored statistics.

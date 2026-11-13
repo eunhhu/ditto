@@ -1,6 +1,9 @@
 # 0041 - A read-only tool may run before the model asks for it
 
-Status: proposed
+Status: implemented. The attachment prefetch landed in `9a0e895` (2026-11-07)
+and the granted-sort amendment in `639166b` (2026-11-08); ADR 0047
+(2026-11-11, accepted) amends it. The header said "proposed" until
+2026-11-13, although main has run this behavior since those commits.
 Date: 2026-11-07
 
 ## Context

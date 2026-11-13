@@ -595,6 +595,24 @@ runs; the client round trip stays as a recorded number. Every ceiling in v3 is
 identical to v2 and a manifest check refuses a v3 file whose admission ceiling
 differs from the frozen one.
 
+## Campaigns 14-16 (requests per turn)
+
+The results of these campaigns are in
+[Task 043's outcomes](043-requests-per-turn.md). Their raw reports are no
+longer available; see that file's "Evidence" section.
+
+Campaign 14 (130/130, before ADR 0029's several-wordings search) had three
+results:
+
+- **integrity passed** for the first time, because the run carried
+  `--agent-check-exit 0`;
+- **tool failed** on X3 at 0.000, with `Network is unreachable` in the same log;
+- **cost_latency stayed blocked**, because the `mixed`/`clean` aggregate was
+  missing token counts.
+
+The schedule family's 1.75 requests per attempt there is a metric artifact.
+S2 and S4 attempts each cover several occurrences, and an attempt counts once.
+
 ## Campaign 13 (lookups batched in one reply)
 
 | measure | campaign 12 | campaign 13 |
@@ -871,6 +889,15 @@ and the abstention cue matched only a straight apostrophe, so P5's "I don’t
 have it" read as a refusal to abstain.
 
 ## Campaign 6 (pointer closure and the sort preview)
+
+Before the campaign, a `probe-closure` sample tested the pointer closure alone.
+It covered P1-P5 in 50 attempts and spent $0.09:
+
+- P3 long-use recall went from 5/10 to 9/9;
+- long-use recall over valid attempts went from 0.889 to 1.000;
+- ten attempts failed with an empty provider response (one call, no token
+  usage, about 8 s). That failure is upstream of the change, and the ratios
+  above exclude those attempts.
 
 Run on `06a11a5` after ADR 0029's pointer closure and ADR 0040's sort lines.
 130 attempts, **112 observed**, 18 lost to an empty provider response (one call,

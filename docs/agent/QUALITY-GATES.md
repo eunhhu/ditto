@@ -132,6 +132,23 @@ values that support a claim and the report's SHA-256. The canary rejects tracked
 `docs/**/*.json` files and any tracked file above 1 MiB. Reports committed before
 this rule remain retrievable from git history, as recorded in their evidence.
 
+### Campaign evidence
+
+An evaluation campaign (`scripts/eval_task017.py`) is cited as evidence only
+when both of these hold:
+
+- its run directory lives where nothing prunes it automatically: under the
+  repository's ignored `target/` (for example `target/task017/campaign-NN/`),
+  or a path the owner names;
+- the commit that records its numbers also records `report.json`'s SHA-256
+  and the run directory.
+
+A tool's cache or scratch directory does not qualify. Campaigns 15 and 16 were
+written to `~/.hermes/cache/scratch`, recorded without digests, and were gone
+two days later ([Task 043](tasks/043-requests-per-turn.md), "Evidence").
+Campaigns 1–14 never had a location or a digest recorded. As of 2026-11-13,
+no campaign report could be re-inspected.
+
 ## Review questions
 
 - Can untrusted input choose its own authority, effect, resource, or evidence?

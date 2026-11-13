@@ -121,7 +121,7 @@ impl CapabilityHeader {
         }
     }
 
-    fn validate(&self) -> Result<(), CapabilityError> {
+    pub(crate) fn validate(&self) -> Result<(), CapabilityError> {
         if self.header_version != 1
             || self.manifest_sha256.len() != 64
             || !self

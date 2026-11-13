@@ -124,7 +124,9 @@ applies.
    (descriptions are dropped before names, and a catalogue that cannot fit as
    names refuses the turn).
 4. **P4 - plugin manifests.** Install, digest pinning, uninstall, and the effect
-   request review.
+   request review. *First slice done as a library only:* `capability::install`
+   pins the digest and checks ids and headerless packages (ADR 0048). Still
+   open: the event, lease and route that expose it, and the effect review.
 5. **P5 - provider conformance.** Adapter registry and golden fixtures per shape.
 6. **P6 - the native shell.** Tauri over the existing HTTP and streaming API:
    conversation, memory, schedules, approvals, and profile switching.

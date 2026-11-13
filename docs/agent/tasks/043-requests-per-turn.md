@@ -194,6 +194,24 @@ deliberately not self-approved.
 
 ## Evidence
 
+**The cited files no longer exist (checked 2026-11-13).**
+
+- `~/.hermes/cache/scratch` held only an empty `hermes-dm-1000/` and a
+  `.last_prune` file stamped that day.
+- No copy was found under the home directory, `/tmp`, the repository's
+  `target/` or `.ditto/`.
+- No SHA-256 of these reports was recorded in the repository, unlike Tasks
+  014–016.
+
+The numbers above are therefore documented but not inspectable. The `answer`
+gate's second review has no campaign 16 files to read unless the owner kept a
+copy. Unless one turns up, the next campaign must re-measure contract 20 (which
+changes memory search ranking) under the storage rule in
+[QUALITY-GATES](../QUALITY-GATES.md) ("Campaign evidence"), and the review
+happens on that campaign.
+
+Paths as originally cited:
+
 - `~/.hermes/cache/scratch/campaign15/report.json`, `grading/`
 - `~/.hermes/cache/scratch/campaign16/report.json`, `grading/first-pass.json`,
   `grading/grades.json`
