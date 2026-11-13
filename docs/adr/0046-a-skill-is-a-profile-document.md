@@ -1,6 +1,7 @@
 # ADR 0046: A skill is a profile document, disclosed by its header
 
-Status: accepted (Task 044 P3, first half)
+Status: accepted (Task 044 P3, both halves; amended 2026-11-13: misnamed
+directories and the bounded read)
 
 ## Context
 
@@ -36,6 +37,14 @@ description: Sort a folder of photos into dated albums.
 - **A malformed skill is reported, not skipped.** A skill that silently fails to
   load is worse than one that says which line is wrong. The declaration must also
   match its directory, so a copied folder cannot quietly answer to another name.
+  A directory under `skills/` whose name the rule refuses (`Photo Triage`) is a
+  skill that fails to load and is reported the same way; only hidden entries
+  (`.git`, an editor's folder) and plain files are not skills. Until 2026-11-13
+  a misnamed directory was silently left out of the catalogue.
+- **A document is read once and no further than 68 KiB** (the body limit plus
+  4 KiB of frontmatter), and only when it is a regular file, because the
+  catalogue is read on every turn: an oversized file or a FIFO named `SKILL.md`
+  would otherwise cost each turn its whole size or stall it.
 - **The header is what the model may see before it asks**: name and one line of
   description, at most 200 characters. The body is at most 64 KiB; anything
   larger belongs in a reference file the body names.

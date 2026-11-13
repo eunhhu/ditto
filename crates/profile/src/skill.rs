@@ -26,6 +26,11 @@ pub const MAX_DESCRIPTION_CHARS: usize = 200;
 /// body points at.
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// Bytes a whole `SKILL.md` may hold: the body limit plus room for the
+/// frontmatter. A document is read only this far, so an oversized file costs a
+/// bounded read on every turn rather than its whole size.
+pub const MAX_DOCUMENT_BYTES: usize = MAX_BODY_BYTES + 4 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillError {
     /// The directory name or the frontmatter name is not usable.
@@ -114,11 +119,15 @@ fn invalid(name: &str, reason: &'static str) -> SkillError {
     }
 }
 
-/// Every skill in a profile's skills directory, by name, without reading bodies
-/// beyond their first lines.
+/// Every skill in a profile's skills directory, by name. Each document is read
+/// once, up to [`MAX_DOCUMENT_BYTES`].
 ///
 /// A malformed skill is reported rather than skipped: a skill that silently does
-/// not load is worse than one that says why.
+/// not load is worse than one that says why. That includes a directory whose
+/// name the format refuses (`Photo Triage`): it was meant as a skill, and
+/// leaving it out would make the catalogue silently shorter. Hidden entries
+/// (`.git`, an editor's folder) and plain files are not attempts at a skill and
+/// are ignored.
 pub fn list(root: &Path) -> Result<Vec<SkillHeader>, SkillError> {
     let directory = root.join(SKILLS_DIR);
     let entries = match std::fs::read_dir(&directory) {
@@ -137,10 +146,11 @@ pub fn list(root: &Path) -> Result<Vec<SkillHeader>, SkillError> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if validate_name(&name).is_err() {
+        if name.starts_with('.') {
             continue;
         }
-        skills.push(read_header(&name, &path)?);
+        validate_name(&name)?;
+        skills.push(read_document(&name, &path)?.header);
     }
     skills.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(skills)
@@ -149,21 +159,14 @@ pub fn list(root: &Path) -> Result<Vec<SkillHeader>, SkillError> {
 /// Read one skill by name.
 pub fn read(root: &Path, name: &str) -> Result<Skill, SkillError> {
     validate_name(name)?;
-    let directory = root.join(SKILLS_DIR).join(name);
-    let header = read_header(name, &directory)?;
-    let text = std::fs::read_to_string(&header.path).map_err(|_| SkillError::Missing {
-        path: header.path.display().to_string(),
-    })?;
-    let (_, body) = parse(&header.path, &text)?;
-    Ok(Skill { header, body })
+    read_document(name, &root.join(SKILLS_DIR).join(name))
 }
 
-fn read_header(name: &str, directory: &Path) -> Result<SkillHeader, SkillError> {
+/// One skill document, read once and checked against every rule of the format.
+fn read_document(name: &str, directory: &Path) -> Result<Skill, SkillError> {
     let path = directory.join(SKILL_FILE);
-    let text = std::fs::read_to_string(&path).map_err(|_| SkillError::Missing {
-        path: path.display().to_string(),
-    })?;
-    let (declared, body) = parse(&path, &text)?;
+    let text = read_bounded(&path)?;
+    let (declared, description, body) = parse(&path, &text)?;
     if declared != name {
         return Err(malformed(
             &path,
@@ -173,12 +176,38 @@ fn read_header(name: &str, directory: &Path) -> Result<SkillHeader, SkillError> 
     if body.len() > MAX_BODY_BYTES {
         return Err(malformed(&path, "the body is larger than 64 KiB"));
     }
-    let description = description_of(&path, &text)?;
-    Ok(SkillHeader {
-        name: name.to_owned(),
-        description,
-        path,
+    Ok(Skill {
+        header: SkillHeader {
+            name: name.to_owned(),
+            description,
+            path,
+        },
+        body,
     })
+}
+
+/// The document's text, read no further than [`MAX_DOCUMENT_BYTES`]. Only a
+/// regular file is opened, so a FIFO or device named `SKILL.md` cannot stall
+/// the turn that reads the catalogue.
+fn read_bounded(path: &Path) -> Result<String, SkillError> {
+    use std::io::Read;
+
+    let missing = || SkillError::Missing {
+        path: path.display().to_string(),
+    };
+    let metadata = std::fs::metadata(path).map_err(|_| missing())?;
+    if !metadata.is_file() {
+        return Err(malformed(path, "it is not a regular file"));
+    }
+    let file = std::fs::File::open(path).map_err(|_| missing())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_DOCUMENT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| missing())?;
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(malformed(path, "the document is larger than 68 KiB"));
+    }
+    String::from_utf8(bytes).map_err(|_| malformed(path, "it is not UTF-8 text"))
 }
 
 fn malformed(path: &Path, reason: &'static str) -> SkillError {
@@ -188,8 +217,8 @@ fn malformed(path: &Path, reason: &'static str) -> SkillError {
     }
 }
 
-/// The `name` from the frontmatter, and the body after it.
-fn parse(path: &Path, text: &str) -> Result<(String, String), SkillError> {
+/// The `name` and `description` from the frontmatter, and the body after it.
+fn parse(path: &Path, text: &str) -> Result<(String, String, String), SkillError> {
     let rest = text
         .strip_prefix("---\n")
         .ok_or_else(|| malformed(path, "it does not start with a --- frontmatter block"))?;
@@ -198,24 +227,15 @@ fn parse(path: &Path, text: &str) -> Result<(String, String), SkillError> {
     };
     let frontmatter = &rest[..end];
     let body = rest[end + "\n---\n".len()..].to_owned();
-    let name = frontmatter
-        .lines()
-        .find_map(|line| line.strip_prefix("name:"))
-        .map(|value| value.trim().trim_matches('"').to_owned())
-        .ok_or_else(|| malformed(path, "the frontmatter has no name"))?;
-    validate_name(&name)?;
-    Ok((name, body))
-}
-
-fn description_of(path: &Path, text: &str) -> Result<String, SkillError> {
-    let rest = text.strip_prefix("---\n").unwrap_or_default();
-    let Some(end) = rest.find("\n---\n") else {
-        return Err(malformed(path, "the frontmatter block is not closed"));
+    let field = |key: &str| {
+        frontmatter
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .map(|value| value.trim().trim_matches('"').to_owned())
     };
-    let description = rest[..end]
-        .lines()
-        .find_map(|line| line.strip_prefix("description:"))
-        .map(|value| value.trim().trim_matches('"').to_owned())
+    let name = field("name:").ok_or_else(|| malformed(path, "the frontmatter has no name"))?;
+    validate_name(&name)?;
+    let description = field("description:")
         .ok_or_else(|| malformed(path, "the frontmatter has no description"))?;
     if description.is_empty() || description.chars().count() > MAX_DESCRIPTION_CHARS {
         return Err(malformed(
@@ -223,10 +243,7 @@ fn description_of(path: &Path, text: &str) -> Result<String, SkillError> {
             "the description must hold 1 through 200 characters",
         ));
     }
-    if description.contains('\n') {
-        return Err(malformed(path, "the description must be one line"));
-    }
-    Ok(description)
+    Ok((name, description, body))
 }
 
 #[cfg(test)]
@@ -336,6 +353,59 @@ mod tests {
         install(&root, "long-body", "fine", &"x".repeat(MAX_BODY_BYTES + 1));
         let error = list(&root).expect_err("body limit");
         assert!(error.to_string().contains("64 KiB"), "{error}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_misnamed_skill_directory_is_reported_and_hidden_entries_are_not_skills() {
+        let root = scratch("misnamed");
+        install(&root, "photo-triage", "Sort photos.", "body\n");
+        // Not attempts at a skill: a hidden directory and a plain file.
+        std::fs::create_dir_all(root.join(SKILLS_DIR).join(".git")).expect("hidden dir");
+        std::fs::write(root.join(SKILLS_DIR).join("README.md"), "notes\n").expect("file");
+        assert_eq!(list(&root).expect("list").len(), 1);
+
+        // A directory meant as a skill whose name the format refuses.
+        let misnamed = root.join(SKILLS_DIR).join("Photo Triage");
+        std::fs::create_dir_all(&misnamed).expect("misnamed dir");
+        std::fs::write(
+            misnamed.join(SKILL_FILE),
+            "---\nname: photo-triage\ndescription: copy\n---\nbody\n",
+        )
+        .expect("write");
+        let error = list(&root).expect_err("a misnamed skill must not vanish");
+        assert!(error.to_string().contains("Photo Triage"), "{error}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_document_is_read_no_further_than_its_bound() {
+        let root = scratch("bound");
+        let directory = root.join(SKILLS_DIR).join("huge");
+        std::fs::create_dir_all(&directory).expect("dir");
+        let mut text = String::from("---\nname: huge\ndescription: big\n---\n");
+        text.push_str(&"x".repeat(MAX_DOCUMENT_BYTES));
+        std::fs::write(directory.join(SKILL_FILE), text).expect("write");
+        let error = list(&root).expect_err("an oversized document is refused");
+        assert!(error.to_string().contains("68 KiB"), "{error}");
+        let error = read(&root, "huge").expect_err("and cannot be read either");
+        assert!(error.to_string().contains("68 KiB"), "{error}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_document_that_is_not_text_or_not_a_file_is_malformed() {
+        let root = scratch("binary");
+        let directory = root.join(SKILLS_DIR).join("binary");
+        std::fs::create_dir_all(&directory).expect("dir");
+        std::fs::write(directory.join(SKILL_FILE), [0xff, 0xfe, 0x00]).expect("write");
+        let error = read(&root, "binary").expect_err("not UTF-8");
+        assert!(error.to_string().contains("UTF-8"), "{error}");
+
+        let directory = root.join(SKILLS_DIR).join("folder");
+        std::fs::create_dir_all(directory.join(SKILL_FILE)).expect("a directory named SKILL.md");
+        let error = read(&root, "folder").expect_err("not a regular file");
+        assert!(error.to_string().contains("regular file"), "{error}");
         std::fs::remove_dir_all(&root).ok();
     }
 
