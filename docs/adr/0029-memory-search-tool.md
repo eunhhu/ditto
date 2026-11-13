@@ -130,8 +130,9 @@ The context compiler, its complete-set selection and the pointer closure keep
 exact words: their selection is part of the recorded contract, and every
 existing compiler test passed unchanged. Replay recomputes the new search,
 which is why the change replaces the turn contract (ADR 0034) rather than
-living beside it. English results keep their membership; their order can
-change where a rarer word is shared. No suite run has measured this yet:
+living beside it. The set of English memories that match is unchanged, but
+their order can change where a rarer word is shared. Since a search returns
+at most eight memories (and 8 KiB), which eight are returned can change too. No suite run has measured this yet:
 every campaign number recorded so far is from contract 19.
 
 ## Consequences

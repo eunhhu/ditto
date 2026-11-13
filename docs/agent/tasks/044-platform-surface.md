@@ -14,6 +14,19 @@ one place. Slices P1 through P3 had been on main without a task file.
 | P5 provider conformance | not started | - | - |
 | P6 native shell | not started | - | - |
 
+## Live checks recorded when the slices landed
+
+These checks were moved here from HANDOFF and were not re-run on 2026-11-13.
+
+- **P1.** `DITTO_PROFILE=minchae DITTO_DATA_DIR=/tmp/dprof2` listened on 8899
+  and wrote to `/tmp/dprof2/profiles/minchae`. `ditto profile list|path` read
+  the data root, and `../etc` was refused by the name rule.
+- **P2.** Against `127.0.0.1:8901`, `set` returned seq 2, `show` echoed the
+  text, and `clear` returned `no standing instructions`.
+- **P3.** A `photo-triage` skill was listed as one line plus its description,
+  and `show` returned its body. `show ../etc` exited 1 with `it must start with
+  a lowercase letter or digit`.
+
 ## Exit criteria still open
 
 - **P2:** a model-written instruction change that lands on the next turn, with

@@ -40,17 +40,20 @@ Items 2–5 keep the order recorded with the
 
 Each has its own task file and open exit criteria:
 
-- [044](tasks/044-platform-surface.md) The platform surface. P1 profiles, P2's
-  pinned instructions and P3 skills are done, and P4 has its library slice
-  (pinned install). Open: P2's model-written half, P4's event, lease, route and
-  effect review, P5 provider conformance and P6 the native shell.
+- [044](tasks/044-platform-surface.md) The platform surface.
+  - Landed: P1 profiles, P2's pinned instructions and P3 skills (ADRs
+    0044–0046, turn contracts 17–19), and P4's library slice, the pinned
+    install (ADR 0048).
+  - Open: P2's model-written half, P4's event, lease, route and effect
+    review, P5 provider conformance and P6 the native shell.
 - [042](tasks/042-harness-only-self-improvement.md) Harness-only
   self-improvement. `scripts/probe_variant.py` exists. The first two probes
   were `KEEP_BASE`, and the memory two-hop family is saturated for wording
   edits.
 - [043](tasks/043-second-generation-bar.md) The second-generation bar, and its
-  [outcomes](tasks/043-requests-per-turn.md): 1.172 requests per turn on
-  campaign 16, which can no longer be inspected. Open:
+  [outcomes](tasks/043-requests-per-turn.md): 1.65 → 1.172 requests per turn
+  on campaign 16 (ADR 0029 amendment, ADR 0047), which can no longer be
+  inspected. Open:
   - the runner does not report requests per turn;
   - schedule-gate aggregation counts attempts, not turns;
   - first useful progress is 5.3 s against a 2 s target;
@@ -62,11 +65,10 @@ Each has its own task file and open exit criteria:
 
 One line per slice; each task file and its evidence hold the details.
 
-- [044](tasks/044-platform-surface.md) P1–P3 and the P4 library slice
-  (ADRs 0044–0046, 0048), turn contracts 17–19.
-- [043](tasks/043-requests-per-turn.md) Requests per turn 1.65 → 1.172 on
-  campaign 16 (ADRs 0029 amendment, 0047). The `answer` gate stayed blocked
-  on review.
+Tasks 038, 042, 043 and 044 are not listed here. Each has landed slices, but
+its exit criteria are still open, so it appears above under Active or
+Parallel tracks.
+
 - Between the Task 017 campaigns:
   - the two-hop pointer closure (ADR 0029);
   - the sort's result lines (ADR 0040, turn contract 16), which HANDOFF and
