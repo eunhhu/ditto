@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
 };
 
@@ -2316,32 +2316,80 @@ fn recall_score(
         return 0.0;
     }
 
-    let authority = match (node.origin, node.epistemic) {
+    overlap * 5.0 + authority(node) + node.confidence
+}
+
+fn authority(node: &ContextNode) -> f32 {
+    match (node.origin, node.epistemic) {
         (ContextOrigin::User, EpistemicStatus::Verified | EpistemicStatus::Asserted) => 1.0,
         (_, EpistemicStatus::Verified) => 0.8,
         (_, EpistemicStatus::Asserted) => 0.5,
         (_, EpistemicStatus::Inferred) => 0.2,
         (_, EpistemicStatus::Disputed) => -10.0,
-    };
-
-    overlap * 5.0 + authority + node.confidence
+    }
 }
 
-/// Lexical recall over context nodes with the complete-set tokenizer: the nodes
-/// sharing at least one word other than a function word with `query`, best
-/// first by the compiler's relevance score, then by ID. The `memory.search`
-/// tool uses it, and replay recomputes its results with it.
+/// Lexical recall for the agent's memory search (ADR 0029): the nodes sharing
+/// at least one search word with `query`, best first, then by ID. Replay
+/// recomputes every search with it, so it is a function of its inputs alone.
+///
+/// Search words are the complete-set words (no function words) plus single
+/// Hangul syllables, and each word also matches through its folded forms: the
+/// regular English singular, and a Hangul word without the particle it ends
+/// with ([`KOREAN_PARTICLES`], turn contract 20). A shared word weighs
+/// `1 / n` when `n` of the nodes contain it, so the memory that shares the one
+/// rare noun outranks the ones that share a word every memory uses.
+///
+/// The context compiler does not use this: its selection is part of the
+/// complete-set contract and keeps exact words.
 pub fn lexical_recall<'a>(
     query: &str,
     nodes: impl IntoIterator<Item = &'a ContextNode>,
 ) -> Vec<&'a ContextNode> {
-    let selection = ContextSelection::CompleteSet;
-    let query_tokens = singular_tokens(selection.tokens(query));
-    let mut scored = nodes
+    // One entry per distinct query word, in word order, so the weights below
+    // are summed in the same order by the live search and by its replay.
+    let query_terms = search_words(query)
+        .iter()
+        .map(|word| search_forms(word))
+        .collect::<Vec<_>>();
+    if query_terms.is_empty() {
+        return Vec::new();
+    }
+    let nodes = nodes
         .into_iter()
         .map(|node| {
-            let node_tokens = singular_tokens(selection.tokens(&node.summary));
-            (recall_score(node, &query_tokens, &node_tokens), node)
+            let forms = search_words(&node.summary)
+                .iter()
+                .flat_map(|word| search_forms(word))
+                .collect::<HashSet<_>>();
+            (node, forms)
+        })
+        .collect::<Vec<_>>();
+    let shares =
+        |forms: &HashSet<String>, term: &[String]| term.iter().any(|form| forms.contains(form));
+    let frequency = query_terms
+        .iter()
+        .map(|term| {
+            nodes
+                .iter()
+                .filter(|(_, forms)| shares(forms, term))
+                .count()
+        })
+        .collect::<Vec<_>>();
+    let mut scored = nodes
+        .iter()
+        .filter_map(|(node, forms)| {
+            let weight = query_terms
+                .iter()
+                .zip(&frequency)
+                .filter(|(term, _)| shares(forms, term))
+                .map(|(_, &count)| 1.0 / count as f64)
+                .sum::<f64>();
+            if weight == 0.0 {
+                return None;
+            }
+            let overlap = (weight / query_terms.len() as f64) as f32;
+            Some((overlap * 5.0 + authority(node) + node.confidence, *node))
         })
         .filter(|(score, _)| *score > 0.0)
         .collect::<Vec<_>>();
@@ -2547,6 +2595,80 @@ fn singular(token: &str) -> String {
     token.to_owned()
 }
 
+/// The words a memory search matches on: the complete-set words, plus single
+/// Hangul syllables, because many Korean nouns are one syllable (집, 차, 키) and
+/// dropping them would leave a Korean question with nothing to match.
+fn search_words(input: &str) -> BTreeSet<String> {
+    input
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| {
+            let mut characters = token.chars();
+            match (characters.next(), characters.next()) {
+                (Some(only), None) => is_hangul_syllable(only),
+                (Some(_), Some(_)) => true,
+                (None, _) => false,
+            }
+        })
+        .map(str::to_lowercase)
+        .filter(|token| !is_function_word(token))
+        .collect()
+}
+
+fn is_hangul_syllable(character: char) -> bool {
+    ('\u{AC00}'..='\u{D7A3}').contains(&character)
+}
+
+/// Korean particles and endings a memory search folds (Task 038). A word that
+/// ends with a Hangul syllable also matches as the word without the longest of
+/// these it ends with, when at least two characters remain: "냉장고에" and
+/// "냉장고를" both match "냉장고", while "집에" stays itself, because a
+/// one-syllable remainder would fold too many unrelated words together. The
+/// list is closed: no dictionary, no model, no new dependency.
+pub const KOREAN_PARTICLES: [&str; 25] = [
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "에",
+    "에서",
+    "에게",
+    "한테",
+    "의",
+    "도",
+    "만",
+    "와",
+    "과",
+    "로",
+    "으로",
+    "부터",
+    "까지",
+    "처럼",
+    "보다",
+    "라고",
+    "이라는",
+    "입니다",
+    "해요",
+];
+
+/// Every form `word` matches by: itself, its regular English singular, and
+/// for a word ending in Hangul the stem left by its longest particle.
+fn search_forms(word: &str) -> Vec<String> {
+    let mut forms = vec![singular(word)];
+    if word.chars().next_back().is_some_and(is_hangul_syllable) {
+        let stem = KOREAN_PARTICLES
+            .iter()
+            .filter(|particle| word.ends_with(*particle))
+            .max_by_key(|particle| particle.len())
+            .map(|particle| &word[..word.len() - particle.len()]);
+        if let Some(stem) = stem.filter(|stem| stem.chars().count() >= 2) {
+            forms.push(singular(stem));
+        }
+    }
+    forms
+}
+
 /// English function words that identify no fact. Spatial, temporal and
 /// quantity words stay meaningful. Sorted for binary search; the list is part
 /// of the complete-set contract, so changing it requires a new contract.
@@ -2715,6 +2837,96 @@ mod tests {
         assert_eq!(super::singular("boxes"), "box");
         assert_eq!(super::singular("cities"), "city");
         assert_eq!(super::singular("is"), "is");
+    }
+
+    fn recalled<'a>(query: &str, nodes: &'a [ContextNode]) -> Vec<&'a str> {
+        lexical_recall(query, nodes)
+            .into_iter()
+            .map(|node| node.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn every_korean_particle_folds_to_its_stem_in_both_directions() {
+        let stem = [node("stem", "냉장고 위에 있어")];
+        for particle in super::KOREAN_PARTICLES {
+            let inflected = format!("냉장고{particle}");
+            let with_particle = [node("inflected", &format!("열쇠는 {inflected} 있어"))];
+            assert_eq!(
+                recalled(&inflected, &stem),
+                ["stem"],
+                "{inflected:?} finds the bare word"
+            );
+            assert_eq!(
+                recalled("냉장고", &with_particle),
+                ["inflected"],
+                "the bare word finds {inflected:?}"
+            );
+        }
+        // Two inflections of one word meet at the stem.
+        let placed = [node("tin", "사프란 통은 냉장고에 있어")];
+        assert_eq!(recalled("냉장고를 열어", &placed), ["tin"]);
+    }
+
+    #[test]
+    fn a_fold_needs_a_two_syllable_stem_and_a_listed_particle() {
+        let home = [node("home", "집 비밀번호는 바뀌었어")];
+        // "집에" would leave one syllable, so it stays itself.
+        assert!(recalled("집에", &home).is_empty());
+        // "등" is not a particle: "냉장고등" is another word.
+        let fridge = [node("fridge", "냉장고 문이 고장났어")];
+        assert!(recalled("냉장고등", &fridge).is_empty());
+        // A word that itself ends in a listed syllable still matches its own
+        // inflections: 포도 ends in 도, and 고양이 in 이.
+        let grapes = [node("grapes", "포도는 냉장고 맨 아래 칸")];
+        assert_eq!(recalled("포도", &grapes), ["grapes"]);
+        let cat = [node("cat", "고양이를 화요일에 병원에 데려가")];
+        assert_eq!(recalled("고양이", &cat), ["cat"]);
+        // An English word carrying a particle finds the English word.
+        let phone = [node("phone", "My iPhone passcode hint is the old street")];
+        assert_eq!(recalled("iPhone을 어디 뒀지", &phone), ["phone"]);
+    }
+
+    #[test]
+    fn single_hangul_syllables_are_search_words() {
+        let car = [node("car", "차 키는 현관 서랍에 있어")];
+        assert_eq!(recalled("차 어디", &car), ["car"]);
+        assert_eq!(recalled("서랍", &car), ["car"]);
+        // English single letters are still not words.
+        let letter = [node("letter", "a b c")];
+        assert!(recalled("a", &letter).is_empty());
+    }
+
+    #[test]
+    fn a_rare_shared_word_outranks_a_common_one() {
+        let nodes = [
+            node("a-insurance", "Travel insurance renews in May"),
+            node("b-plans", "Travel plans for June include Busan"),
+            node("c-budget", "Travel budget is tight this year"),
+            node("z-passport", "Passport sits in the desk drawer"),
+        ];
+        // Every node shares exactly one word with the question; without
+        // rarity they tie and rank by ID, putting the passport last.
+        assert_eq!(
+            recalled("travel passport", &nodes),
+            ["z-passport", "a-insurance", "b-plans", "c-budget"]
+        );
+        let korean = [
+            node("a-trip", "여행 보험은 5월에 갱신"),
+            node("b-trip", "여행 계획은 6월 부산"),
+            node("z-passport", "여권은 책상 서랍에 있어"),
+        ];
+        assert_eq!(
+            recalled("여행 갈 때 여권 어디 있어", &korean),
+            ["z-passport", "a-trip", "b-trip"]
+        );
+        // The same input gives the same order: replay depends on it.
+        for _ in 0..8 {
+            assert_eq!(
+                recalled("여행 갈 때 여권 어디 있어", &korean),
+                ["z-passport", "a-trip", "b-trip"]
+            );
+        }
     }
 
     #[test]

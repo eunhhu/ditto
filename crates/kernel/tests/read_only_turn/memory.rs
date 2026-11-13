@@ -703,6 +703,46 @@ async fn a_tool_is_offered_only_with_its_package() {
 }
 
 #[tokio::test]
+async fn a_korean_search_finds_a_memory_through_its_particles_and_replays() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    fill_past_the_budget(kernel);
+    let fridge = save_memory(
+        kernel,
+        "personal",
+        "여분 열쇠는 냉장고 위 사프란 통에 있어",
+        None,
+    );
+    let trip = save_memory(kernel, "personal", "여분 우산은 현관에 있어", None);
+
+    // "냉장고를" and "열쇠" share nothing exactly with "냉장고" and "열쇠는":
+    // only the folded particles reach the memory, and the rarer word ranks
+    // the right memory first although both share "여분".
+    let (status, driver) = ask(
+        kernel,
+        "여분 열쇠 어디 뒀더라?",
+        vec![
+            search("여분 열쇠 냉장고를"),
+            final_script(&["냉장고 위 사프란 통이에요."]),
+        ],
+    )
+    .await;
+    assert_eq!(status.status, AgentRunStatus::Unverified, "{status:?}");
+    let found = &tool_results(&driver.requests()[1])[0];
+    let ids = found["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|memory| memory["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![fridge, trip]);
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+    // Replay recomputes the search from the journal and agrees with it.
+    let replayed = replays(&fixture, &status.turn_id);
+    assert_eq!(replayed.tool_calls.len(), 1);
+}
+
+#[tokio::test]
 async fn several_wordings_in_one_search_find_a_fact_no_single_wording_would() {
     let fixture = Fixture::new();
     let kernel = &fixture.kernel;

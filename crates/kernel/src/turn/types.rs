@@ -16,7 +16,13 @@ use crate::KernelError;
 /// recorded under an earlier contract stay in the journal, and their answers
 /// stay readable in run status and conversation history, but replay rejects
 /// them.
-pub const TURN_PAYLOAD_VERSION: u16 = 19;
+///
+/// 20: the memory search folds Korean particles, keeps single Hangul
+/// syllables and weighs rare shared words (ADR 0029, Task 038), and a
+/// prefetched sort's note to the model lost a run of stray spaces. Both change
+/// what replay recomputes or rebuilds, so a turn recorded under 19 would no
+/// longer agree with itself.
+pub const TURN_PAYLOAD_VERSION: u16 = 20;
 /// Oldest contract whose terminal events run status still reads: their
 /// shape has not changed.
 pub const MIN_TURN_PAYLOAD_VERSION: u16 = 1;

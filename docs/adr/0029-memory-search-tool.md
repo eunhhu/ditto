@@ -4,7 +4,9 @@ Status: accepted on 2026-09-30 for Task 029, as part of
 [ADR 0028](0028-thin-realtime-harness.md) Phase E. Turn payload version 8.
 Amended by [ADR 0031](0031-model-managed-memory.md): from version 10 the search
 also reads what Ditto inferred, marked as such. Amended by [ADR 0036](0036-two-agent-tools-one-lifecycle.md): the search is the
-`search` action of `memory.manage`.
+`search` action of `memory.manage`. Amended for Task 043 (several wordings in
+one search) and, on 2026-11-13, for Task 038 (Korean particles, single Hangul
+syllables and rarity ranking; turn contract 20).
 
 ## Context
 
@@ -99,11 +101,44 @@ Measured on P1, P2, P5, X1 and T1 (45 attempts): requests per attempt 1.64 to
 1.69 with recall 0.900 to 0.967 - P2/long_use 5 to 2, P5 4 to 2 - because the
 first search now reaches the fact.
 
+## Korean words and rare words (Task 038, turn contract 20)
+
+The search split words only at non-alphanumeric characters and dropped every
+one-character token, so a Korean particle made a different word ("냉장고에"
+never matched "냉장고") and a one-syllable noun (집, 차, 키) was not a word at
+all. Every match also counted the same, so a memory sharing a word every
+memory uses tied with the memory sharing the one rare noun, and the tie went
+to the ID.
+
+From turn contract 20 the search, and only the search, matches differently:
+
+- **Search words** are the complete-set words plus single Hangul syllables,
+  matched exactly. English single letters are still not words.
+- **Particle folding.** A word ending in a Hangul syllable also matches as the
+  word without the longest particle from a closed list of 25
+  (`ditto_context::KOREAN_PARTICLES`: 은/는/이/가/을/를/에/에서/에게/한테/의/도/
+  만/와/과/로/으로/부터/까지/처럼/보다/라고/이라는/입니다/해요), when at least two
+  characters remain. Two inflections meet at the stem, and a word that itself
+  ends in a listed syllable (포도, 고양이) still matches its own inflections.
+  A one-syllable remainder is not folded ("집에" stays itself), so "키는" does
+  not find "키": that gap is accepted until measurement says otherwise.
+- **Rarity.** A shared word contributes `1 / n` when `n` of the searched
+  memories contain it, summed in word order so the live search and its replay
+  add the same numbers; ties keep the ID order.
+
+The context compiler, its complete-set selection and the pointer closure keep
+exact words: their selection is part of the recorded contract, and every
+existing compiler test passed unchanged. Replay recomputes the new search,
+which is why the change replaces the turn contract (ADR 0034) rather than
+living beside it. English results keep their membership; their order can
+change where a rarer word is shared. No suite run has measured this yet:
+every campaign number recorded so far is from contract 19.
+
 ## Consequences
 
 A paraphrased question can reach a memory the budget left out when the model
 searches with its own words; the model decides when to search. Recall remains
-lexical: a search for "pet" still misses "My dog is called Miso" unless the
+lexical (with the folding above): a search for "pet" still misses "My dog is called Miso" unless the
 model also searches "dog", and a search that carries no matching wording still
 returns nothing. The model cannot save or change memories.
 
