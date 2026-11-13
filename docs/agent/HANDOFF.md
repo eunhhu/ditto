@@ -302,7 +302,8 @@ A review of main found the problems below, and each commit fixes one of them:
   - The fix: an id outside the grammar is `InvalidId`, a directory naming
     another id is `Mismatched`, and installed state is read the way the
     catalogue reads it.
-  - Tests: the install tests, 9 passed (3 new).
+  - Tests: the install tests, 9 passed (3 new). One of them was later
+    strengthened to check `install` too.
 - **Turn contract 20 (ADR 0029 amended, Task 038's search half).**
   - The change: Korean particle folding, single Hangul syllables, rarity
     ranking, and 24 stray spaces removed from the prefetched sort's note.
@@ -321,7 +322,37 @@ A review of main found the problems below, and each commit fixes one of them:
 
 ## Gate on the review branch
 
-Not yet run.
+`./scripts/agent-check.sh` **exited 0** on `1652636` (2026-11-13, Raspberry
+Pi 5, 9 min 53 s wall clock). The host load average was about 4–5 from other
+work when it started. The log is kept at
+`target/review-2026-11-13/agent-check.log` (SHA-256
+`2e0bcfd3ba179772e12c6f3b624b1f46b3d3545cf0937c36f0221af146ac3871`).
+
+| Part of the gate | Result |
+| --- | --- |
+| canary, fmt, clippy `-D warnings` | passed |
+| workspace tests | 642 passed, 8 ignored |
+| built-CLI scenarios | the seven ignored ones, run one by one: 7 passed |
+| `test-personal-baseline.py` | 8 OK |
+| `test-personal-quality.py` | 22 OK |
+| `test-eval-task017.py` | 43 OK |
+| `test-probe-variant.py` | 9 OK |
+| web renderer checks | 12 cases passed |
+| offline baseline and five-case corpus | passed |
+
+Changes after that commit:
+
+- `90c1b9d` changed only documents. The canary passed on it.
+- The next commit strengthens one install test, so that it also checks that
+  `install` refuses a directory holding another id.
+  - `ditto-capability` install tests: 10 passed.
+  - clippy on `ditto-capability` passed.
+  - The full gate was not re-run for that test-only change.
+
+Not run in this session:
+
+- `node scripts/web-e2e.js`, the browser run that the gate does not include;
+- any live provider campaign.
 
 ## Known gaps
 

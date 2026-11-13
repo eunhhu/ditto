@@ -367,14 +367,25 @@ mod tests {
         let bytes = manifest();
         let pinned = digest(&bytes);
         install(root.path(), &bytes, &pinned).unwrap();
-        std::fs::rename(
-            root.path().join("memory.manage"),
-            root.path().join("other.package"),
-        )
-        .unwrap();
-        let error = uninstall(root.path(), "other.package", &pinned).unwrap_err();
+        // The memory.manage package now sits where web.browse would be installed.
+        let squatted = root.path().join("web.browse");
+        std::fs::rename(root.path().join("memory.manage"), &squatted).unwrap();
+        let original = std::fs::read(squatted.join(MANIFEST)).unwrap();
+
+        let error = uninstall(root.path(), "web.browse", &pinned).unwrap_err();
         assert!(matches!(error, InstallError::Mismatched { .. }), "{error}");
-        assert!(root.path().join("other.package").join(HEADER).is_file());
+
+        let web = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../capabilities/core/web-browse/capability.toml"
+        ))
+        .unwrap();
+        let error = install(root.path(), &web, &digest(&web)).unwrap_err();
+        assert!(matches!(error, InstallError::Mismatched { .. }), "{error}");
+
+        // Neither act touched what the directory holds.
+        assert_eq!(std::fs::read(squatted.join(MANIFEST)).unwrap(), original);
+        assert!(squatted.join(HEADER).is_file());
     }
 
     #[test]
