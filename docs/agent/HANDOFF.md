@@ -345,7 +345,8 @@ Changes after that commit:
 - `90c1b9d` changed only documents. The canary passed on it.
 - The next commit strengthens one install test, so that it also checks that
   `install` refuses a directory holding another id.
-  - `ditto-capability` install tests: 10 passed.
+  - `cargo test -p ditto-capability --lib install`: 10 passed (the 9 install
+    tests plus one catalogue test the filter matches).
   - clippy on `ditto-capability` passed.
   - The full gate was not re-run for that test-only change.
 
