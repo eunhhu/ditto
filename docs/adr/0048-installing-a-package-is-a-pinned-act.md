@@ -1,7 +1,8 @@
 # ADR 0048: Installing a capability package is a pinned act
 
 Status: accepted (2026-11-11). First slice of P4 (plugin manifests) in
-`docs/design/platform-surface.md`.
+`docs/design/platform-surface.md`. Amended 2026-11-13: the id a removal names
+is checked, and a package without a header counts as installed.
 
 ## Context
 
@@ -37,6 +38,18 @@ read.
 - **`uninstall(root, id, expected_digest)` removes only the named digest.** A
   package that moved on since the caller looked is refused rather than removed:
   the removal is about the bytes the caller saw.
+- **Only a capability id reaches the filesystem.** `uninstall` refuses an `id`
+  outside the id grammar (`InvalidId`) before joining it onto the root, because
+  the joined path is removed recursively; in the first slice `../elsewhere/x`
+  or an absolute path would have removed any directory whose header carried the
+  named digest. A directory whose package names another id is `Mismatched` and
+  is neither replaced nor removed.
+- **What is installed is what the catalogue would load.** The catalogue loads a
+  directory that has a manifest but no header, so install and uninstall read
+  such a package from its manifest: the same digest is the same package, another
+  digest is a conflict, and removal still needs the digest. In the first slice a
+  headerless package was overwritten without a conflict and could not be
+  uninstalled.
 
 The digest is the manifest's content digest (SHA-256 over the canonical manifest
 bytes), the same value `CapabilityHeader::from_manifest_bytes` computes and
