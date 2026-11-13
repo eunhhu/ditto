@@ -490,6 +490,21 @@ two; replay recognizes the variant from the recorded contract digest.
   [0033](../adr/0033-autonomous-web-search.md) and
   [0037](../adr/0037-reading-found-pages.md).
 
+## Standing instructions
+
+`instructions.recorded` (user, profile-wide: no session, task, causation or
+correlation) is the profile's one instruction document
+([ADR 0045](../adr/0045-durable-and-ephemeral-ranges.md)). Its version-1
+payload is `{ event_version: 1, text, supersedes }`, where `supersedes` is
+the event ID of the document it replaces or `null`. The text is trimmed and
+holds at most 2,000 characters; a longer one is refused, never truncated. An
+empty text records "no standing instructions", which is different from never
+having written any. The document in force for a turn is the last one at or
+before the turn's acceptance, and the turn records its text (version 17
+below). `GET /v1/instructions` returns it or `null`; `PUT /v1/instructions`
+with `{ "text": ... }` records a new one (201) or refuses an overlong one
+(400).
+
 ## Kernel artifact-read turns
 
 The kernel owns the durable read-only turn state machine. Until the first
@@ -507,7 +522,7 @@ model.output            model
 capability.requested    model
 execution.started       capability
 execution.output        capability
-tool.requested          model
+tool.requested          model (system for a prefetched call, ADR 0041)
 tool.started            capability
 tool.output             capability
 turn.finished           system
@@ -646,6 +661,51 @@ Version 14 ([ADR 0037](../adr/0037-reading-found-pages.md)) lets `web.browse`
 read the pages the turn's earlier searches returned, under one read lease of
 three calls shared with the user's links while a search service is
 configured. No event or payload changes.
+
+Version 15 ([ADR 0038](../adr/0038-ready-calls-run-in-order.md)) runs the
+ready calls of one response one after another in call order, at most four per
+model request.
+
+Version 16 ([ADR 0040](../adr/0040-sort-returns-the-lines-it-sorted.md)) adds
+`lines` to a verified `artifact.sort` result: at most the first eight lines of
+the sorted output, each cut to 120 characters, omitted when empty.
+
+Under the same contract, [ADR 0041](../adr/0041-read-only-prefetch.md) lets
+the turn run a read-only call before the first model request. An attachment's
+first 1,500 bytes ride with the compilation as a `prefetch-attachment` node.
+A granted sort whose permission fixes its arguments is performed at turn
+start ([ADR 0047](../adr/0047-a-sort-permission-states-the-users-choice.md):
+`unique: false` when deduplication is not allowed, `unique: true` when the
+permission's `deduplicate` says the user asked for it). Its `tool.*` events
+carry `origin: "prefetch"` and the `system` actor, and precede the
+`context.compiled` that holds its result as a `prefetch_sort_<seq>` node.
+`tool.requested` omits `origin` when the model asked.
+
+Version 17 ([ADR 0045](../adr/0045-durable-and-ephemeral-ranges.md)) pins
+the profile's standing instructions in force at acceptance after the core
+instructions. `context.compiled` records their text as
+`standing_instructions`, absent when there were none, so a later edit cannot
+change what an old turn was told.
+
+Version 18 ([ADR 0046](../adr/0046-a-skill-is-a-profile-document.md)) offers
+`skill.read` (`{ name }`) whenever the profile carries a skill. A call
+journals the `tool.*` lifecycle; its output is `{ name, body }` or
+`{ error: "unknown_skill" | "invalid_arguments" }` with `is_error` set.
+Replay checks the recorded body against the arguments and the format limits
+without reading the skills directory. The selection's contracts include its
+revision, and the rebuilt selection exposes it as `skill_manifest`.
+
+Version 19 (ADR 0046) leads the request with the skill catalogue, one line
+per skill ordered by name and at most 4,000 characters, and records that text
+in `context.compiled` as `skill_catalogue`, absent for a profile without
+skills.
+
+Version 20 ([ADR 0029](../adr/0029-memory-search-tool.md), Task 038) changes
+how `memory.manage` search matches, which replay recomputes. It keeps single
+Hangul syllables as words, folds the 25 listed Korean particles when two
+characters remain, and weighs a shared word by its rarity among the searched
+memories. It also removes stray spaces from the prefetched sort's note to the
+model. No event or payload shape changes.
 
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished

@@ -1,600 +1,293 @@
 # Verified handoff
 
-Current state only. Per-slice history lives in `tasks/*-evidence.md` and git;
-replace superseded facts instead of appending. Update this file only after code
-and checks establish a new fact.
+Current state only. Per-slice history lives in `tasks/*-evidence.md`, the task
+files and git. Replace superseded facts instead of appending. Update this file
+only after code and checks establish a new fact.
 
 ## Product intent
 
-- On 2026-09-06 the user confirmed a local-first personal general-purpose agent,
-  with Hermes as a positioning reference (not a benchmark). Target problems:
-  process memory, context efficiency, memory and scheduled-job reliability,
-  sustainable self-improvement, task performance and latency. See
-  [product intent](../product.md).
+- On 2026-09-06 the user confirmed the product: a local-first personal
+  general-purpose agent, with Hermes as a positioning reference (not a
+  benchmark). Target problems: process memory, context efficiency, memory and
+  scheduled-job reliability, sustainable self-improvement, task performance and
+  latency. See [product intent](../product.md).
 - Zero cost and zero overhead, including implementation effort and future debt,
   are primary premises. Whether external model/API charges must also be zero is
   an open clarification; no zero-cost or superiority result is claimed.
+- On 2026-09-30 the user redirected the frontier toward a daily-driver
+  assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot.
+  On 2026-11-06 the user asked to finish Ditto quickly so it can replace the
+  current assistant, and for a comparison with Hermes, OpenMausBot and
+  Harness² ([comparison-2026-11](../design/comparison-2026-11.md)). No parity
+  claim is made.
 
-## Repository state
+## Repository state (2026-11-13)
 
-- On 2026-10-01 the user asked for everything to be merged and pushed, and on
-  2026-10-22 merged Task 036 as well. main now holds Tasks 016.1 through 036
-  as one linear commit per slice on top of `58b2b02` (Task 016, PR #21),
-  fast-forwarded from the stacked `dev/task-*` branches, which are deleted
-  locally, and is pushed to `origin`, which keeps only `main` and the tag
-  `archive/codex-scaffold` for the unmerged early scaffold. The
-  [Task 017](tasks/017-evaluation-outcomes.md) draft is part of it.
-- Later on 2026-09-30 the user redirected the frontier to a daily-driver
-  assistant that can stand in for OpenClaw, Hermes, Grok bots, Muse and Dot;
-  [NEXT](NEXT.md) orders the slices. No parity claim is made. Slices 018–023
-  are done. On 2026-10-01 the user approved memory that Ditto manages on its
-  own (Task 024, ADR 0031), reversing ADR 0015's exclusion of model-invoked
-  memory writes, and the recommended journal fix (Task 030).
-- Still on 2026-09-30 the user asked for the thinnest harness designed around
-  concurrency, real-time streaming and context injection timing and scope. The
-  design is [realtime-harness](../design/realtime-harness.md) and ADR 0028.
-  Phases A–D are implemented (Tasks 025–028) and Phase E in part (Task 029:
-  memory search and tool progress; Task 035: one tool lifecycle); parallel
-  read-only calls are deferred.
-- On 2026-09-30 a codebase review found that run context missed paraphrased or
-  inflected questions and admitted unrelated memories, and that replay parsed
-  validator wording. The user prioritized fixing both, trimming process
-  overhead and splitting the turn loop before Task 017's measured runs; Task
-  016.1 addresses the first two.
-- Raw measurement reports are no longer tracked. Tasks 014–016 reports remain
-  retrievable with `git show 58b2b02:docs/agent/tasks/<report>.json`; their
-  evidence files record the digests. The canary rejects tracked
-  `docs/**/*.json` and any tracked file above 1 MiB.
-- On 2026-11-06 the user asked for a comparison with Hermes, OpenMausBot and
-  Harness² and for the improvements to be specified. The mechanism comparison is
-  [design/comparison-2026-11.md](../design/comparison-2026-11.md); Tasks 038,
-  039, 040 and 041 are drafted specs and **no part of them is implemented**.
-  The same day's measured facts: calibration 3 over 130 attempts recorded
-  128/130 verified turns, Recall@5 45/45 clean and 43/45 with 1,000 distractor
-  memories, and `eval/task017/budgets-v1.json` is frozen from it (Task 037).
-- [Task 042](tasks/042-harness-only-self-improvement.md) owns harness-only
-  self-improvement at post-training scale. Implemented so far: only
-  `scripts/probe_variant.py` with `scripts/test-probe-variant.py` (apply a
-  variant, run its cases, compare against a base run, revert byte-exactly). Two
-  candidate variants are written down in `eval/variants/` and **neither has been
-  probed yet**.
-- The eval runner now keeps a store's daemon log under `<out>/failures/` when a
-  store fails, because campaign 1 lost the only log of its own failure.
-- Campaign 1 (130 attempts, 123 verified) is **not a valid readiness run**: an
-  `agent-check.sh` build ran during it, which loaded the CPU that the latency
-  gate measures, and one store's daemon failed to start inside its 60 s window.
-  Its report is kept in scratch as evidence for that diagnosis; the readiness
-  number has to come from a clean run.
-- Campaign 2 (130 attempts) is **also invalid, for a worse reason**: it measured
-  a binary that predated the tree. `capabilities.selected` shows only
-  `web.browse` in every memory attempt, so the model answered "I don't have a
-  memory search available in this session" and Recall@5 collapsed to 0.500 while
-  the answers looked fine. A clean rebuild restored `memory.manage` selection
-  and memory calls in all five attempts of the case. The runner now builds the
-  daemon itself (`--no-build` exists for tests) and exits when the binary's
-  mtime is older than the newest Rust or capability source.
-- Campaign 3 is therefore the first readiness candidate: built by the runner,
-  with `--agent-check-exit 0` and the frozen budget.
-- First harness probes (Task 042) on the memory two-hop case: base 10/10 answers
-  with Recall@5 18/20; the pointer-as-stopping-rule variant 10/10 and 17/20; the
-  retrieval-hint variant 10/10 and 15/20 (safety gate flagged unused body
-  loads). Both are `KEEP_BASE`. The case's answers were never wrong — only its
-  recall — so the family is saturated for wording edits.
-- Case-level gates now need ten repetitions to apply their 0.80/0.90 rate;
-  below that they block only under 0.40 (`case_threshold` in
-  `scripts/eval_task017.py`), because `X1`/`long_use` scored 3/5 and then 5/5 on
-  consecutive runs of the same binary.
-
+- **main** is `756f256` (PR #32), pushed. CI ran `./scripts/agent-check.sh` and
+  the MSRV check green on that commit. origin also keeps the merged branch
+  `dev/task-037-eval-suite`, which has not been deleted, and the tag
+  `archive/codex-scaffold` for the unmerged early scaffold.
+- **Branch `dev/review-fixes-2026-11-13`** carries the fixes from a codebase
+  review on top of main. It is local and not pushed. Its result is in
+  "Review fixes" below.
+- **Tasks 038–041** are specs. Only 038's search half is implemented.
+  - [Task 042](tasks/042-harness-only-self-improvement.md): only
+    `scripts/probe_variant.py` and its tests exist.
+  - [Task 044](tasks/044-platform-surface.md): P1–P3 are done and P4 has its
+    library slice.
+- **Raw measurement reports are not tracked.** The reports of Tasks 014–016
+  remain retrievable with
+  `git show 58b2b02:docs/agent/tasks/<report>.json`, and their evidence files
+  record the digests. The canary rejects tracked `docs/**/*.json` and any
+  tracked file above 1 MiB.
+- **Campaign evidence was lost.** The reports cited for campaigns 15 and 16
+  were written to `~/.hermes/cache/scratch` and were gone on 2026-11-13, and no
+  digest was recorded ([Task 043](tasks/043-requests-per-turn.md),
+  "Evidence"). [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence" now states
+  where a campaign must live before it is cited.
+- `target/` holds 38 GB on a 235 GB SD card that is 77% full. It also holds
+  the `target/task0xx` measurement directories that the earlier evidence names,
+  so it has not been cleaned.
 
 ## Current system
 
-- **Runtime and storage.** Rust daemon (axum, loopback by default) and CLI. The
-  SQLite event spine (schema 7) is append-only by trigger and the sole durable
-  authority; schedule and repeat indexes are projected in the same transaction.
-  Artifacts are SHA-256 content-addressed with verified reads. The context
-  projection (`context-projection.db`, schema 4) is a rebuildable,
-  digest-verified cache replayed once at open, then delta-verified; replay and
-  deltas read only context nodes, through the kind index. Storage work runs on
-  blocking threads: daemon handlers use the blocking pool, and runs, sorts and
-  the scheduler journal from blocking threads. Debug builds reject journal
-  access on threads that drive async tasks.
-- **Ingress.** Typed commands only: record-only input, memory
-  save/list/correct/forget,
-  run/status/cancel, conversation reset and view, and loopback-only sort,
-  schedule and repeat. A run whose text only acknowledges an answer that
-  asked nothing is recorded as `acknowledged` without a turn (ADR 0035). The daemon also serves the embedded web app (ADR 0024)
-  under a same-origin-only content security policy. While bound to loopback,
-  every route refuses requests addressed to a non-loopback host name, which
-  blocks DNS rebinding. `ditto telegram` (ADR 0025) is a CLI client that
-  relays allowed private Telegram chats and delivers scheduled results; run
-  status names the schedule that started a run. The daemon and the offline
-  fixture server share one route table. Clients never
-  choose actors, kinds or internal metadata; the kernel derives all authority,
-  including an attached file's sort permission. SSE subscribes first, replays a
-  bounded high-water snapshot in pages and recovers gaps or lag from storage.
-- **Context.** Explicit memories promote exact same-session user input; a
-  correction supersedes one active memory; listing rechecks source text. Runs
-  compile the verified active session/task snapshot with the complete-set
-  contract (ADR 0021): the whole current set when it fits the budget (default
-  900 estimated tokens, about twelve short memories), otherwise positive
-  lexical overlap without function words. With `memory.manage` agent runs
-  search the memories their compilation saw, including those it left out
-  (ADR 0029), and Ditto remembers, replaces and forgets memories on its own
-  (ADR 0031): each written memory is a node
-  sourced by a session-scoped `memory.written` event, labeled origin `model`,
-  status `inferred`, refused after the turn read a web page or file, for
-  credential-shaped facts and past three writes per turn. There is no
-  transcript injection, cross-session memory or production semantic
-  retrieval.
-  The separate V2 joint working-set query is lexical in production with an
-  injected embedding seam for tests.
-- **Web.** `web.browse` (crate `ditto-web-fetch`, ADR 0036) reads pages
-  linked in the user's own message (ADR 0027: exact-URL leases, public
-  addresses only with pinned connections, manual redirects, size and time
-  bounds, text extraction) and, with `--search-url`, searches on its own
-  through a SearXNG-compatible service (ADR 0033: the endpoint is the only
-  resource a three-call lease allows, credential-shaped queries are refused,
-  at most five bounded results), and reads the pages its searches return
-  (ADR 0037: from each search's output on, its results' exact URLs join the
-  turn's read grant and lease; with a search service three reads per turn
-  are shared by the user's links and found pages). Its schema offers only
-  what the deployment enables; results return as untrusted content and
-  replay uses the journaled ones. The instructions tell the model to work
-  on its own and to hand off only what needs the user, ending its answer
-  with the question.
-- **Capabilities.** Generated package headers keep full manifests out of
-  startup and search; a selected manifest is paged after digest and projection
-  checks. Live invocation uses the closed Invocation Schema Profile V1 through a
-  sealed `LiveExecutionEpoch`; replayable `ExecutionEpochEvidence` carries no
-  authority. `device.process.run` is a discovery-only manifest with no runner.
-- **Policy.** Sealed canonical invocations carry harness-derived effect,
-  resource and placement. One affine ticket per epoch creates one expiring
-  ledger. `artifact.read` and memory searches use static no-approval permits;
-  `artifact.sort`, web reads and web searches each consume one-shot
-  `ExecutionClaim`s under their own exact-resource leases, and memory writes
-  share one three-call lease without resources. The kernel adds exact
-  resources to a registered lease, keeping its budget and expiry, only for
-  the pages a search returned.
-- **Model and turns.** `ditto-model` owns the provider-neutral request/stream
-  contract. `ditto-model-openai` holds two drivers on one request lifecycle:
-  the closed `gpt-5.6` Responses profile (ephemeral storage) and an
-  OpenAI-compatible `/chat/completions` driver for an operator-configured
-  local or hosted server (ADR 0023; HTTPS unless loopback, no redirects,
-  optional key only from `DITTO_MODEL_API_KEY`). Keys are redacted and
-  transport-only. The daemon defaults to a disabled provider. The kernel turn
-  loop compiles context, pages its tools from one table of builtins (an
-  ordinary agent run gets `web.browse` while reading or searching is enabled
-  and `memory.manage`; an attachment adds `artifact.read` and the permitted
-  `artifact.sort`; a legacy artifact turn gets `artifact.read`), runs at most
-  eight model requests, journals versioned transitions before publication and
-  replays without provider, artifact or network I/O. Agent tool calls share
-  one `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
-  There is one turn contract, version 15 (ADR 0034; 0038 runs the ready
-  calls of a response in order): replay rejects turns
-  recorded under any other version, while status and thread history still
-  read their answers.
-  The contract carries typed failure reasons (ADR 0021), the thread's recent
-  exchanges as native messages in a stepped window (ADRs 0022, 0028), the
-  assistant instructions with the local time and the session's runs still in
-  flight as notes in the latest message (ADRs 0026, 0028, 0035), each fact
-  recorded once (text in chunks, each
-  request as its SHA-256, the selection by contract digests; ADRs 0028,
-  0030), and the two agent tools of ADR 0036, with the instruction to work
-  on its own and hand off only what needs the user.
+- **Runtime and storage.**
+  - The Rust daemon (axum, loopback by default) and the CLI.
+  - The SQLite event spine (schema 8) is append-only by trigger and is the sole
+    durable authority. Schedule and repeat indexes are projected in the same
+    transaction. Schema 8 replaced the sort-only partial index with
+    `events_turn_tools`, over `tool.started`/`tool.output`.
+  - Artifacts are SHA-256 content-addressed, with verified reads.
+  - The context projection (`context-projection.db`, schema 4) is a
+    rebuildable, digest-verified cache, replayed once at open and then
+    delta-verified.
+  - Storage work runs on blocking threads, and debug builds reject journal
+    access on threads that drive async tasks.
+- **Profiles.** A daemon serves exactly one profile (ADR 0044).
+  - `default` is the data directory itself; any other name lives under
+    `<data>/profiles/<name>`.
+  - Names are validated (a-z, 0-9, `-`, `_`, at most 32), so `..` is refused by
+    construction.
+  - CLI: `ditto profile list|path`; daemon: `ditto-daemon --profile`
+    (`DITTO_PROFILE`).
+- **Ingress.** Typed commands only:
+  - record-only input;
+  - memory save/list/correct/forget;
+  - run/status/cancel;
+  - conversation reset and view;
+  - the standing instructions (`GET/PUT /v1/instructions`);
+  - loopback-only sort, schedule and repeat.
 
-  A run reuses its session's verified context while no context node
-  has been committed since (sessions with task-scoped or windowed nodes are
-  recompiled), keeps each session's thread between turns, and commits
-  `context.compiled` and `capabilities.selected` with its first model request.
-  Builtin tool contracts are validated once per process. `ditto chat` is an interactive client with `/new` and
-  `/remember`; `ditto new` starts a thread. Answers stay `unverified`; model runs never emit
-  `task.completed`. The loop
-  is split into stage functions (context, capability selection, request
-  dispatch, stream admission, tool execution, finish); cancellation/deadline
-  checkpoint messages are one shared `Checkpoint` table used by runtime and
-  replay; the split itself changed no behavior (485 workspace tests and the five
-  built-CLI scenarios passed before Task 016.1).
-- **Local work and schedules.** The closed `/usr/bin/sort` profile (64 KiB /
-  4,096 lines, five seconds, cleared environment, private scratch,
-  process-group cleanup) has an independent verifier and a sort-specific
-  completion. One-shot schedules (ADR 0019) and finite repeats (ADR 0020) share
-  a bounded index of 100 future intents, one event/timer-driven scheduler,
-  at-most-once claims, visible missed/interrupted states and no automatic
-  retry or housekeeping model call. Four runs and sorts, including scheduled
-  dispatch, are active at once in total, from one session or several
-  (ADR 0035); other immediate requests are rejected as busy and scheduled
-  work waits for a slot.
-- **Measurement.** Task 014 recorded an offline RAM/latency/accounting
-  baseline; Tasks 015–016 recorded five literal synthetic queries at zero and
-  1,000 unrelated memories; corpus schema 3 (Task 016.1) derives expected
-  capsules from the complete-set rule, schema 4 (Task 025) from its
-  version-6 ID-ordered presentation, and schema 5 (Task 027) binds each
-  driver observation to its journaled request digest. None of these measures answer quality,
-  semantic recall at scale, tool-task success, live cost or v0.1 readiness.
+  A run whose text only acknowledges an answer that asked nothing is recorded
+  as `acknowledged`, without a turn (ADR 0035).
 
-## Latest verified slice: the model reads a skill body by name (ADR 0046, Task 044 P3, second half)
+  The daemon also serves the embedded web app (ADR 0024) under a
+  same-origin-only CSP. While it is bound to loopback, every route refuses a
+  non-loopback host name, which blocks DNS rebinding. A non-loopback bind needs
+  `--allow-unauthenticated-remote`, and then no model provider can be enabled.
+  ADR 0045 records why instruction writes follow the memory-write ingress rule
+  on such a bind.
 
-- `skill.read` is a builtin package (`capabilities/core/skill-read`, id
-  `skill.read`, effect: content access, no mutation, local, no resource) and its
-  static no-approval policy (`StaticPolicy::skill_read`) needs no lease: a read
-  of the profile's own document changes nothing.
-- The tool is offered only when the served profile carries at least one skill, so
-  an empty catalogue costs no tool surface, and a malformed skill stops the turn
-  at admission by name rather than hiding behind a shorter catalogue.
-- One call: `{"name": ...}` (the same name rule as the document format, so a path
-  is refused as arguments, not resolved). The result is `{"name", "body"}` or
-  `{"error": "unknown_skill" | "invalid_arguments"}` with `is_error` set; a
-  refusal is a tool result, not a turn failure. Bodies over 64 KiB are refused,
-  never truncated.
-- One wire shape: `SkillResult` serializes to exactly what the model sees, so the
-  journal and the rebuilt conversation cannot disagree. (The first attempt kept
-  two spellings and replay reported `model request digest does not match`.)
-- Replay checks a recorded read against its arguments and the format limits and
-  does not re-read the directory: a body is external mutable state, so the
-  journal is the record of what the document said. `capabilities.selected` now
-  carries `skill_manifest` (payload 18).
-- Tests: kernel lib 46 passed (4 new in `turn::skill`, one of them the catalogue
-  budget), `read_only_turn/skill.rs`
-  3 new integration tests (body arrives only on request; unknown name refused
-  without failing the turn; a profile without skills is not offered the tool),
-  each replayed.
-- The catalogue also leads the request as a pinned segment (one line per skill,
-  ordered by name, after the profile's standing instructions) and that text is
-  recorded in `context.compiled` (`payload 19`), so a skill installed or removed
-  later cannot rewrite what an old turn said. A profile with no skills pays no
-  segment; a turn replayed after its skill was uninstalled still agrees.
-- Evidence so far is the kernel integration suite, which drives a real turn with a
-  scripted model and replays it: a `photo-triage` skill put `skill.read` in the
-  tool list and its line in the prefix, the body arrived only in the request that
-  followed the call, an unknown name came back as a refusal the model could read,
-  and both turns replayed - the first while the skill had already been deleted. A
-  live provider turn is the next campaign's job; none was run for this slice.
+  `ditto telegram` (ADR 0025) relays allowed private chats and delivers
+  scheduled results. Clients never choose actors, kinds or internal metadata.
+  SSE subscribes first, replays a bounded high-water snapshot in pages and
+  recovers gaps from storage.
+- **Context.**
+  - Explicit memories promote exact same-session user input. A correction
+    supersedes one active memory, and listing rechecks source text.
+  - Runs compile the verified active session/task snapshot with the
+    complete-set contract (ADR 0021): the whole current set when it fits the
+    budget (default 900 estimated tokens, about twelve short memories),
+    otherwise positive lexical overlap without function words.
+  - A memory that places an object travels with the memory that names it: the
+    pointer closure, up to two nodes, `policy-required: memory pointer`
+    (ADR 0029).
+  - Ditto remembers, replaces and forgets memories on its own (ADR 0031). They
+    are labeled `model`/`inferred`, are refused after a turn read a web page or
+    file and for credential-shaped facts, and are limited to three writes per
+    turn.
+  - There is no transcript injection, cross-session memory or production
+    semantic retrieval.
+- **Memory search** (`memory.manage` search, ADR 0029).
+  - Search scope: the memories the turn's compilation saw, including those it
+    left out.
+  - Wordings: up to four in one call, unioned and ordered by the best query.
+    At most three searches per turn.
+  - Matching (from turn contract 20): single Hangul syllables are words; a
+    word ending in Hangul also matches through the stem left by the longest of
+    25 listed Korean particles when two characters remain; a shared word weighs
+    `1/n` by how many searched memories contain it.
+  - Limit: the search is lexical, so "pet" does not find "dog", and "키는"
+    does not find "키".
+- **Standing instructions and skills.**
+  - `instructions.recorded` is the profile's one instruction document (at most
+    2,000 characters, superseded by the next). A turn pins the document in
+    force after the core instructions and records its text (ADR 0045).
+  - Skills are `<profile>/skills/<name>/SKILL.md`, with a closed frontmatter
+    (`name`, a one-line `description`) and a body of at most 64 KiB. A document
+    is read once, at most 68 KiB, regular files only.
+  - The catalogue (one line per skill, at most 4,000 characters) leads the
+    request and is recorded in the turn. `skill.read` returns one body on
+    demand (ADR 0046).
+  - A malformed or misnamed skill directory stops the turn at admission by
+    name. Hidden entries and plain files are not skills.
+- **Web.** `web.browse` (crate `ditto-web-fetch`, ADR 0036):
+  - Reads pages linked in the user's message (ADR 0027): exact-URL leases,
+    public addresses only with pinned connections, manual redirects, size and
+    time bounds.
+  - With `--search-url`, searches on its own through a SearXNG-compatible
+    service (ADR 0033).
+  - Reads the pages its searches return (ADR 0037).
+  - With a search service, three reads per turn are shared between the user's
+    links and found pages.
+  - Results return as untrusted content, and replay uses the journaled ones.
+- **Capabilities.**
+  - Generated package headers keep full manifests out of startup and search.
+  - Live invocation uses the closed Invocation Schema Profile V1 through a
+    sealed `LiveExecutionEpoch`.
+  - `capability::install` (ADR 0048) writes a package only at the digest the
+    caller pins. A different digest for an installed id is a conflict, and
+    removal needs the installed digest and a valid id. A headerless package
+    counts as installed. It is a library act with no route yet.
+  - `device.process.run` is a discovery-only manifest with no runner.
+- **Policy.**
+  - Sealed canonical invocations carry harness-derived effect, resource and
+    placement.
+  - `artifact.read`, memory searches and `skill.read` use static no-approval
+    permits.
+  - `artifact.sort`, web reads and web searches each consume one-shot
+    `ExecutionClaim`s under their own exact-resource leases. Memory writes
+    share one three-call lease.
+- **Model and turns.**
+  - `ditto-model` owns the provider-neutral request/stream contract.
+    `ditto-model-openai` holds the closed `gpt-5.6` Responses profile and an
+    OpenAI-compatible `/chat/completions` driver (ADR 0023). The daemon
+    defaults to a disabled provider.
+  - There is one turn contract, **version 20** (ADR 0034). Replay rejects turns
+    recorded under any other version, while status and thread history still
+    read their answers.
+  - A turn compiles context and pages its tools from one table of builtins:
+    - `web.browse` while reading or searching is enabled;
+    - `memory.manage`;
+    - `skill.read` when the profile carries a skill;
+    - `artifact.read`, plus the permitted `artifact.sort`, with an attachment.
+  - It may prefetch an attachment and a sort the permission fixes before the
+    first request (ADRs 0041, 0047).
+  - It runs at most eight model requests and at most four ready calls per
+    response, in order (ADR 0038).
+  - It journals versioned transitions before publication and replays without
+    provider, artifact or network I/O. Agent tool calls share one
+    `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
+  - Answers stay `unverified`, and model runs never emit `task.completed`.
+- **Local work and schedules.**
+  - The closed `/usr/bin/sort` profile (64 KiB / 4,096 lines, five seconds)
+    has an independent verifier.
+  - One-shot schedules (ADR 0019) and finite repeats (ADR 0020) share a
+    bounded index of 100 future intents and one event/timer-driven scheduler,
+    with at-most-once claims and no automatic retry or housekeeping model call.
+  - Four runs and sorts are active at once in total (ADR 0035).
+- **Measurement.**
+  - Task 014 recorded an offline RAM/latency/accounting baseline. Tasks 015–016
+    recorded five literal synthetic queries at zero and 1,000 unrelated
+    memories.
+  - [Task 037](tasks/037-eval-suite-runner.md) froze suite v1 and the
+    `eval_task017.py` runner, with budgets v1–v3 (ADRs 0042, 0043).
 
-## Latest verified slice: a profile carries skills as documents (ADR 0046, Task 044 P3, first half)
+## Measured state
 
-- `crates/profile::skill` owns the format: `<profile>/skills/<name>/SKILL.md` with
-  a closed `---` frontmatter holding `name` and a one-line `description` (1-200
-  characters), then the body (at most 64 KiB). Names are validated (a-z, 0-9, `-`,
-  `_`, at most 64, first character alphanumeric), so `../etc` is refused by name
-  rather than by a path check. A malformed skill is reported with its path and
-  reason, never skipped, and the declared name must match its directory.
-- `ditto skills list|show --profile --data-dir` reads the catalogue on this host
-  without a daemon. Live: a `photo-triage` skill listed as one line plus its
-  description, `show` returned the body, and `show ../etc` exited 1 with
-  `it must start with a lowercase letter or digit`.
-- `DittoKernel::skill_headers()` and `skill_body(name)` answer both questions from
-  the served profile's data root, reading the directory through each call: an
-  installation changes a few times a year, and a cache would only add a way to be
-  stale. A malformed skill makes the catalogue unreadable rather than silently
-  shorter.
-- Tests: `ditto-profile` 10 passed (6 new), `ditto-cli` 12 + 11 passed, kernel
-  `skills` 3 passed.
-- **Not done:** the header is not yet in the request prefix and there is no
-  `skill.read` capability. That is the rest of P3; the format is fixed first
-  because it is what a model-written skill would have to obey.
-- **Design note (ADR 0046):** installing a skill grants no effect, so reading one
-  needs no lease; what a skill does is still whatever capability the model then
-  invokes.
+- **Campaign 16** (contract 19, 130 attempts, 145 turns):
+  - 1.172 requests per turn;
+  - Recall@5 1.000 (90/90);
+  - spend $0.1013, which is $0.00070 per turn;
+  - completion p50 5.4 s, with harness overhead p50 35 ms (0.9% of model
+    time);
+  - every gate passed except `answer`, which waits on the owner's 20% second
+    review.
 
-## Latest verified slice: standing instructions are journaled (ADR 0045, Task 044 P2)
+  Those figures are recorded in
+  [Task 043](tasks/043-requests-per-turn.md), but the report is gone and
+  cannot be re-checked. No campaign has measured contract 20, which changes
+  memory search ranking.
+- **Task 042 probes** on the memory two-hop case: base 10/10 answers with
+  Recall@5 18/20, and both variants were `KEEP_BASE`. That family is saturated
+  for wording edits.
+- **Harness baseline** (2026-09-30, Raspberry Pi 5, release build, instant
+  loopback model, `scripts/measure-harness.py`, before and after ADR 0028):
+  - work before dispatch: 5–10 ms → 1 ms;
+  - journal: 206 or 1,006 events per turn → 8 or 9, and 81–107 → 13.4 or 4.3
+    journal bytes per answer byte;
+  - median prompt prefix reuse: 50.6% → 96.4%;
+  - concurrency: one of three simultaneous sessions accepted → all three, and
+    four runs in one session.
+- **Last browser end-to-end run** (Task 036): 34/34 passed, with RSS 11.6 MB
+  idle and at most 17.2 MB with four runs at once. It has not been re-run since.
 
-- `instructions.recorded` is a durable document: `DittoKernel::set_instructions`
-  journals the text with the event id it supersedes, `instructions_in_force(seq)`
-  reads the last one at or before a sequence. 2000 characters is the limit, and an
-  overlong text is refused by name rather than truncated.
-- The turn pins it after the six core instructions as one segment, recorded in the
-  turn's own `context.compiled` (`standing_instructions`, payload version 17), so
-  replay reproduces the request and a later edit cannot change what an old turn
-  was told. Verified: `instructions::the_standing_instructions_lead_the_request_and_replay_keeps_the_old_text`.
-- Blank instructions pin nothing - an empty profile adds no segment and costs no
-  prefix space.
-- Routes: `GET /v1/instructions` (in force, or `null`), `PUT /v1/instructions`
-  (`{"text": ...}`, 201 with the document, 400 over the limit). CLI:
-  `ditto instructions show|set --text|--file|clear`. Live check against
-  `127.0.0.1:8901`: set returned seq 2, show echoed the text, clear returned
-  `no standing instructions`.
-- Tests: `read_only_turn` 109 passed; daemon `instructions` route test 1 passed.
+## Review fixes (2026-11-13, branch `dev/review-fixes-2026-11-13`)
 
-## Latest verified slice: a profile is a directory (ADR 0044, Task 044 P1)
+A review of main found the problems below, and each commit fixes one of them:
 
-- `crates/profile` owns the boundary: `validate` (a-z, 0-9, `-`, `_`, at most 32
-  characters, first character alphanumeric), `root` (`default` is the data root
-  itself, every other name is `<data>/profiles/<name>`), `list`, `create`.
-- `ditto-daemon --profile <name>` (env `DITTO_PROFILE`) resolves the data root
-  before the kernel is built and logs `serving one profile` with both values.
-  Verified live: `DITTO_PROFILE=minchae DITTO_DATA_DIR=/tmp/dprof2` listened on
-  8899 and wrote to `/tmp/dprof2/profiles/minchae`.
-- `ditto profile list` and `ditto profile path <name>` read the data root on this
-  host (JSON by default, `--human` for a table). `../etc` is refused by the name
-  rule, not by a path check.
-- Isolation is by construction and tested: a file written under one root does not
-  exist under the other (`two_profiles_live_in_two_directories`).
-- Platform design and slice order: [design/platform-surface.md](../design/platform-surface.md).
-  Durable documents, session state and turn state are separated by ADR 0045;
-  verified by construction - the compiler's candidates come only from
-  `context.node.recorded` events, so a tool result cannot enter tomorrow's capsule.
+- **Skills (ADR 0046 amended).**
+  - The problem: a directory under `skills/` whose name the format refuses was
+    silently left out of the catalogue, and each `SKILL.md` was read twice and
+    unbounded.
+  - The fix: it is now reported, hidden entries and files are ignored, and a
+    document is read once, at most 68 KiB, and only if it is a regular file.
+  - Tests: `ditto-profile` 13 passed (3 new).
+- **Pinned install (ADR 0048 amended).**
+  - The problem: `uninstall` joined an unchecked id onto the root and removed
+    it recursively, and a headerless package was overwritten without a
+    conflict and could not be uninstalled.
+  - The fix: an id outside the grammar is `InvalidId`, a directory naming
+    another id is `Mismatched`, and installed state is read the way the
+    catalogue reads it.
+  - Tests: the install tests, 9 passed (3 new).
+- **Turn contract 20 (ADR 0029 amended, Task 038's search half).**
+  - The change: Korean particle folding, single Hangul syllables, rarity
+    ranking, and 24 stray spaces removed from the prefetched sort's note.
+  - The compiler's tokenizer, selection and pointer closure are untouched, and
+    every existing context and kernel test passed without editing an expected
+    value.
+  - Tests: `ditto-context` 62 (4 new); `ditto-kernel` lib 46,
+    `read_only_turn` 116 (1 new, a Korean search that replays),
+    `durable_context_projection` 15, `sort_runs` 5, `user_memory` 8;
+    `test-personal-quality.py` 22 OK.
+- **Documents.** NEXT, the event protocol (versions 15–20,
+  `instructions.recorded`, prefetch origin), the architecture version history,
+  the README (profiles, instructions, skills), the ADR 0041 status, ADR 0045's
+  ingress decision, the Task 044 file and the campaign-evidence rule.
+- **Full gate:** see "Gate on the review branch" below.
 
-## Latest work: Task 038, two hops and a lighter tool call
+## Gate on the review branch
 
-Two changes, both measured on the Task 017 suite.
-
-**A memory that places an object travels with the memory that names it.** The
-capsule was selected by word overlap with the request, so "the saffron tin sits
-above the fridge" shared nothing with "where is my spare key" and was dropped;
-P3 answered "inside the saffron tin" in half its long-use attempts with one
-model call and no search. `ContextCompiler::compile_with_closure` now recompiles
-once in process, marking up to two such nodes `policy-required: memory pointer`
-(ADR 0029). A pointer needs a word that at most two candidate summaries share,
-so a topic word does not drag in unrelated memories. No model call and no new
-receipt reason.
-
-Measured (`probe-closure`, P1-P5, 50 attempts, $0.09): P3 long-use recall
-5/10 -> 9/9, long-use recall over valid attempts 0.889 -> 1.000. Ten attempts
-failed with an empty provider response (one call, no token usage, ~8 s), which
-is upstream and not the change; the ratios above exclude them.
-
-**A sort returns the lines it sorted** (ADR 0040, turn contract 16). Artifact
-turns spent four requests where three carried work: the model read the sorted
-artifact back only because the sort result named a reference. The verified
-result now carries up to eight lines, 120 characters each, and the model
-answers from it.
-
-`read_only_turn` is 103 tests; `ditto-kernel` suite green.
-
-**Campaign 6 recorded the two changes on a bad provider day.** 130 attempts,
-112 observed, 18 lost to empty responses (14%). Semantic passed at recall 1.000
-on both profiles, artifact turns fell from 3.50 to 2.78 model requests, and all
-turns from 2.66 to 2.34. The tool and cost_latency gates failed on the same 18
-attempts (9 artifact attempts never reached a tool call; two genuine misses,
-T3/clean#4 and X4/long_use#5), so readiness is still `fail` pending a repeat on
-a healthy provider. Do not read campaign 6 as a harness regression.
-
-**Campaign 7 lost 28 attempts the same way** (21.5%, same signature: one
-request, no token usage, no failure reason), so the evaluation runner now
-re-asks exactly that signature up to two more times and records
-`transport_retries`. Two campaigns whose loss rate moves from 0 to 14 to 21.5
-percent on identical code measure the provider, not Ditto, and a gate verdict
-must not depend on it.
-
-**Campaign 9 is the readable one.** 129 of 130 observed after the retry, spend
-$0.1826, and seven of eight gates decided: integrity, safety, semantic, tool,
-schedule and resource pass; `answer` needs the second review; `cost_latency`
-fails at p95 29.9 s clean and 45.5 s long_use against the frozen 27.5 s. Input
-tokens per turn fell 4343 -> 3560 and requests 2.66 -> 2.34 since campaign 5,
-while the median turn went 8.1 s -> 13.4 s, so the ceiling is measuring the
-provider's day rather than the harness. Do not widen the ceiling to make the
-gate pass; re-measure it deliberately or run in a faster window.
-
-## State: campaign 12 passes all eight gates
-
-130 of 130 attempts observed under `budgets-v3`; 1.75 model requests per turn
-(prompt 2.06, tool 1.60, mixed 1.45, schedule 1.75), turn p50 4.0 s, $0.1326 for
-the run, daemon admission p95 1.0 ms. The answer gate cleared after the reading
-of 29 rule-flagged items and the agreed 20% second-review sample. Remaining
-distance to the Task 043 bar (1.3 requests per turn) is the memory family at
-1.90 and the tool family at 1.60.
-
-Context for the numbers below, including what each change fixed and what is
-still above one request per turn: [Task 043 outcomes](tasks/043-requests-per-turn.md).
-
-## Latest verified slice: installing a package is pinned (ADR 0048)
-
-`capability::install` is the first P4 act: `install(root, manifest_bytes,
-expected_digest)` writes `capability.toml` verbatim plus the header generated
-from it, and only when the manifest hashes to the digest the caller named.
-Re-installing the same digest is a no-op; a different digest for an installed id
-is `Conflict` and leaves the installed bytes untouched (an upgrade is its own
-review); `uninstall(root, id, expected_digest)` removes only the named digest and
-refuses an id that moved on. Six tests in `crates/capability/src/install.rs`
-cover the negative paths (unpinned digest writes nothing, wrong-digest removal
-keeps the package, conflicting install keeps the old bytes) and one loads the
-installed root through `CapabilityCatalog::load`. Not a daemon route yet - the
-event and lease that would expose it are the rest of P4.
-
-## Latest verified slice: the sort permission states the user's choice (ADR 0047)
-
-`AgentSortPermission` carries `deduplicate` next to `allow_deduplicate`. A
-permission whose owner asked for the deduplicated order (`deduplicate: true`)
-prefetches `unique: true` before the first model request; one that only permits
-either order prefetches nothing and leaves the choice to the model; one that
-forbids deduplication prefetches `unique: false` as before. `deduplicate`
-without `allow_deduplicate` is rejected at admission, `SortGrant` carries the
-choice into replay, and `permission_matches` compares it so a retry that changes
-the choice conflicts instead of reusing the stored artifact. The user message
-also reports `already_ran`, `calls_used: 1` and the context node id when the turn
-already ran the sort, so a model does not spend a request rediscovering a spent
-lease.
-
-Why: the campaign's requests above one per turn sat in three groups - memory
-verification (21 turns), sorts whose permission allowed deduplication (19 turns),
-and one attachment read. The sorted group's messages say "remove duplicates",
-"drop repeated tags", "drop repeats": the harness was declining to act on what
-the user had written. This is a permission field, not intent inference - the
-client reads the message and sets the flag, and the suite declares
-`deduplicate_requested` per case.
-
-Evidence: `crates/kernel/tests/read_only_turn/model_sort.rs`
-(`a_permission_that_asks_for_deduplication_runs_the_sort_before_the_model` - one
-model request, `a\nb\n` verified from `b\na\nb`, the permission blob naming the
-node; `a_permission_that_only_allows_deduplication_leaves_the_choice_to_the_model`
-- two requests, unchanged behavior). `read_only_turn` 115 passed,
-`./scripts/agent-check.sh` exit 0.
-
-Campaign 16 (full 130 attempts, release daemon, `--agent-check-exit 0`, budgets-v3):
-**145 turns / 170 requests = 1.172 requests per turn** - memory 1.40, mixed 1.12,
-schedule 1.00, tool 1.00. Recall@5 1.000 (90/90), spend $0.1013 ($0.00070 per turn),
-2,220 tokens per turn, completion p50 5.4s, first useful progress p50 5.3s against
-a 5.5s model time (harness overhead p50 35ms, 0.9% of model time), zero
-independent-verification failures. Every gate passes except `answer`, which waits
-on the second-review sample; the 110 graded answers needed 26 rule-based misses
-adjudicated by reading (P5 abstentions, T2/T4 reporting that deduplication was not
-permitted, P3/P2 paraphrase).
-
-Measured on T1, T3, X3, X1 (30 attempts, release daemon, `--agent-check-exit 0`):
-35 requests = 1.17 per attempt, recall 20/20. T1 [1,1,1,1,1], T3 [1,1,1,1,1],
-X3/clean [1,1,1,1,1], X3/long_use [1,1,1,1,1], X1/clean [1,1,1,1,1]; X1/long_use
-stays [2,2,2,2,2] because that case's memory question is a separate lookup, not a
-sort. Campaign 15 before this slice: 145 turns / 192 requests = 1.324 requests per
-turn, recall 1.000, every decided gate passing except `answer`, which waits on
-the 22-item second-review sample. This slice removes 19 requests from that
-campaign's shape, which projects to 1.19.
-
-## Latest verified slice: one memory search carries every wording (ADR 0029)
-
-`memory.manage` search takes `queries` - up to four wordings for the same fact,
-unioned by memory and ordered by the best query - and the standing instructions
-say to put every wording able to name the fact in that one call. The singular
-`query` still parses, so journals written before the plural form replay
-unchanged, and `MAX_MEMORY_SEARCHES = 3` stays as the backstop. The capability
-is 0.2.0 and its generated header is regenerated in the same commit; a stale
-header fails the turn with `protocol`, which is how the first run of the tests
-found it.
-
-Why: recall is lexical, and the P2 request (`Where should I go for the reading
-group get-together?`) shares no word with its memory (`Our book club now gathers
-in Birch Room`). With one search per turn the model could not reach it (long_use
-recall 0.800, 45-attempt probe), and with free rephrasing it spent 5 requests.
-Carrying the wordings in one call measured 1.69 requests per attempt with recall
-0.967 on P1, P2, P5, X1 and T1; P2/long_use went 5 -> 2 and P5 4 -> 2.
-
-Evidence: `crates/kernel/tests/read_only_turn/memory.rs`
-(`several_wordings_in_one_search_find_a_fact_no_single_wording_would` drives a
-real turn: two requests only, the second wording reaches the fact). Campaign 14
-before the change: 130/130, 1.65 requests per turn (memory 2.06, tool 1.55,
-mixed 1.12, schedule 1.75), integrity now passes because the run carried
-`--agent-check-exit 0`; its `tool` gate failed on X3 0.000 with `Network is
-unreachable` in the same log, and `cost_latency` stayed blocked for the
-`mixed`/`clean` aggregate missing token counts. The schedule family's 1.75 is a
-metric artifact: S2 and S4 attempts each cover several occurrences, which count
-as one attempt.
-
-## Latest verified slice: admission is the daemon's span (ADR 0043)
-
-`budgets-v3` gates `daemon_admission_ms` (journal: claimed occurrence to admitted
-turn, 0-1 ms measured) and keeps the client's command round trip as a recorded
-number, because that round trip is the store's fsync tail on this host (p50 0.74 ms
-on tmpfs, 2.35 ms on the SD card). No ceiling changed; a manifest check refuses a
-v3 file that relaxes admission. `scripts/test-eval-task017.py` covers it with 41
-tests.
-
-## Latest verified slice: Task 017, the cost_latency split (ADR 0042)
-
-`budgets-v2.json` (schema version 2) gates the `cost_latency` family on
-`harness_ms` - the turn's completion less the sum of its model request spans,
-recorded in the existing `resources.ditto_overhead_ms` field - together with the
-model round trips and the input tokens, while the absolute turn time and the
-provider's own span are recorded with a same-day baseline and do not gate.
-`budgets-v1.json` keeps its meaning and stays readable; every ceiling in v2
-equals its v1 value, so nothing was loosened. `scripts/test-eval-task017.py`
-covers the split (35 tests). Not yet exercised by a full campaign: the next run
-is the first that grades under v2.
-
-The granted `artifact.sort` now runs at the start of the turn (ADR 0041
-amendment): it is performed from the grant's own arguments when the grant does
-not allow deduplication, its output enters the compilation in canonical receipt
-order, and the tool events that produce it are journaled before that compilation
-so replay derives the same context. The accepted consequences are that a
-cancelled turn may already carry a published sort, and that the model cannot
-re-sort because the one-shot lease is spent. Three `model_sort` tests were
-rewritten to that contract; the cancellation test now asserts the race-free
-invariants (no published output, at most one recorded call, at most one model
-request) instead of a fixed event count.
-
-## Latest work: Task 042, a harness-side search budget
-
-- A turn makes at most three `memory.search` calls; a fourth returns
-  `limit_reached` without searching ([ADR 0029](../adr/0029-memory-search-tool.md)).
-  The tool stays on the surface, so the prompt prefix and the stable-surface
-  invariant are unchanged, and replay recomputes both the search and the
-  refusal. The turn-scoped counter lives in `TurnScope.memory_searches`, and
-  `tool_replay` carries `memory_search_count` so journals recorded before the
-  budget still replay.
-- Why: one `P2`/`long_use` turn in campaign 4 spent seven reworded searches
-  (`reading group`, `book club`, `Birch Room`, `get-together venue`, `party
-  venue pub restaurant`, `reading`, `gathering place meeting`) after it had
-  already read the fact, and failed `bound_exceeded` with no answer.
-- Measured against the alternative: prompt edits asking the model to stop cut
-  that loop but also stopped a legitimate pointer hop (`P3` recall 17/20 to
-  15/20), and a pointer-aware wording raised requests from 5.2 to 6.2. Two
-  searches lost a fact a third query would have found (recall 5/5 to 4/5);
-  three restored it at 4.8 requests and a 10.7 s median against 5.2 and 11.4 s.
-  Five attempts per profile, so this is recorded as a bound, not a gain; the
-  loop did not reproduce in any later round.
-- Kernel tests: 101 in `read_only_turn`, `agent-check.sh` exit 0.
-
-## Latest verified slice: Task 036
-
-- [Contract and evidence](tasks/036-reading-found-pages.md) (ADR 0037), turn
-  contract 14. `web.browse` reads the pages the turn's searches returned as
-  well as the user's links, under one read lease whose exact resources grow
-  with each search's results; no event or payload changes.
-- Its gate passed on its final code (595 Rust tests; only documents changed
-  afterwards, and the canary passed again); the browser end-to-end check
-  passed 34 of 34, and resident memory stayed at 11.6 MB idle and at most
-  17.2 MB with four runs at once.
-
-## Previous slice: Task 035
-
-- [Contract and evidence](tasks/035-two-agent-tools.md) (ADR 0036): two
-  agent tools, `memory.manage` and `web.browse`, on one `tool.*` lifecycle;
-  a minimal request shrank from 4,538 to 3,571 bytes. Its gate passed on its
-  final tree (592 Rust tests).
+Not yet run.
 
 ## Known gaps
 
-- Measured harness baseline (2026-09-30, Raspberry Pi 5, release build,
-  instant loopback model, `scripts/measure-harness.py`):
-  - 5–10 ms of work before dispatch (1 ms after Task 026);
-  - 74–80 µs (55–60 µs after Task 026) and one SQLite transaction per
-    streamed delta, 206 or 1,006 events per turn, 81–107 journal bytes per
-    answer byte (after Task 027: 8 or 9 events and 16.3 or 4.9 bytes; after
-    Task 030: 13.4 or 4.3 bytes, the tools of Task 029 included);
-  - median prompt prefix reuse between turns of 50.6 % (96.4 % after
-    Task 025);
-  - one of three simultaneous sessions accepted, the others HTTP 429 (all
-    three after Task 028, and four runs in one session after Task 034).
-
-  ADR 0028's phases target each of these.
-
 - After a reload the web app restores only finished exchanges of the current
-  thread, in the order they finished: failed or cancelled turns,
-  acknowledgments and the lines said before a tool call are not restored,
-  and a run still in flight at load appears when it finishes. Phone access to the web app still
-  needs an authenticated gateway; Telegram is the phone path for now.
-- The Telegram gateway keeps pending replies in memory: a gateway restart
-  during an answer loses that reply unless Telegram redelivers the update.
-  Only text messages are handled. A fifth message while four answers run
-  waits up to three minutes for a slot.
-- Acknowledgments are a closed list checked against the last line of the
-  latest answer: an offer phrased without a question mark followed by "ok"
-  is taken as an acknowledgment, which the instructions avoid by asking the
-  model to end hand-offs with a question.
-- `web.browse` decodes pages as UTF-8 and runs no JavaScript, so pages in
-  legacy charsets or rendered by scripts yield garbled or little text.
-- Web search needs a SearXNG-compatible service the operator runs or trusts;
-  that service sees each query. Ditto reads at most three pages per answer,
-  from the user's links and its searches' results; links inside a read page
-  are not followed. A page that injects instructions could steer a later
-  query and choose which returned result Ditto opens, a narrow channel ADR
-  0037 accepts.
-
+  thread. Phone access to the web app still needs an authenticated gateway, so
+  Telegram is the phone path for now.
+- The Telegram gateway keeps pending replies in memory, and handles only text
+  messages. A fifth message while four answers run waits up to three minutes.
+- Acknowledgments are a closed list checked against the last line of the latest
+  answer. An offer phrased without a question mark, followed by "ok", is taken
+  as an acknowledgment.
+- `web.browse` decodes pages as UTF-8 and runs no JavaScript. A page that
+  injects instructions could steer a later query and choose which returned
+  result Ditto opens, a narrow channel that ADR 0037 accepts.
 - Answer quality and tool-use reliability with local or hosted
-  OpenAI-compatible models are unmeasured; tools need a model with function
-  calling.
-
-- Sessions whose current memories exceed the context budget fall back to
-  lexical overlap, so a pure paraphrase can miss. The model can now search the
-  left-out memories in its own words (Task 029), but that search is lexical
-  too and runs only when the model chooses. Semantic retrieval (deferred) or a
-  larger budget (a cost decision for the user) would close it.
-- Memories Ditto infers can be wrong, and its credential check is a
-  heuristic. Writes are refused after a web page or file is read in the same
-  turn, but injected text that reached Ditto's own earlier answers in the
-  thread is not caught. Forgetting removes a memory from use and view, not
-  from the append-only journal. The web app's notice of a write shows only
-  live; after a reload the memory list still marks Ditto's memories.
-- The scheduler sleeps on a monotonic timer and has no resume wake-up, so a
-  suspended laptop may delay or miss a start window. Not reproduced.
+  OpenAI-compatible models are unmeasured.
+- Memory recall is lexical on both paths. Past the context budget, a pure
+  paraphrase is reached only if the model searches with matching words. Korean
+  folding stops at one-syllable stems. P1 and P2 still pay one search for a
+  fact the capsule left out; closing that needs a retrieval bridge (Task 043).
+- The evaluation runner does not report requests per turn, and schedule-gate
+  aggregation counts attempts rather than turns (Task 043).
+- Memories Ditto infers can be wrong, and its credential check is a heuristic.
+  Forgetting removes a memory from use and view, not from the append-only
+  journal.
+- The scheduler sleeps on a monotonic timer and has no resume wake-up.
+- `skill.read` has run only against the scripted-model integration suite, with
+  no live provider turn.
 
 ## Intentionally deferred
 
@@ -602,44 +295,42 @@ request) instead of a fixed event count.
   profiles.
 - Native non-OpenAI wire formats, reasoning replay, remote cancel and explicit
   prompt-cache breakpoints.
-- Additional capability derivers, durable/cross-process authorization, approval
-  fulfillment and the capability worker protocol.
+- Additional capability derivers, durable/cross-process authorization,
+  approval fulfillment and the capability worker protocol; the install route,
+  its event and lease, and the effect review (Task 044 P4).
 - Device registry, general process profiles, SSH transport and secrets.
 - A production embedding worker/provider and persisted embedding cache.
-- Additional completion verifiers and the improvement compiler.
+- Additional completion verifiers and the improvement compiler (Task 039).
 - Authenticated remote gateway (phone or remote access to the web app).
 
 ## Known engineering debt
 
-- Artifact-root authorization pages through session history and range reads
-  verify the whole object; measure before adding indexes or caches.
-- Memory listing materializes the bounded active snapshot before paging; its
-  10,000-candidate and byte limits include other active session context.
-- The run slot holds a `std::sync::Mutex` across storage writes, now on
-  blocking threads, and one connection lock serializes every journal read and
-  write; measure with Phase D's parallel sessions before adding a writer
-  thread or reader pool.
-- Context graph edges are validated but unused in ranking.
-- The context-projection authority workflow is one large module; split it
-  without weakening its single-gate, single-rebuild or atomic-checkpoint
-  semantics.
-- Three lexical tokenizers differ (context V1, capability search, retrieval
-  V2); the memory search reuses context V1.
-- Each builtin tool keeps its own journal events, run path and replay checks;
-  ADR 0028 defers one shared lifecycle until another effectful tool is added.
-- Journal bytes per answer byte are 13.4 (200-delta answer) and 4.3
-  (1,000-delta answer) with twelve memories, against ADR 0028's target of 3.
-  The largest remaining terms are `context.compiled`, which records each
-  included memory in full (about 480 bytes each) although its own
-  `context.node.recorded` event holds it, and `turn.finished`, which repeats
-  the answer text so status and thread history read it without reassembling
-  chunks.
-- Headerless capability packages still pay one bounded startup body read.
-- The injected embedding interface is synchronous and may make up to 513
-  serial calls; a production worker needs rerank pools, batching and caching.
-- Legacy excluded-context receipts have no independent encoded payload ceiling;
-  add one before accepting them as a new durable wire input.
-- Generic model-task completion admission is a high-water check followed by
-  append, not an atomic verifier/admission transaction.
-- The only process profile is bounded sort; broader programs, host-crash
-  containment and new verifiers need separate contracts.
+- **Large units.**
+  - `turn::replay` holds one function of about 900 lines (`replay`).
+  - `crates/context/src/lib.rs` is 5,300 lines, half of them tests.
+  - The context-projection authority workflow is one large module.
+
+  Split any of them without weakening their single-gate and replay semantics.
+- **Shared lifecycle, separate paths.** Agent tools share the `tool.*`
+  lifecycle, but each keeps its own run path and replay checks, and the legacy
+  `artifact.read` turn still journals `capability.requested`/`execution.*`.
+- **Three lexical tokenizers** differ: context V1, capability search and
+  retrieval V2. The memory search has its own search-word rules on top of
+  context V1.
+- **Journal size.** Journal bytes per answer byte are 13.4 (200-delta answer)
+  and 4.3 (1,000-delta answer), against ADR 0028's target of 3.
+  `context.compiled` records each included memory in full.
+- **Artifact and memory paging.**
+  - Artifact-root authorization pages through session history, and range reads
+    verify the whole object.
+  - Memory listing materializes the bounded active snapshot before paging.
+- **Locking.** The run slot holds a `std::sync::Mutex` across storage writes,
+  and one connection lock serializes every journal read and write.
+- **Small items.**
+  - Headerless capability packages still pay one bounded startup body read.
+  - The injected embedding interface is synchronous and may make up to 513
+    serial calls.
+  - Legacy excluded-context receipts have no independent encoded payload
+    ceiling.
+  - Generic model-task completion admission is a high-water check followed by
+    an append, not one atomic transaction.

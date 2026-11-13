@@ -3,87 +3,77 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
+Checked against the code on 2026-11-13: main `756f256` plus branch
+`dev/review-fixes-2026-11-13` (turn contract 20; see
+[HANDOFF](HANDOFF.md)).
+
 ## Active
 
-On 2026-10-01 the user chose the next two slices: the recommended journal fix,
-and memory that Ditto manages on its own, which reverses ADR 0015's exclusion
-of model tool invocation for memory writes. In this order:
+1. **Measure contract 20 and close the `answer` gate.** This is a
+   [Task 017](tasks/017-evaluation-outcomes.md) campaign 17 over suite v1, under
+   `budgets-v3`, with `--agent-check-exit 0`. Three things make it necessary:
+   - campaign 16's files are gone ([Task 043](tasks/043-requests-per-turn.md),
+     "Evidence");
+   - contract 20 changes how memory search ranks;
+   - the `answer` gate needs the owner's 20% second review on a campaign whose
+     files still exist.
 
-1. [030](tasks/030-selection-by-reference.md) Capability selection recorded
-   by reference, turn payload version 9 - complete (`capabilities.selected`
-   4,910 → 952 bytes; a short agent turn journals 4,879 bytes instead of
-   8,837).
-2. [024](tasks/024-model-managed-memory.md) Model-managed memory, turn
-   payload version 10 - complete (Ditto remembers, replaces and forgets
-   memories on its own, labeled as its inference, refused after reading a
-   page or file; ADR 0031).
+   Store the run as [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
+   requires. It is a paid run (campaign 16 spent $0.1013), so it starts when the
+   owner says so.
+2. [038](tasks/038-korean-and-ranked-memory-search.md) Korean memory search.
+   The search half is implemented in turn contract 20. What remains is
+   `eval/task017/suite-v2.json` (P6, P7, X5, P8), its paid calibration, Korean
+   Recall@5 ≥ 0.90 over 80 attempts, and the correction record (`ditto memory
+   history`, `restore`, `until`).
+3. [039](tasks/039-improvement-compiler-first-slice.md) The improvement
+   compiler's first evidence-gated slice. Spec only.
+4. [041](tasks/041-hermes-baseline.md) A measured Hermes baseline on the same
+   memory workload. Spec only.
+5. [040](tasks/040-durable-work-items.md) A durable work item for a long
+   delegated task. After the first release, ADR first.
 
-The user then chose memory management first:
+Items 2–5 keep the order recorded with the
+[comparison](../design/comparison-2026-11.md) on 2026-11-06.
 
-3. [031](tasks/031-forget-memory.md) Forgetting a memory directly from the
-   web memory list, the CLI or Telegram - complete (ADR 0032).
+## Parallel tracks
 
-The user then asked for consent to be a hand-off and for Ditto to work on its
-own ("알아서 잘 딱"):
+Each has its own task file and open exit criteria:
 
-4. [032](tasks/032-web-search.md) Web search on its own through a configured
-   SearXNG-compatible service, turn payload version 11 - complete (ADR 0033;
-   no per-query approval, consent handed off in the answer).
-
-The user then asked for the code to be consolidated and as light and thin as
-possible, then for chat to be a bridge to concurrent work, and for the
-assistant to message by state and spend nothing on acknowledgments:
-
-5. [033](tasks/033-one-turn-contract.md) One turn contract until the first
-   release - complete (ADR 0034).
-6. [034](tasks/034-chat-as-a-bridge.md) The chat as a bridge, turn contract
-   12 - complete (ADR 0035; four answers at once even in one session, each
-   run aware of the session's work in flight, the line before a tool call as
-   its own message, and a 👍 instead of a model call for an acknowledgment).
-7. [035](tasks/035-two-agent-tools.md) Two agent tools and one tool
-   lifecycle, turn contract 13 - complete (ADR 0036; `memory.manage` and
-   `web.browse` replace five tools, every agent tool call journals
-   `tool.*`, a minimal request 4,538 → 3,571 bytes).
-
-The user then asked to carry on with the remaining work ("마저 작업 ㄱㄱ"):
-
-8. [036](tasks/036-reading-found-pages.md) Reading the pages a search found,
-   turn contract 14 - complete (ADR 0037; a search's result pages join the
-   turn's read grant, three reads shared with the user's links).
-
-The thin-harness phases of ADR 0028 (Tasks 025–029, with Task 035's tool
-lifecycle) are complete except the parts deferred there: parallel read-only
-calls and the journal target of three bytes per answer byte.
-
-Still open from the earlier frontier:
-
-- The drafted [Task 017](tasks/017-evaluation-outcomes.md) evaluation remains
-  the measurement gate before any claim of parity with other assistants.
-
-## Comparison frontier (2026-11-06)
-
-The user asked to compare Ditto with Hermes, OpenMausBot and Harness² and to
-specify the improvements. The mechanism-by-mechanism result is
-[comparison-2026-11.md](../design/comparison-2026-11.md). In order:
-
-1. [038](tasks/038-korean-and-ranked-memory-search.md) Memory search that
-   matches Korean and ranks rare words, plus a reviewable correction record -
-   next, because the user writes Korean and a particle currently breaks the
-   match; measurable on a frozen suite v2.
-2. [039](tasks/039-improvement-compiler-first-slice.md) The improvement
-   compiler's first evidence-gated slice - the designed loop that does not exist,
-   and the one place another project has measured evidence for (+11.5 points
-   from one step; -10 when the edit has no execution evidence).
-3. [041](tasks/041-hermes-baseline.md) A measured Hermes baseline on the same
-   memory workload - the goal is replacement, and every Ditto number is still
-   absolute.
-4. [040](tasks/040-durable-work-items.md) A durable work item for a long
-   delegated task - after the first release, ADR first.
+- [044](tasks/044-platform-surface.md) The platform surface. P1 profiles, P2's
+  pinned instructions and P3 skills are done, and P4 has its library slice
+  (pinned install). Open: P2's model-written half, P4's event, lease, route and
+  effect review, P5 provider conformance and P6 the native shell.
+- [042](tasks/042-harness-only-self-improvement.md) Harness-only
+  self-improvement. `scripts/probe_variant.py` exists. The first two probes
+  were `KEEP_BASE`, and the memory two-hop family is saturated for wording
+  edits.
+- [043](tasks/043-second-generation-bar.md) The second-generation bar, and its
+  [outcomes](tasks/043-requests-per-turn.md): 1.172 requests per turn on
+  campaign 16, which can no longer be inspected. Open:
+  - the runner does not report requests per turn;
+  - schedule-gate aggregation counts attempts, not turns;
+  - first useful progress is 5.3 s against a 2 s target;
+  - the retrieval bridge for capsule misses (P1, P2).
+- ADR 0028's deferred parts: parallel read-only calls and the journal target
+  of three bytes per answer byte.
 
 ## Completed
 
 One line per slice; each task file and its evidence hold the details.
 
+- [044](tasks/044-platform-surface.md) P1–P3 and the P4 library slice
+  (ADRs 0044–0046, 0048), turn contracts 17–19.
+- [043](tasks/043-requests-per-turn.md) Requests per turn 1.65 → 1.172 on
+  campaign 16 (ADRs 0029 amendment, 0047). The `answer` gate stayed blocked
+  on review.
+- Between the Task 017 campaigns:
+  - the two-hop pointer closure (ADR 0029);
+  - the sort's result lines (ADR 0040, turn contract 16), which HANDOFF and
+    ADR 0040 filed under "Task 038" before that spec's own work began;
+  - the read-only prefetch (ADR 0041).
+- [037](tasks/037-eval-suite-runner.md) Suite v1, its runner and frozen
+  budgets v1–v3 (ADRs 0038, 0042, 0043; turn contract 15).
 - [036](tasks/036-reading-found-pages.md) Reading the pages a search found,
   turn contract 14 (ADR 0037).
 - [035](tasks/035-two-agent-tools.md) Two agent tools and one tool
@@ -161,6 +151,12 @@ One line per slice; each task file and its evidence hold the details.
   Responses adapter).
 - [001](tasks/001-model-ir.md) Provider-neutral model IR.
 
+## Numbering notes
+
+- Task 043 has two files: the bar ([043-second-generation-bar](tasks/043-second-generation-bar.md))
+  and its outcomes ([043-requests-per-turn](tasks/043-requests-per-turn.md)).
+- ADR number 0039 was never used.
+
 ## Later
 
 - calendar recurrence, notification delivery and scheduled effect grants only
@@ -169,4 +165,4 @@ One line per slice; each task file and its evidence hold the details.
   embedding worker;
 - device registry, SSH placement, and expanded gateway integrations after the
   local workflow is useful;
-- evidence-gated improvement compiler.
+- evidence-gated improvement compiler (Task 039).

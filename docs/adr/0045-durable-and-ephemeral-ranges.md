@@ -55,3 +55,29 @@ Rules that follow, and that a test can check:
 - A turn records the standing instructions it was given inside its own
   `context.compiled` payload, so replay reproduces the request without reading
   the current profile - and an edit to the profile cannot rewrite history.
+
+## Who may change the standing instructions (recorded 2026-11-13)
+
+`PUT /v1/instructions` uses the same ingress rule as the memory writes, not the
+loopback-only rule that the sort and schedule routes follow. That was implicit
+until a codebase review asked about it, so the reasons are written down here:
+
+- **No remote turns today.** A daemon bound to a non-loopback address needs
+  `--allow-unauthenticated-remote` and refuses to enable a model provider.
+  Instructions written there steer no turn on that daemon.
+- **The real exposure is persistence.** Instructions written remotely would
+  steer the turns of the same data directory after it is served again on
+  loopback with a provider. A remotely written memory carries the same
+  persistence.
+- **The two writes differ in weight.** A memory reaches the model as the user's
+  assertion. Instructions reach it as a standing instruction pinned after the
+  core rules.
+- **Sorts and schedules are a different class.** They are local effects and
+  future intents, which is why their routes do not exist on a remote bind.
+
+The decision is to leave the write as it is until authenticated remote ingress
+exists. Changing that path then decides together who may write instructions,
+memories and resets. Gating the instruction write alone now would change a
+public route for no turn that can run. If an operator needs it earlier, the
+narrow change is to serve `PUT /v1/instructions` only on a loopback bind, as
+`schedules::routes(loopback)` does. That would amend this section.
