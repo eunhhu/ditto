@@ -100,6 +100,72 @@ usability problem.
 - **Failure.** If a held-out gate fails, the result is reported, the corpus
   is not changed, and no integration is built on it.
 
+#### Phase 0 v1 result (2026-11-14): failed on false fire
+
+The benchmark ran once, as registered, in a release build on a quiet
+Raspberry Pi 5 (load average 0.8):
+
+- command: `cargo test --release -p ditto-context --test
+  history_cards_phase0 -- --ignored --nocapture`;
+- code: `874b8f4`, plus diagnostics that list the matched words of each
+  false fire;
+- report: `target/task046/phase0-report.json`, SHA-256
+  `b275f83b85d828482a598c384ca3438891a4485ec93906bb2c23973c57152573`;
+- log: `target/task046/phase0.log`, SHA-256
+  `d6f3e0cce209f230005dfdf2d84c91160cdcf2067ffe0be34c8506196048a081`.
+
+The diagnostic rerun reproduced every number.
+
+**Frozen rules** (chosen on the tuning half): idf weighting, age buckets on,
+the user's words only, at least 2 shared words or one word held by at most 3
+exchanges, no minimum score, 5 cards.
+
+**Gates on the held-out half:**
+
+| Gate | Result | Pass |
+| --- | --- | --- |
+| Lexical Recall@5 at least 0.90 | 0.958 (23/24); Recall@3 0.958, MRR 0.917 | yes |
+| False fire on unrelated probes at most 10% | **0.167 (2/12)**; the tuning half was 0/12 | **no** |
+| Selection p95 at most 5 ms at 10,000 exchanges | 0.239 ms (p50 0.006 ms, max 0.78 ms) | yes |
+
+**Reported, not gated:**
+
+- Recall@5 over all needs-history probes was 0.719. Paraphrases scored 0/8,
+  as expected for a lexical selector.
+- The related probes fired 0.875 of the time (7/8). That is the cost term
+  `p`.
+- A firing added about 65 tokens.
+- At 10,000 exchanges the index built in 68.5 ms and added 3.1 MB of
+  resident memory.
+- The one lexical miss was "Which level do I park on at work?". Its only
+  match is the common word "level".
+
+**SQLite FTS5 comparison** (held-out half, 2,000 exchanges, firing on any
+match):
+
+| Tokenizer | Lexical recall | False-fire rate | p95 |
+| --- | --- | --- | --- |
+| unicode61 | 0.958 | 0.83 | 1.03 ms |
+| trigram | 0.958 | 0.42 | 0.87 ms |
+
+FTS5 recalls the same, fires far more often, is slower, and would need a new
+schema. The in-memory index is the better option.
+
+**Why the gate failed.** Both false fires came through the single-rare-word
+path, each on a word that is weak evidence:
+
+- "이메일 초안 좀 써줘…" fired on the one-syllable filler 좀, which matched
+  "엔진 소리가 좀 이상한데".
+- "What's 18 times 24?" fired on the bare number 18, which matched "December
+  18" in the flight target.
+
+**Consequence, as registered.** No integration is built on this corpus, and
+the corpus and rules stay as they are. A v2 needs its own registration and a
+fresh held-out set, because these held-out probes have now been seen. The
+evident v2 change is that a single matched word may fire only when it is
+neither a bare number nor a single syllable. With 12 probes a half, one
+false fire is 8.3 points, so v2 also needs a larger unrelated set.
+
 ### Phase 1 (live, OpenCode Go)
 
 - A suite-v3 history family at 10 repetitions per case, run in four arms:

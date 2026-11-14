@@ -820,12 +820,22 @@ fn phase0_report() {
     let fired_unrelated = cases
         .iter()
         .filter(|case| case.held_out && case.class == Class::Unrelated)
-        .filter(|case| {
-            !index
-                .cards(&case.text, probes.now, &window, &frozen)
-                .is_empty()
+        .filter_map(|case| {
+            let cards = index.cards(&case.text, probes.now, &window, &frozen);
+            (!cards.is_empty()).then(|| {
+                json!({
+                    "probe": case.text,
+                    "cards": cards
+                        .iter()
+                        .map(|card| json!({
+                            "turn_id": card.turn_id,
+                            "matched": card.matched,
+                            "score": card.score,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
         })
-        .map(|case| json!(case.text))
         .collect::<Vec<_>>();
     let report = json!({
         "probes": "eval/history-cards/probes-v1.json",
