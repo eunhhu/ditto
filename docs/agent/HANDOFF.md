@@ -33,6 +33,11 @@ only after code and checks establish a new fact.
     - It amends ADR 0034: one contract until 1.0.
   - Its first learning loop, retrieval keys (Task 045, ADR 0050), is
     implemented. Nothing else in the plan is.
+- On 2026-11-14 the user named sub-context injection, history that left the
+  window, as a secretary agent's biggest usability problem. The user asked
+  for it to be specified now and validated later, when the OpenCode Go quota
+  is available. [History cards](../design/history-cards.md) (Task 046) is
+  that spec. Nothing of it is implemented.
 
 ## Repository state (2026-11-14)
 

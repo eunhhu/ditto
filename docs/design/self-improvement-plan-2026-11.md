@@ -262,6 +262,11 @@ standing instructions.
 
 ### 4. Past conversations, and workspaces
 
+> On 2026-11-14 the owner sharpened this step: related history should be
+> laid out before the model asks, with detail on demand. Its spec is
+> [history-cards](history-cards.md) (Task 046). The search below remains its
+> fallback tier.
+
 - **A history search.** A read-only tool over the journal's finished exchanges,
   lexical, reusing the Korean folding of ADR 0029. It returns short excerpts
   with their turn ids, and replay recomputes it. No summarising model call.

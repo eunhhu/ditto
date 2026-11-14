@@ -18,7 +18,14 @@ unmeasured until a learning-curve profile and a paid run exist.
 
 1. **A credential-free read-only connector** (the files of a granted
    directory), moved up by decision 4. No task file yet.
-2. A search over past conversations, and workspaces. No task file yet.
+2. [046](tasks/046-history-cards.md) **History cards**: related past
+   exchanges laid out before the model asks, with detail on demand. The owner
+   named this (2026-11-14) as a secretary agent's biggest usability problem.
+   It is a spec.
+   - Phase 0 (an offline corpus and retrieval benchmark) needs no provider.
+   - Phase 1 waits until the OpenCode Go quota is available again.
+   - It replaces the plan's "search over past conversations"; workspaces
+     remain a later item.
 3. Forgetting as a policy: usage accounting, expiry, the rest of
    [038](tasks/038-korean-and-ranked-memory-search.md) (history, restore,
    `until`, suite-v2), and erasure (ADR first).
