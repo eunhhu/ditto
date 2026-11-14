@@ -415,19 +415,16 @@ A review of main found the problems below, and each commit fixes one of them:
 
 ## Last full gate
 
-CI ran the same script green on the PR's last commit `3e789fe` and on the
-merge commit `9b4944b`. The local run below is the one with a kept log.
-
-`./scripts/agent-check.sh` **exited 0** on `1652636` (2026-11-13, Raspberry
-Pi 5, 9 min 53 s wall clock). The host load average was about 4–5 from other
-work when it started. The log is kept at
-`target/review-2026-11-13/agent-check.log` (SHA-256
-`2e0bcfd3ba179772e12c6f3b624b1f46b3d3545cf0937c36f0221af146ac3871`).
+`./scripts/agent-check.sh` **exited 0** on `42e1d5d`, the Task 045 commit on
+`dev/task-045-learned-keys`. It ran on 2026-11-14 on the Raspberry Pi 5 and
+took 6 min 35 s of wall clock. The log is kept at
+`target/task045/agent-check.log` (SHA-256
+`4d5ecd7b160928f8043a32f2c2d094e6171a8ed92d2d93652816531b712f4964`).
 
 | Part of the gate | Result |
 | --- | --- |
 | canary, fmt, clippy `-D warnings` | passed |
-| workspace tests | 642 passed, 8 ignored |
+| workspace tests | 653 passed, 8 ignored |
 | built-CLI scenarios | the seven ignored ones, run one by one: 7 passed |
 | `test-personal-baseline.py` | 8 OK |
 | `test-personal-quality.py` | 22 OK |
@@ -436,15 +433,11 @@ work when it started. The log is kept at
 | web renderer checks | 12 cases passed |
 | offline baseline and five-case corpus | passed |
 
-Changes after that commit:
+Only documents changed after that commit; the canary passed on them.
 
-- `90c1b9d` changed only documents. The canary passed on it.
-- The next commit strengthens one install test, so that it also checks that
-  `install` refuses a directory holding another id.
-  - `cargo test -p ditto-capability --lib install`: 10 passed (the 9 install
-    tests plus one catalogue test the filter matches).
-  - clippy on `ditto-capability` passed.
-  - The full gate was not re-run for that test-only change.
+The previous local gate ran on `1652636` (PR #33's branch, 642 workspace
+tests). Its log is `target/review-2026-11-13/agent-check.log`. CI ran the
+gate green on PR #33's last commit and on main `9b4944b`.
 
 Not run in this session:
 

@@ -12,27 +12,19 @@ On 2026-11-14 the owner answered the plan's five decisions
 ([ADR 0049](../adr/0049-learned-behavior-decisions.md)). The owner did not
 separately confirm the order. This list follows
 [the plan](../design/self-improvement-plan-2026-11.md), with decision 4 applied.
+Plan steps 1–3, the first learning loop, are done as
+[Task 045](tasks/045-learned-retrieval-keys.md); see Completed. Its gain is
+unmeasured until a learning-curve profile and a paid run exist.
 
-1. **The first learning loop: retrieval keys learned from the model's own
-   searches.** This covers plan steps 1–3 as one vertical slice:
-   - a detector over events the journal already holds;
-   - a learned layer that holds one kind, the retrieval key;
-   - the compiler using active keys;
-   - a ledger with undo.
-
-   It needs no model call. It is the retrieval bridge
-   [043](tasks/043-requests-per-turn.md) left open, and the retrieval-miss
-   detector of [039](tasks/039-improvement-compiler-first-slice.md). Its task
-   file and ADR come before code.
-2. **A credential-free read-only connector** (the files of a granted
+1. **A credential-free read-only connector** (the files of a granted
    directory), moved up by decision 4. No task file yet.
-3. A search over past conversations, and workspaces. No task file yet.
-4. Forgetting as a policy: usage accounting, expiry, the rest of
+2. A search over past conversations, and workspaces. No task file yet.
+3. Forgetting as a policy: usage accounting, expiry, the rest of
    [038](tasks/038-korean-and-ranked-memory-search.md) (history, restore,
    `until`, suite-v2), and erasure (ADR first).
-5. A glass-box console with the learning ledger, and the "what if" re-run.
+4. A glass-box console with the learning ledger, and the "what if" re-run.
    Until 1.0 the re-run covers only current-contract turns. No task file yet.
-6. The credential boundary (ADR), read-only calendar and mail, then effects
+5. The credential boundary (ADR), read-only calendar and mail, then effects
    with hand-off approval, events that wake, and
    [040](tasks/040-durable-work-items.md).
 
@@ -87,6 +79,9 @@ Tasks 038, 042, 043 and 044 are not listed here. Each has landed slices, but
 its exit criteria are still open, so it appears above under Active or
 Parallel tracks.
 
+- [045](tasks/045-learned-retrieval-keys.md) Retrieval keys learned from the
+  model's own searches, turn contract 21 (ADR 0050, under ADR 0049). It is the
+  first learning loop, and it makes no model call. Its gain is not measured.
 - Between the Task 017 campaigns:
   - the two-hop pointer closure (ADR 0029);
   - the sort's result lines (ADR 0040, turn contract 16), which HANDOFF and

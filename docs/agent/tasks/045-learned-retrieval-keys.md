@@ -1,5 +1,9 @@
 # Task 045: Retrieval keys learned from the model's own searches
 
+**Status: complete on 2026-11-14.** Every exit criterion below passed. The
+full gate exited 0 on `42e1d5d`, and HANDOFF has the counts. Measuring the
+gain on a live provider was never part of this task.
+
 The first learning loop of the
 [self-improvement plan](../../design/self-improvement-plan-2026-11.md) (steps
 1–3 as one vertical slice), under [ADR 0049](../../adr/0049-learned-behavior-decisions.md).

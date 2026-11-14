@@ -11,6 +11,14 @@ recorded in [ADR 0049](../adr/0049-learned-behavior-decisions.md), and the
 order below is the one NEXT now follows. Decision 4 moves a credential-free
 read-only connector up to right after step 3.
 
+Steps 1–3 landed together on 2026-11-14 as
+[Task 045](../agent/tasks/045-learned-retrieval-keys.md)
+([ADR 0050](../adr/0050-learned-retrieval-keys.md)).
+- It has detectors over existing events, a learned layer with one kind (the
+  retrieval key), and the compiler's use of active keys.
+- A ledger with undo makes it inspectable.
+- No learning gain has been measured yet.
+
 ## The north star
 
 The owner restated on 2026-11-13 what Ditto is for:
