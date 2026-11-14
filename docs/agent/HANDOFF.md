@@ -37,7 +37,13 @@ only after code and checks establish a new fact.
   window, as a secretary agent's biggest usability problem. The user asked
   for it to be specified now and validated later, when the OpenCode Go quota
   is available. [History cards](../design/history-cards.md) (Task 046) is
-  that spec. Nothing of it is implemented.
+  that spec.
+  - Its Phase 0 v1 ran on 2026-11-14 and failed the false-fire gate (2/12).
+    The generated background was too uniform to measure firing rates.
+  - Recall (0.958) and latency (0.24 ms p95 at 10,000 exchanges) passed.
+  - The selector `ditto_context::history` and its benchmark exist, but no
+    turn uses them.
+  - Card injection and `history.recall` were not built.
 
 ## Repository state (2026-11-14)
 

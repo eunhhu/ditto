@@ -753,6 +753,28 @@ fn fts5(probes: &Probes, cases: &[Case]) -> Value {
     Value::Object(out)
 }
 
+/// How many distinct search forms the generated background holds, and how
+/// many of them only a few background exchanges hold: the single-rare-word
+/// path can fire on a background exchange only through those.
+fn background_vocabulary(exchanges: &[HistoryExchange]) -> Value {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let background = exchanges
+        .iter()
+        .filter(|exchange| exchange.turn_id.starts_with("background-"))
+        .collect::<Vec<_>>();
+    for exchange in &background {
+        for form in search_form_set(&exchange.user) {
+            *counts.entry(form).or_default() += 1;
+        }
+    }
+    json!({
+        "background_exchanges": background.len(),
+        "distinct_user_forms": counts.len(),
+        "forms_in_at_most_3": counts.values().filter(|count| **count <= 3).count(),
+        "forms_in_at_most_10": counts.values().filter(|count| **count <= 10).count(),
+    })
+}
+
 #[test]
 fn probe_labels_match_their_words() {
     let probes = load();
@@ -851,6 +873,7 @@ fn phase0_report() {
         "gates": gates,
         "latency": latency,
         "fts5": fts5(&probes, &cases),
+        "background_vocabulary": background_vocabulary(&exchanges),
         "build": if cfg!(debug_assertions) { "debug" } else { "release" },
     });
     let text = serde_json::to_string_pretty(&report).unwrap();

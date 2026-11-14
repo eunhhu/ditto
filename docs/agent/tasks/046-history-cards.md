@@ -1,8 +1,12 @@
 # Task 046: History cards — related past exchanges before the model asks
 
-**Status: spec only (2026-11-14).**
-- Phase 0 is offline and can start at any time.
-- Phase 1 needs a live provider and waits on the OpenCode Go quota.
+**Status (2026-11-14):**
+- **Phase 0 v1 ran and failed** its false-fire gate, on a generated background
+  too uniform to measure firing. See "Phase 0 v1 result" below.
+- **What exists.** The selector (`ditto_context::history`) and its benchmark.
+  No turn uses either.
+- **A v2 waits on the owner's choice** of a real conversational background.
+- **Phase 1** needs a live provider and waits on the OpenCode Go quota.
 - The design, the efficiency model and the post-training discussion are in
   [design/history-cards](../../design/history-cards.md).
 
@@ -148,8 +152,9 @@ match):
 | unicode61 | 0.958 | 0.83 | 1.03 ms |
 | trigram | 0.958 | 0.42 | 0.87 ms |
 
-FTS5 recalls the same, fires far more often, is slower, and would need a new
-schema. The in-memory index is the better option.
+FTS5 has no gate here, so its firing rates are not comparable with the
+selector's. The table supports one conclusion: FTS5 brings no recall gain, is
+slower, and would need a new schema. The in-memory index stays.
 
 **Why the gate failed.** Both false fires came through the single-rare-word
 path, each on a word that is weak evidence:
@@ -159,12 +164,38 @@ path, each on a word that is weak evidence:
 - "What's 18 times 24?" fired on the bare number 18, which matched "December
   18" in the flight target.
 
+**The generated background is too uniform to measure firing.** A diagnostic
+added after the run (`background_vocabulary` in the report) counted the
+search forms of the 2,000 background exchanges:
+
+- 237 distinct forms;
+- 24 forms held by at most 10 exchanges;
+- **one** form held by at most 3.
+
+So the single-rare-word path could fire almost only on the 48 planted
+exchanges. In real history, nearly every exchange carries a rare word. That
+makes v1's firing rates floors: 0.167 false fire, 0.875 related fire. It also
+makes v1's lexical recall optimistic, because few background exchanges
+compete for the top five. The latency and memory figures stand.
+
 **Consequence, as registered.** No integration is built on this corpus, and
 the corpus and rules stay as they are. A v2 needs its own registration and a
 fresh held-out set, because these held-out probes have now been seen. The
-evident v2 change is that a single matched word may fire only when it is
-neither a bare number nor a single syllable. With 12 probes a half, one
-false fire is 8.3 points, so v2 also needs a larger unrelated set.
+evident rule change is that a single matched word may fire only when it is
+neither a bare number nor a single syllable. A rule change alone would show
+little on this generator, though.
+
+A v2 needs four things:
+
+- **Real conversational text as background.** The user decides whether that
+  is local history on this host (never committed, aggregates only) or real
+  Ditto use once it exists.
+- **A split by target**, not by probe. In v1, each target's probes sat in
+  both halves.
+- **At least 100 unrelated probes per half,** all messages that start a turn.
+  "ㅇㅋ 고마워" and "Thanks!" never do.
+- **A tuning half that can fail.** v1's tuning half saw 0/12 false fires, so
+  the threshold was never calibrated.
 
 ### Phase 1 (live, OpenCode Go)
 

@@ -1,10 +1,15 @@
 # Related history before the model asks: history cards
 
-Status: **research spec, nothing implemented.** Written 2026-11-14 at the
-owner's request. Phase 0 below needs no provider and can start at any time.
-Phase 1 needs a live provider and waits until the OpenCode Go quota is
-available again. The slice contract is
-[Task 046](../agent/tasks/046-history-cards.md).
+Status: **research spec.** Written 2026-11-14 at the owner's request.
+- **Phase 0 v1 ran the same day.**
+  - Lexical recall (0.958) and latency (0.24 ms p95 at 10,000 exchanges)
+    passed.
+  - The false-fire gate failed (2/12), on a generated background too uniform
+    to measure firing.
+- **What exists.** The selector `ditto_context::history` and its benchmark.
+  No turn uses them, and no card is injected.
+- **The slice contract,** with the full result and what a v2 needs, is
+  [Task 046](../agent/tasks/046-history-cards.md).
 
 ## The problem, in the owner's words
 
