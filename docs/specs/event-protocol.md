@@ -732,8 +732,8 @@ of session-scoped, task-free events correlated to the session and linked by
 
 | Kind | Actor | Causation | Meaning |
 | --- | --- | --- | --- |
-| `improvement.candidate_created` | system | the teaching turn's `turn.finished` | One episode of evidence, or a refused promotion with `blocked` |
-| `improvement.promoted` | system | the teaching or using turn's `turn.finished` | Active until `expires_at`; also a renewal by use |
+| `improvement.candidate_created` | system | the teaching turn's latest event before its terminal | One episode of evidence, or a refused promotion with `blocked` |
+| `improvement.promoted` | system | the teaching or using turn's latest event before its terminal | Active until `expires_at`; also a renewal by use |
 | `improvement.retired` | user | none | The user's undo |
 
 The version-1 payload has these fields:
@@ -748,8 +748,8 @@ The version-1 payload has these fields:
 - `blocked` (candidates);
 - `reason` (retirements).
 
-The detector appends these events after an ordinary agent turn finishes,
-without a model call. A daemon started with `--disable-learning` neither
+The detector appends these events when an ordinary agent turn's answer is
+final, before the turn's `turn.finished`, without a model call. A daemon started with `--disable-learning` neither
 appends them nor uses a key.
 
 `GET /v1/learning?session_id=…` returns `{ session_id, keys }`. Each key has

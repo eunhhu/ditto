@@ -51,9 +51,11 @@ The payload is version 1 and has these fields:
 
 ### The detector
 
-The detector runs after a turn finishes, with no model call. It reads only the
-turn's journaled events and the session's active memories. A turn is evidence
-when all of these hold:
+The detector runs when a turn is about to finish: after its answer is final
+and before its terminal event, so once a client sees the answer, the ledger
+already holds what the turn taught. It makes no model call and reads only the
+turn's journaled events, its final answer and the session's active memories.
+A turn is evidence when all of these hold:
 
 - **It is an ordinary agent run** that finished.
 - **It read nothing external.** It called no tool other than `memory.manage`
@@ -70,7 +72,8 @@ when all of these hold:
   and a key would bring it back more often.
 - **There are words to learn.** These are the request's search words (ADR 0029
   rules) that the target lacks and that at most two active memories contain.
-  They are ranked longest first, then alphabetically, and at most six are kept.
+  They are ranked longest first, then alphabetically, keeping one word per
+  folded form (모임 and 모임은 are one word), and at most six are kept.
 
 ### From candidate to promoted
 
@@ -82,7 +85,8 @@ when all of these hold:
 - **A distinct second episode within 30 days** promotes the key. The words
   become the union of the episodes' words, and the key expires 90 days later.
 - **Breadth check.** A promotion is refused when the key would match more than
-  2 of the session's last 50 finished agent-run requests, evidence excluded.
+  2 of the session's last 50 finished agent-run requests. Requests that are
+  evidence, or that repeat an evidence episode's words, do not count.
   The detector then records a candidate with a `blocked` reason, so the ledger
   shows why.
 - **Renewal by use.** A turn that uses an active key renews it with a new
@@ -130,7 +134,7 @@ decisions, with their evidence turns, for the ledger and for review.
 
 - **Inert when the target goes.** A key whose target is forgotten or
   superseded does nothing, because its target is no longer a candidate. The
-  ledger shows it as retired for that reason. This is derived from journaled
+  ledger shows it as `inert`. This is derived from journaled
   facts, and no event is written.
 - **Expiry.** A key that is not renewed by use expires 90 days after its last
   promotion. A candidate older than 30 days no longer promotes.
@@ -157,6 +161,9 @@ decisions, with their evidence turns, for the ledger and for review.
   which no campaign has measured, so one campaign cannot separate the two.
   Measuring this ADR's gain needs a learning-curve profile that is not built
   yet. Until then the claim is limited to the scripted turn tests.
+- **Korean question words can be learned.** There is no Korean function-word
+  list, so a word like 어디 can become a key word when it is rare among the
+  memories. The two-word rule and the breadth check limit the effect.
 - **A narrow injection channel remains.** A key's words are the user's own.
   Which memory it brings in is chosen by the model's search, in a turn that
   read nothing external. Injected text that reached Ditto's earlier answers is

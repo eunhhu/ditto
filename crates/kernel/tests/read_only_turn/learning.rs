@@ -308,3 +308,38 @@ async fn a_receipt_citing_a_key_the_journal_does_not_back_does_not_replay() {
     retired.insert(position + 1, retirement);
     assert!(replay_artifact_read_turn(&retired, &turn).is_err());
 }
+
+#[tokio::test]
+async fn a_key_whose_memory_is_forgotten_goes_inert() {
+    let fixture = Fixture::new();
+    let kernel = &fixture.kernel;
+    let birch = teach(&fixture).await;
+    kernel
+        .forget_memory(ditto_protocol::ForgetMemoryCommand {
+            session_id: "personal".into(),
+            memory_id: birch.clone(),
+        })
+        .unwrap();
+    let key = ledger(kernel).keys.remove(0);
+    assert_eq!(key.state, LearnedState::Inert, "{key:?}");
+    assert_eq!(key.target_text, None);
+
+    let (_, driver) = ask(
+        kernel,
+        "Is the reading group still meeting tonight?",
+        vec![final_script(&["I don't know where it meets now."])],
+    )
+    .await;
+    assert!(!context_ids(&driver.requests()[0]).contains(&birch));
+    fixture.kernel.shutdown_agent_runs().await.unwrap();
+    let events = fixture.events_for_session("personal");
+    let turn = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == event_kind::TURN_FINISHED)
+        .unwrap()
+        .correlation_id
+        .clone()
+        .unwrap();
+    replay_artifact_read_turn(&events, &turn).unwrap();
+}

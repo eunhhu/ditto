@@ -178,7 +178,9 @@ pub(crate) fn applies(words: &[String], request: &HashSet<String>) -> bool {
     !words.is_empty() && shared_words(words, request) >= words.len().min(2)
 }
 
-/// Longest first, then alphabetical, without duplicates.
+/// Longest first, then alphabetical, keeping one word per folded form: 모임
+/// and 모임은, or get and gets, are one word, so one request word can never
+/// count twice toward the two a key needs.
 fn rank(words: &mut Vec<String>) {
     words.sort_by(|left, right| {
         right
@@ -187,7 +189,18 @@ fn rank(words: &mut Vec<String>) {
             .cmp(&left.chars().count())
             .then_with(|| left.cmp(right))
     });
-    words.dedup();
+    let mut seen: HashSet<String> = HashSet::new();
+    words.retain(|word| {
+        let forms = search_vocabulary(word)
+            .into_iter()
+            .flat_map(|(_, forms)| forms)
+            .collect::<Vec<_>>();
+        if forms.is_empty() || forms.iter().any(|form| seen.contains(form)) {
+            return false;
+        }
+        seen.extend(forms);
+        true
+    });
 }
 
 fn shares(left: &HashSet<String>, right: &HashSet<String>) -> bool {
@@ -384,7 +397,8 @@ pub(crate) struct Found {
 pub(crate) struct Episode {
     pub turn_id: String,
     pub input_event_id: String,
-    pub finished_event_id: String,
+    /// The turn's latest event when it learned: what its events name as cause.
+    pub cause_event_id: String,
     pub request: String,
     pub answer: String,
     /// Memories the compilation left out as irrelevant or over budget.
@@ -396,24 +410,18 @@ pub(crate) struct Episode {
     pub used: Vec<String>,
 }
 
-/// The episode of one turn's events, or `None` when the turn did not finish.
-pub(crate) fn episode(events: &[EventRecord]) -> Option<Episode> {
+/// The episode of a turn about to finish with `answer`, read from the events
+/// it has journaled so far. `None` when they hold no input.
+pub(crate) fn episode(events: &[EventRecord], answer: &str, cause: &str) -> Option<Episode> {
     let input = events
         .iter()
         .find(|event| event.kind == event_kind::INPUT_RECEIVED)?;
-    let finished = events
-        .iter()
-        .find(|event| event.kind == event_kind::TURN_FINISHED)?;
     let mut episode = Episode {
         turn_id: input.correlation_id.clone()?,
         input_event_id: input.event_id.clone(),
-        finished_event_id: finished.event_id.clone(),
+        cause_event_id: cause.to_owned(),
         request: input.payload.get("text")?.as_str()?.to_owned(),
-        answer: finished
-            .payload
-            .pointer("/outcome/response")?
-            .as_str()?
-            .to_owned(),
+        answer: answer.to_owned(),
         ..Episode::default()
     };
     for event in events {
@@ -598,11 +606,7 @@ fn learn(inputs: &Inputs<'_>) -> Option<Proposal> {
         .map(|memory| search_form_set(&memory.summary))
         .collect::<Vec<_>>();
     let vocabulary = search_vocabulary(&episode.request);
-    let request_words = vocabulary
-        .iter()
-        .map(|(word, _)| word.clone())
-        .take(MAX_EPISODE_WORDS)
-        .collect::<Vec<_>>();
+    let request_words = request_words(&episode.request);
     let mut words = vocabulary
         .iter()
         .filter(|(_, forms)| {
@@ -703,14 +707,31 @@ fn learn(inputs: &Inputs<'_>) -> Option<Proposal> {
     })
 }
 
-/// How many recent requests outside the evidence the words would match.
+/// How many recent requests the words would match, outside the evidence. A
+/// re-ask of an evidence episode (the same words) is that episode, not another
+/// request the key would drag the memory into.
 fn breadth(words: &[String], recent: &[(String, String)], evidence: &[Evidence]) -> usize {
     recent
         .iter()
         .take(BREADTH_WINDOW)
-        .filter(|(input, _)| !evidence.iter().any(|item| item.input_event_id == *input))
+        .filter(|(input, text)| {
+            let asked = request_words(text);
+            !evidence
+                .iter()
+                .any(|item| item.input_event_id == *input || item.request_words == asked)
+        })
         .filter(|(_, text)| applies(words, &search_form_set(text)))
         .count()
+}
+
+/// A request's search words in word order: what tells one episode from
+/// another.
+fn request_words(text: &str) -> Vec<String> {
+    search_vocabulary(text)
+        .into_iter()
+        .map(|(word, _)| word)
+        .take(MAX_EPISODE_WORDS)
+        .collect()
 }
 
 impl DittoKernel {
@@ -757,6 +778,8 @@ impl DittoKernel {
         session: &str,
         task: &str,
         turn_id: &str,
+        answer: &str,
+        cause: &str,
     ) -> Result<(), KernelError> {
         if !self.learning_enabled() {
             return Ok(());
@@ -766,7 +789,7 @@ impl DittoKernel {
         };
         let input_seq = input.seq;
         let events = self.turn_events(session, task, input_seq)?;
-        let Some(episode) = episode(&events) else {
+        let Some(episode) = episode(&events, answer, cause) else {
             return Ok(());
         };
         let repaired = episode
@@ -808,7 +831,7 @@ impl DittoKernel {
                 actor: EventActor::System,
                 kind: proposal.kind.to_owned(),
                 payload: serde_json::to_value(&proposal.payload)?,
-                causation_id: Some(episode.finished_event_id.clone()),
+                causation_id: Some(episode.cause_event_id.clone()),
                 correlation_id: Some(session.to_owned()),
                 span_id: None,
             })?;
@@ -816,7 +839,7 @@ impl DittoKernel {
         Ok(())
     }
 
-    /// One turn's events from its input on, until its terminal event.
+    /// One turn's events from its input on, up to its terminal event if any.
     fn turn_events(
         &self,
         session: &str,
@@ -1075,7 +1098,7 @@ mod tests {
         Episode {
             turn_id: turn.into(),
             input_event_id: format!("input-{turn}"),
-            finished_event_id: format!("finished-{turn}"),
+            cause_event_id: format!("cause-{turn}"),
             request: request.into(),
             answer: answer.into(),
             excluded: found.iter().map(|item| item.id.clone()).collect(),
@@ -1130,12 +1153,16 @@ mod tests {
     }
 
     fn chain_of(proposal: &Proposal, id: &str, seq: i64) -> Chain {
+        chain_at(proposal, id, seq, Utc::now())
+    }
+
+    fn chain_at(proposal: &Proposal, id: &str, seq: i64, at: DateTime<Utc>) -> Chain {
         Chain {
             events: vec![KeyEvent {
                 record: EventRecord {
                     seq,
                     event_id: id.into(),
-                    recorded_at: Utc::now(),
+                    recorded_at: at,
                     session_id: Some("personal".into()),
                     task_id: None,
                     actor: EventActor::System,
@@ -1292,5 +1319,186 @@ mod tests {
             &korean,
             &search_form_set("독서모임은 장소가 어디야")
         ));
+    }
+
+    fn birch() -> Vec<Found> {
+        vec![found("birch", "Our book club now gathers in Birch Room")]
+    }
+
+    #[test]
+    fn a_key_keeps_at_most_six_words_and_one_per_folded_form() {
+        let long = episode(
+            "turn-1",
+            "reading group monthly gathering location neighbourhood schedule meetup venue",
+            "Birch Room.",
+            birch(),
+        );
+        let proposal = &proposals(&long, &[], &[])[0];
+        assert_eq!(
+            proposal.payload.words.len(),
+            MAX_KEY_WORDS,
+            "{:?}",
+            proposal.payload.words
+        );
+
+        // 모임 and 모임은, or get and gets, are one word.
+        let mut words = vec![
+            "모임".to_owned(),
+            "모임은".to_owned(),
+            "get".to_owned(),
+            "gets".to_owned(),
+        ];
+        rank(&mut words);
+        // Longest first: "gets" has four characters, "모임은" three.
+        assert_eq!(words, ["gets", "모임은"]);
+        // So one request word cannot meet the two-word rule alone.
+        assert!(!applies(&words, &search_form_set("모임")));
+        assert!(applies(&words, &search_form_set("모임 gets")));
+    }
+
+    #[test]
+    fn re_asking_an_evidence_question_does_not_make_a_key_broad() {
+        let first = episode(
+            "turn-1",
+            "reading group get-together venue",
+            "Birch Room.",
+            birch(),
+        );
+        let candidate = proposals(&first, &[], &[]).remove(0);
+        let chains = [chain_of(&candidate, "candidate-1", 10)];
+        let second = episode(
+            "turn-3",
+            "where does the reading group meet",
+            "Birch Room.",
+            birch(),
+        );
+        // Three re-asks of the first question, under other input ids.
+        let recent = (0..3)
+            .map(|index| {
+                (
+                    format!("again-{index}"),
+                    "reading group get-together venue".to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let promoted = proposals(&second, &chains, &recent).remove(0);
+        assert_eq!(promoted.kind, event_kind::IMPROVEMENT_PROMOTED);
+    }
+
+    #[test]
+    fn a_stale_candidate_starts_over_and_an_expired_key_is_not_active() {
+        let first = episode(
+            "turn-1",
+            "reading group get-together venue",
+            "Birch Room.",
+            birch(),
+        );
+        let candidate = proposals(&first, &[], &[]).remove(0);
+        let old = Utc::now() - Duration::days(PROMOTION_WINDOW_DAYS + 1);
+        let chains = [chain_at(&candidate, "candidate-1", 10, old)];
+        let second = episode(
+            "turn-3",
+            "where does the reading group meet",
+            "Birch Room.",
+            birch(),
+        );
+        let restarted = proposals(&second, &chains, &[]).remove(0);
+        assert_eq!(restarted.kind, event_kind::IMPROVEMENT_CANDIDATE_CREATED);
+        assert_eq!(restarted.payload.supersedes.as_deref(), Some("candidate-1"));
+        assert_eq!(restarted.payload.evidence.len(), 1);
+
+        let mut lapsed = Proposal {
+            kind: event_kind::IMPROVEMENT_PROMOTED,
+            payload: candidate.payload.clone(),
+        };
+        lapsed.payload.expires_at = Some(Utc::now() - Duration::days(1));
+        let expired = [chain_of(&lapsed, "promoted-1", 11)];
+        assert!(active_keys(&expired, Utc::now()).is_empty());
+        lapsed.payload.expires_at = Some(Utc::now() + Duration::days(1));
+        let live = [chain_of(&lapsed, "promoted-2", 12)];
+        assert_eq!(active_keys(&live, Utc::now()).len(), 1);
+    }
+
+    #[test]
+    fn a_used_key_renews_once_a_month() {
+        let mut promoted = Proposal {
+            kind: event_kind::IMPROVEMENT_PROMOTED,
+            payload: payload(
+                "birch",
+                vec!["reading".into(), "group".into()],
+                Vec::new(),
+                None,
+            ),
+        };
+        promoted.payload.expires_at = Some(Utc::now() + Duration::days(40));
+        let mut used = episode("turn-9", "reading group tonight", "Yes.", Vec::new());
+        used.used = vec!["promoted-1".into()];
+
+        let fresh = [chain_of(&promoted, "promoted-1", 20)];
+        assert!(
+            proposals(&used, &fresh, &[]).is_empty(),
+            "renewed less than a month ago"
+        );
+
+        let month = Utc::now() - Duration::days(RENEW_AFTER_DAYS + 1);
+        let old = [chain_at(&promoted, "promoted-1", 20, month)];
+        let [renewal] = &proposals(&used, &old, &[])[..] else {
+            panic!("one renewal");
+        };
+        assert_eq!(renewal.kind, event_kind::IMPROVEMENT_PROMOTED);
+        assert_eq!(renewal.payload.supersedes.as_deref(), Some("promoted-1"));
+        assert!(renewal.payload.expires_at.unwrap() > Utc::now() + Duration::days(80));
+    }
+
+    #[test]
+    fn the_ledger_view_names_every_state() {
+        let now = Utc::now();
+        let memories = HashMap::from([("birch".to_owned(), "Our book club".to_owned())]);
+        let uses = HashMap::new();
+        let state = |kind: &'static str, edit: &dyn Fn(&mut KeyPayload), target: &str| {
+            let mut proposal = Proposal {
+                kind,
+                payload: payload(target, vec!["reading".into()], Vec::new(), None),
+            };
+            edit(&mut proposal.payload);
+            view(&chain_of(&proposal, "key-1", 1), &memories, &uses, now).state
+        };
+        let none = |_: &mut KeyPayload| {};
+        assert_eq!(
+            state(event_kind::IMPROVEMENT_CANDIDATE_CREATED, &none, "birch"),
+            LearnedState::Candidate
+        );
+        assert_eq!(
+            state(
+                event_kind::IMPROVEMENT_CANDIDATE_CREATED,
+                &|p| p.blocked = Some("broad".into()),
+                "birch"
+            ),
+            LearnedState::Blocked
+        );
+        assert_eq!(
+            state(
+                event_kind::IMPROVEMENT_PROMOTED,
+                &|p| p.expires_at = Some(now + Duration::days(1)),
+                "birch"
+            ),
+            LearnedState::Active
+        );
+        assert_eq!(
+            state(
+                event_kind::IMPROVEMENT_PROMOTED,
+                &|p| p.expires_at = Some(now - Duration::days(1)),
+                "birch"
+            ),
+            LearnedState::Expired
+        );
+        assert_eq!(
+            state(event_kind::IMPROVEMENT_PROMOTED, &none, "forgotten"),
+            LearnedState::Inert
+        );
+        assert_eq!(
+            state(event_kind::IMPROVEMENT_RETIRED, &none, "birch"),
+            LearnedState::Retired
+        );
     }
 }

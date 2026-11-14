@@ -39,10 +39,14 @@ only after code and checks establish a new fact.
 - **main** is `9b4944b`: PR #33, the review fixes, merged by the user on
   2026-11-13. CI ran `./scripts/agent-check.sh` and the MSRV check green on
   that commit.
-- **Unmerged branches:** `dev/north-star-learning-plan` holds the plan and
-  ADR 0049, documents only. `dev/task-045-learned-keys` is stacked on it and
-  holds Task 045 (turn contract 21). Both are pushed with no PR yet. The
-  sections below describe the code on `dev/task-045-learned-keys`.
+- **Branches of 2026-11-14:**
+  - `dev/north-star-learning-plan` holds the plan and ADR 0049, and changes
+    documents only.
+  - `dev/task-045-learned-keys` is stacked on it and holds Task 045 (turn
+    contract 21).
+  - Both were pushed that day without a PR. Check `gh pr list` and
+    `git log origin/main` for where they stand.
+  - The sections below describe the code on `dev/task-045-learned-keys`.
 - **origin** also keeps the merged branch `dev/review-fixes-2026-11-13`, which
   has not been deleted, and the tag `archive/codex-scaffold` for the unmerged
   early scaffold. The merged `dev/task-037-eval-suite` was deleted on
@@ -157,7 +161,8 @@ only after code and checks establish a new fact.
     The compiler's own selection keeps exact words.
 - **Learned retrieval keys** (ADR 0050, Task 045). This is the first learning
   loop, and it makes no model call.
-  - **Detector.** After an ordinary agent turn finishes, a deterministic
+  - **Detector.** When an ordinary agent turn's answer is final, before its
+    terminal event, a deterministic
     detector reads the turn's events. It looks for one user-asserted memory
     that the compilation left out, that a `memory.manage` search found, and
     that shares a word with the answer. It ignores any turn that read a page,
@@ -363,17 +368,25 @@ only after code and checks establish a new fact.
   - Web: the "Why?" label.
   - The runner passes `--disable-learning`.
 - **Tests.**
-  - Kernel lib: 52 (6 new detector tests).
-  - `read_only_turn`: 120. Four are new:
+  - Kernel lib: 57 (11 new detector tests: target choice, rare words, the
+    six-word cap and one word per folded form, external and inferred
+    refusals, distinct episodes, the breadth block, re-asks not counted as
+    breadth, lapses, renewal, every ledger state).
+  - `read_only_turn`: 121. Five are new, and they passed 25 runs in a row:
     - two differently worded misses teach a key, and the third turn holds the
       memory in its first request with no search; all four turns replay;
     - an undone key stops applying and is not learned back;
     - a turn that called `web.browse` teaches nothing;
-    - receipts citing a missing, other-session or retired key do not replay.
+    - receipts citing a missing, other-session or retired key do not replay;
+    - a forgotten memory's key goes `inert` and its turn replays.
   - Daemon: 16 plus 8 ignored (1 new route test).
   - `ditto-context` 62, `ditto-event-store` 21, `ditto-cli` 23,
     `test-personal-quality.py` 22, `test-eval-task017.py` 43, web 12.
   - No existing test's expected value was edited.
+  - Live: against a provider-less daemon, `ditto learning list` printed an
+    empty ledger, `retire` of an unknown key exited 1, and a retire carrying
+    an `actor` field got 422. The browser end-to-end run passed 34 of 34
+    (`target/task045/web-e2e.log`).
 - **Not shown.** No live provider turn has used a key, and no campaign has
   measured one.
 
@@ -497,6 +510,11 @@ Not run in this session:
   reproduced.
 - **Evaluation runner.** It does not report requests per turn, and schedule
   gate aggregation counts attempts rather than turns (Task 043).
+- **Learned keys.**
+  - There is no Korean function-word list, so a Korean question word (어디)
+    can become a key word when it is rare among the memories. The two-word
+    rule and the breadth check bound the effect.
+  - The same question asked on two different days counts as one episode.
 - **Skills.** `skill.read` has run only against the scripted-model
   integration suite, with no live provider turn.
 
@@ -551,6 +569,10 @@ Not run in this session:
   caching.
 - **Excluded-context receipts.** Legacy receipts have no independent encoded
   payload ceiling. Add one before accepting them as a new durable wire input.
+- **Learning reads are bounded.** Key chains and use counts read at most
+  10,000 events of each `improvement.*` kind and of `context.compiled`. Past
+  that, later events (a retirement included) are not read. Add a
+  session-scoped index before a profile gets near it.
 - **Completion admission.** Generic model-task completion admission is a
   high-water check followed by an append, not an atomic verifier/admission
   transaction.

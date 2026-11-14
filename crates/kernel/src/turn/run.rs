@@ -1983,6 +1983,19 @@ impl DittoKernel {
             request_count: (request_index + 1) as u8,
             tool_call_count: totals.tool_calls,
         };
+        if run.scope.agent_run {
+            // What the turn taught (ADR 0050), recorded before the turn is
+            // terminal: once a client sees the answer, the ledger already holds
+            // what it taught. A failure here means nothing was learned; the
+            // turn goes on to finish.
+            let _ = self.learn_from_turn(
+                &run.scope.session_id,
+                &run.scope.task_id,
+                &run.scope.turn_id,
+                &outcome.response,
+                &run.cause,
+            );
+        }
         self.append_turn_event(
             run,
             EventActor::System,
@@ -1994,15 +2007,6 @@ impl DittoKernel {
             },
             None,
         )?;
-        if run.scope.agent_run {
-            // What the turn taught (ADR 0050). A failure here means nothing
-            // was learned; the answer is already journaled and stands.
-            let _ = self.learn_from_turn(
-                &run.scope.session_id,
-                &run.scope.task_id,
-                &run.scope.turn_id,
-            );
-        }
         Ok(outcome)
     }
 
