@@ -1,7 +1,8 @@
 # Task 045: Retrieval keys learned from the model's own searches
 
 **Status: complete on 2026-11-14.** Every exit criterion below passed. The
-full gate exited 0 on `42e1d5d`, and HANDOFF has the counts. Measuring the
+full gate exited 0 on `42e1d5d` and again on `97ab79a` after a review fix,
+and HANDOFF has the counts. Measuring the
 gain on a live provider was never part of this task.
 
 The first learning loop of the
