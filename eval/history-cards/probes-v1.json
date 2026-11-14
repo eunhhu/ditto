@@ -59,7 +59,7 @@
         {"class": "needs", "kind": "lexical", "text": "내가 무슨 알레르기 있다고 했지?"},
         {"class": "needs", "kind": "lexical", "text": "복숭아 들어간 디저트 먹어도 되나?"},
         {"class": "needs", "kind": "lexical", "text": "알레르기 때문에 피해야 하는 과일이 뭐였지"},
-        {"class": "needs", "kind": "paraphrase", "text": "나 못 먹는 과일 있었던 것 같은데 뭐였더라"},
+        {"class": "needs", "kind": "paraphrase", "text": "못 먹는 과일 있었던 것 같은데 뭐였더라"},
         {"class": "related", "text": "알레르기 약 먹으면 졸려?"}
       ]
     },
@@ -209,7 +209,7 @@
         {"class": "needs", "kind": "lexical", "text": "What's grandma's secret for kimchi stew?"},
         {"class": "needs", "kind": "lexical", "text": "What sauce goes in at the end of the stew?"},
         {"class": "needs", "kind": "lexical", "text": "Anchovy sauce, how much did grandma use?"},
-        {"class": "needs", "kind": "paraphrase", "text": "What did my granny add to make her soup taste so good?"},
+        {"class": "needs", "kind": "paraphrase", "text": "What did my granny put in to make her soup taste so good?"},
         {"class": "related", "text": "How long does kimchi last in the fridge?"}
       ]
     },

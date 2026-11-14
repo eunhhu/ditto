@@ -3,6 +3,8 @@ use std::{
     fmt,
 };
 
+pub mod history;
+
 use chrono::{DateTime, Utc};
 use ditto_retrieval::{
     CandidateCount, ContextResultLimit, EmbeddingProvider, RetrievalMode, RetrievalWorkBudget,
