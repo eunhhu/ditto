@@ -443,6 +443,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "ditto-retrieval",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",

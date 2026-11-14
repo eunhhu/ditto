@@ -32,6 +32,7 @@ mod baseline;
 #[cfg(test)]
 mod client_tests;
 mod instructions;
+mod learning;
 mod memory;
 mod runs;
 mod schedules;
@@ -68,6 +69,11 @@ struct Args {
     /// with it Ditto searches the web on its own (ADR 0033).
     #[arg(long, env = "DITTO_SEARCH_URL")]
     search_url: Option<String>,
+    /// Neither learn retrieval keys from the model's searches nor use the
+    /// keys already learned (ADR 0050). The Task 017 runner sets it so suite
+    /// v1 measures the system its budgets were frozen on.
+    #[arg(long, env = "DITTO_DISABLE_LEARNING")]
+    disable_learning: bool,
 }
 
 #[derive(Clone)]
@@ -125,6 +131,7 @@ async fn serve() -> anyhow::Result<()> {
     if args.disable_web_fetch {
         config.web_fetch = None;
     }
+    config.learning = !args.disable_learning;
     config.web_search = args
         .search_url
         .as_deref()
@@ -207,6 +214,7 @@ async fn blocking<T: Send + 'static>(
 fn api_routes(loopback: bool) -> Router<AppState> {
     let routes = Router::new()
         .merge(instructions::routes())
+        .merge(learning::routes())
         .merge(memory::routes())
         .merge(runs::routes())
         .merge(schedules::routes(loopback))

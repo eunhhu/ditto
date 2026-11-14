@@ -3,39 +3,60 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
-Checked against the code on 2026-11-13: main `756f256` plus branch
-`dev/review-fixes-2026-11-13` (turn contract 20; see
-[HANDOFF](HANDOFF.md)).
+Checked against the code on 2026-11-13: main `9b4944b` (PR #33, turn contract
+20; see [HANDOFF](HANDOFF.md)).
 
 ## Active
 
-1. **Measure contract 20 and close the `answer` gate.** This is a
-   [Task 017](tasks/017-evaluation-outcomes.md) campaign 17 over suite v1, under
-   `budgets-v3`, with `--agent-check-exit 0`. Three things make it necessary:
-   - campaign 16's files are gone ([Task 043](tasks/043-requests-per-turn.md),
-     "Evidence");
-   - contract 20 changes how memory search ranks;
-   - the `answer` gate needs the owner's 20% second review on a campaign whose
-     files still exist.
+On 2026-11-14 the owner answered the plan's five decisions
+([ADR 0049](../adr/0049-learned-behavior-decisions.md)). The owner did not
+separately confirm the order. This list follows
+[the plan](../design/self-improvement-plan-2026-11.md), with decision 4 applied.
+Plan steps 1–3, the first learning loop, are done as
+[Task 045](tasks/045-learned-retrieval-keys.md); see Completed. Its gain is
+unmeasured until a learning-curve profile and a paid run exist.
 
-   Store the run as [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
-   requires. It is a paid run (campaign 16 spent $0.1013), so it starts when the
-   owner says so. The 2026-11-13 review proposed putting it first; the owner has
-   not confirmed that order yet.
-2. [038](tasks/038-korean-and-ranked-memory-search.md) Korean memory search.
-   The search half is implemented in turn contract 20. What remains is
-   `eval/task017/suite-v2.json` (P6, P7, X5, P8), its paid calibration, Korean
-   Recall@5 ≥ 0.90 over 80 attempts, and the correction record (`ditto memory
-   history`, `restore`, `until`).
-3. [039](tasks/039-improvement-compiler-first-slice.md) The improvement
-   compiler's first evidence-gated slice. Spec only.
-4. [041](tasks/041-hermes-baseline.md) A measured Hermes baseline on the same
-   memory workload. Spec only.
-5. [040](tasks/040-durable-work-items.md) A durable work item for a long
-   delegated task. After the first release, ADR first.
+1. **A credential-free read-only connector** (the files of a granted
+   directory), moved up by decision 4. No task file yet.
+2. [046](tasks/046-history-cards.md) **History cards**: related past
+   exchanges laid out before the model asks, with detail on demand. The owner
+   named this (2026-11-14) as a secretary agent's biggest usability problem.
+   - **Phase 0 v1 ran and failed** its false-fire gate (2/12 on held-out
+     probes). Recall (0.958) and latency (0.24 ms p95 at 10,000 exchanges)
+     passed.
+   - **The generated background was too uniform** to measure firing.
+   - **Not built:** no card injection and no `history.recall`.
+   - **A v2** needs a real conversational background, which is the owner's
+     choice, plus the registration fixes in the task file.
+   - **Phase 1** waits until the OpenCode Go quota is available again.
+   - It replaces the plan's "search over past conversations"; workspaces
+     remain a later item.
+3. Forgetting as a policy: usage accounting, expiry, the rest of
+   [038](tasks/038-korean-and-ranked-memory-search.md) (history, restore,
+   `until`, suite-v2), and erasure (ADR first).
+4. A glass-box console with the learning ledger, and the "what if" re-run.
+   Until 1.0 the re-run covers only current-contract turns. No task file yet.
+5. The credential boundary (ADR), read-only calendar and mail, then effects
+   with hand-off approval, events that wake, and
+   [040](tasks/040-durable-work-items.md).
 
-Items 2–5 keep the order recorded with the
-[comparison](../design/comparison-2026-11.md) on 2026-11-06.
+**Waiting on the owner's go:** campaign 17, a
+[Task 017](tasks/017-evaluation-outcomes.md) run over suite v1 under
+`budgets-v3` with `--agent-check-exit 0`. It is paid (campaign 16 spent
+$0.1013).
+- It would measure contract 20, and any contract after it.
+- It would give the `answer` gate's 20% second review files that still exist.
+  Campaign 16's are gone ([Task 043](tasks/043-requests-per-turn.md),
+  "Evidence").
+- It must be stored as [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
+  requires.
+
+Each contract change before that campaign stacks on an unmeasured one, so one
+campaign cannot separate their effects.
+
+Still specs, now after the list above:
+- [039](tasks/039-improvement-compiler-first-slice.md)'s other detectors;
+- [041](tasks/041-hermes-baseline.md), a measured Hermes baseline.
 
 ## Parallel tracks
 
@@ -70,6 +91,9 @@ Tasks 038, 042, 043 and 044 are not listed here. Each has landed slices, but
 its exit criteria are still open, so it appears above under Active or
 Parallel tracks.
 
+- [045](tasks/045-learned-retrieval-keys.md) Retrieval keys learned from the
+  model's own searches, turn contract 21 (ADR 0050, under ADR 0049). It is the
+  first learning loop, and it makes no model call. Its gain is not measured.
 - Between the Task 017 campaigns:
   - the two-hop pointer closure (ADR 0029);
   - the sort's result lines (ADR 0040, turn contract 16), which HANDOFF and

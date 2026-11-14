@@ -32,7 +32,9 @@ progressive disclosure.
 
 ## Non-negotiable invariants
 
-- No model call solely for housekeeping.
+- No model call solely for housekeeping, except a bounded retrospection that
+  a detector wakes, under the ceiling in ADR 0049 (owner, 2026-11-14:
+  "회고 방식에 많지 않은 비용이 든다면 허가할게").
 - No capability implementation loaded before use.
 - No full capability catalogue in model context.
 - No durable context without provenance and scope.

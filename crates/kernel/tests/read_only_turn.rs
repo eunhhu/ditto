@@ -40,6 +40,8 @@ use tempfile::TempDir;
 mod agent_runs;
 #[path = "read_only_turn/instructions.rs"]
 mod instructions;
+#[path = "read_only_turn/learning.rs"]
+mod learning;
 #[path = "read_only_turn/memory.rs"]
 mod memory;
 #[path = "read_only_turn/model_sort.rs"]

@@ -1,0 +1,273 @@
+{
+  "version": 1,
+  "now": "2026-11-14T12:00:00Z",
+  "notes": "Task 046 Phase 0 probes, written before any selector code existed (2026-11-14). Every target is an earlier exchange outside the thread window. Each target has two hard distractors using its own vocabulary, three needs-history probes that share at least one search form with it (lexical), one needs-history probe that shares none (paraphrase, an honest miss for a lexical selector), and one related probe that touches the topic but does not need the old exchange. Probes alternate between the tuning half and the held-out half in file order; gates are read on the held-out half only. The benchmark checks the lexical/paraphrase labels mechanically.",
+  "targets": [
+    {
+      "id": "ko-gukbap",
+      "exchange": {"age_days": 12, "user": "회사 앞 할매순대국에서 점심 먹었는데 깍두기가 진짜 맛있더라", "answer": "할매순대국은 깍두기가 맛있는 곳으로 기억해 둘게요."},
+      "hard_distractors": [
+        {"age_days": 5, "user": "부산돼지국밥 점심에 갔는데 줄이 너무 길었어", "answer": "점심 피크를 피하면 덜 기다리실 거예요."},
+        {"age_days": 20, "user": "옛날순대국은 국물이 너무 짜서 별로였어", "answer": "다음엔 다른 곳을 찾아볼게요."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "깍두기 맛있다던 국밥집 이름이 뭐였지?"},
+        {"class": "needs", "kind": "lexical", "text": "점심에 깍두기 맛있었던 데 다시 가려는데 어디였지"},
+        {"class": "needs", "kind": "lexical", "text": "회사 앞에서 먹었던 순대국 집 기억나?"},
+        {"class": "needs", "kind": "paraphrase", "text": "지난번에 반찬 칭찬했던 밥집 거기 어디야?"},
+        {"class": "related", "text": "국밥 육수를 집에서 끓이는 방법 알려줘"}
+      ]
+    },
+    {
+      "id": "ko-dentist",
+      "exchange": {"age_days": 30, "user": "다음 달 3일 오후 2시에 연세바른치과 스케일링 예약했어", "answer": "12월 3일 오후 2시 연세바른치과 스케일링 예약, 기억해 둘게요."},
+      "hard_distractors": [
+        {"age_days": 10, "user": "엄마가 다니는 서울미소치과 임플란트 상담 받았대", "answer": "상담 결과가 나오면 알려주세요."},
+        {"age_days": 45, "user": "치과 가기 너무 무서워", "answer": "무서우시면 진료 전에 미리 말씀해 보세요."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "스케일링 예약 언제였지?"},
+        {"class": "needs", "kind": "lexical", "text": "스케일링 몇 시로 잡았더라"},
+        {"class": "needs", "kind": "lexical", "text": "연세바른치과 예약 시간이 언제야"},
+        {"class": "needs", "kind": "paraphrase", "text": "이빨 청소 받으러 가는 날이 언제였지?"},
+        {"class": "related", "text": "스케일링 하고 나면 이가 시린 거 정상이야?"}
+      ]
+    },
+    {
+      "id": "ko-busan",
+      "exchange": {"age_days": 40, "user": "12월 20일부터 22일까지 부산 여행 가기로 했고 숙소는 해운대 그랜드조선이야", "answer": "12월 20일부터 22일까지 부산 여행, 숙소는 해운대 그랜드조선으로 메모해 둘게요."},
+      "hard_distractors": [
+        {"age_days": 15, "user": "회사 워크숍이 부산 광안리에서 열린대", "answer": "광안리 워크숍 일정이 나오면 알려주세요."},
+        {"age_days": 60, "user": "작년 부산 여행 때 숙소가 너무 시끄러웠어", "answer": "이번엔 조용한 숙소를 찾아볼게요."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "부산 여행 숙소 어디로 잡았었지?"},
+        {"class": "needs", "kind": "lexical", "text": "해운대 숙소 이름 뭐였더라"},
+        {"class": "needs", "kind": "lexical", "text": "부산 가는 날짜가 며칠부터였지"},
+        {"class": "needs", "kind": "paraphrase", "text": "연말에 바다 보러 가는 거 언제부터였지?"},
+        {"class": "related", "text": "부산에서 꼭 먹어야 할 음식 추천해줘"}
+      ]
+    },
+    {
+      "id": "ko-allergy",
+      "exchange": {"age_days": 55, "user": "나 복숭아 알레르기 있어서 복숭아 들어간 건 먹으면 안 돼", "answer": "복숭아 알레르기, 꼭 기억해 둘게요."},
+      "hard_distractors": [
+        {"age_days": 8, "user": "동생은 땅콩 알레르기가 있대", "answer": "동생분 땅콩 알레르기도 참고할게요."},
+        {"age_days": 25, "user": "복숭아 아이스티 좋아하는 친구한테 선물 사줬어", "answer": "좋은 선물이네요."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "내가 무슨 알레르기 있다고 했지?"},
+        {"class": "needs", "kind": "lexical", "text": "복숭아 들어간 디저트 먹어도 되나?"},
+        {"class": "needs", "kind": "lexical", "text": "알레르기 때문에 피해야 하는 과일이 뭐였지"},
+        {"class": "needs", "kind": "paraphrase", "text": "못 먹는 과일 있었던 것 같은데 뭐였더라"},
+        {"class": "related", "text": "알레르기 약 먹으면 졸려?"}
+      ]
+    },
+    {
+      "id": "ko-gift",
+      "exchange": {"age_days": 18, "user": "엄마 생신 선물로 정관장 홍삼 세트 사기로 했어", "answer": "어머니 생신 선물은 정관장 홍삼 세트로 메모해 둘게요."},
+      "hard_distractors": [
+        {"age_days": 9, "user": "아빠 생신에는 골프공 세트 드렸어", "answer": "좋은 선물이었겠네요."},
+        {"age_days": 35, "user": "친구 결혼 선물로 커피머신 보냈어", "answer": "센스 있는 선물이네요."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "엄마 생신 선물 뭐 사기로 했더라?"},
+        {"class": "needs", "kind": "lexical", "text": "홍삼 세트 어디 거로 하기로 했지"},
+        {"class": "needs", "kind": "lexical", "text": "생신 선물 정관장 맞지?"},
+        {"class": "needs", "kind": "paraphrase", "text": "어머님 생일에 드릴 거 정한 거 있었나?"},
+        {"class": "related", "text": "홍삼 매일 먹어도 괜찮아?"}
+      ]
+    },
+    {
+      "id": "ko-car",
+      "exchange": {"age_days": 70, "user": "차 엔진오일 6만 킬로에 갈았고 다음 교체는 7만 킬로야", "answer": "엔진오일은 6만 킬로에 교체했고 다음은 7만 킬로로 기억할게요."},
+      "hard_distractors": [
+        {"age_days": 22, "user": "차 타이어 공기압 경고등이 떴어", "answer": "가까운 정비소에서 점검해 보세요."},
+        {"age_days": 50, "user": "엔진 소리가 좀 이상한데 기분 탓일까", "answer": "계속되면 정비소에 가보세요."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "엔진오일 다음 교체 언제였지?"},
+        {"class": "needs", "kind": "lexical", "text": "오일 교체 몇 킬로에 하기로 했지"},
+        {"class": "needs", "kind": "lexical", "text": "엔진오일 갈은 지 얼마나 됐지"},
+        {"class": "needs", "kind": "paraphrase", "text": "자동차 소모품 바꿀 때가 언제쯤이었더라"},
+        {"class": "related", "text": "엔진오일 종류 뭐가 좋아?"}
+      ]
+    },
+    {
+      "id": "ko-book",
+      "exchange": {"age_days": 25, "user": "독서모임 이번 책은 한강의 '소년이 온다'로 정해졌어", "answer": "이번 독서모임 책은 '소년이 온다'로 기억해 둘게요."},
+      "hard_distractors": [
+        {"age_days": 12, "user": "독서모임 장소가 성수동 카페로 바뀌었어", "answer": "성수동 카페로 메모할게요."},
+        {"age_days": 40, "user": "요즘 소설책이 잘 안 읽혀", "answer": "짧은 단편부터 읽어보시면 어떨까요."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "독서모임 이번 책 뭐였지?"},
+        {"class": "needs", "kind": "lexical", "text": "소년이 온다 다 읽으면 다음 책은 언제 정하기로 했지?"},
+        {"class": "needs", "kind": "lexical", "text": "이번 모임 책 제목 다시 알려줘"},
+        {"class": "needs", "kind": "paraphrase", "text": "그 북클럽에서 읽기로 한 소설 뭐였더라"},
+        {"class": "related", "text": "한강 작가 다른 작품 추천해줘"}
+      ]
+    },
+    {
+      "id": "ko-plant",
+      "exchange": {"age_days": 8, "user": "몬스테라 물은 열흘에 한 번만 주라고 꽃집 사장님이 그러셨어", "answer": "몬스테라는 열흘에 한 번 물 주기, 기억해 둘게요."},
+      "hard_distractors": [
+        {"age_days": 4, "user": "스투키 잎이 노랗게 변했어", "answer": "과습일 수 있어요."},
+        {"age_days": 30, "user": "꽃집에서 장미 한 다발 샀어", "answer": "예쁘겠네요."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "몬스테라 물 얼마나 자주 주라고 했지?"},
+        {"class": "needs", "kind": "lexical", "text": "꽃집 사장님이 물 주기 뭐라고 하셨더라"},
+        {"class": "needs", "kind": "lexical", "text": "열흘에 한 번이었나 몬스테라 물 주기"},
+        {"class": "needs", "kind": "paraphrase", "text": "거실 큰 화분 관리법 들은 거 있었는데"},
+        {"class": "related", "text": "몬스테라 잎에 구멍 나는 이유가 뭐야"}
+      ]
+    },
+    {
+      "id": "en-clinic",
+      "exchange": {"age_days": 35, "user": "My physio at Birchwood Clinic said to stretch my left knee twice a day", "answer": "Noted: Birchwood Clinic physio advice, stretch the left knee twice a day."},
+      "hard_distractors": [
+        {"age_days": 14, "user": "The gym near Birchwood Park has a new spin class", "answer": "Spin classes are a good low-impact option."},
+        {"age_days": 50, "user": "My right shoulder hurts after tennis", "answer": "Rest it and see a physio if it persists."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "How often did the physio say to stretch my knee?"},
+        {"class": "needs", "kind": "lexical", "text": "What did they tell me at Birchwood Clinic?"},
+        {"class": "needs", "kind": "lexical", "text": "Knee stretches, was it twice a day?"},
+        {"class": "needs", "kind": "paraphrase", "text": "What was the rehab routine I got for my leg?"},
+        {"class": "related", "text": "Are knee stretches safe before running?"}
+      ]
+    },
+    {
+      "id": "en-flight",
+      "exchange": {"age_days": 20, "user": "Booked flight KE902 to Seoul on December 18, departing 10:40", "answer": "Got it: KE902 to Seoul, December 18, departing 10:40."},
+      "hard_distractors": [
+        {"age_days": 7, "user": "My sister flies to Tokyo on December 19", "answer": "Hope she has a good trip."},
+        {"age_days": 45, "user": "Last flight to Seoul was delayed three hours", "answer": "Delays are frustrating."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "What time does my Seoul flight leave?"},
+        {"class": "needs", "kind": "lexical", "text": "What was my flight number for December?"},
+        {"class": "needs", "kind": "lexical", "text": "When do I depart for Seoul?"},
+        {"class": "needs", "kind": "paraphrase", "text": "When am I going home to Korea again?"},
+        {"class": "related", "text": "What can I bring on a flight to Seoul?"}
+      ]
+    },
+    {
+      "id": "en-wine",
+      "exchange": {"age_days": 60, "user": "The wine we loved at Anna's dinner was a 2019 Domaine Ostertag Riesling", "answer": "Noted: 2019 Domaine Ostertag Riesling from Anna's dinner."},
+      "hard_distractors": [
+        {"age_days": 20, "user": "Anna recommended a Malbec for the barbecue", "answer": "Malbec pairs well with grilled meat."},
+        {"age_days": 40, "user": "Bought a cheap Riesling at the supermarket, too sweet", "answer": "Drier Rieslings might suit you better."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "What was the Riesling from Anna's dinner?"},
+        {"class": "needs", "kind": "lexical", "text": "Which wine did we love at Anna's?"},
+        {"class": "needs", "kind": "lexical", "text": "Ostertag, what vintage was it?"},
+        {"class": "needs", "kind": "paraphrase", "text": "What was that white we liked at our friend's place?"},
+        {"class": "related", "text": "Does Riesling go with spicy food?"}
+      ]
+    },
+    {
+      "id": "en-locker",
+      "exchange": {"age_days": 15, "user": "My gym locker is number 214 on the second floor", "answer": "Locker 214, second floor, noted."},
+      "hard_distractors": [
+        {"age_days": 6, "user": "The gym is closed on Sunday for cleaning", "answer": "Plan your workouts around Sunday then."},
+        {"age_days": 30, "user": "Lost my locker key at the pool last year", "answer": "A spare key helps."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "What's my gym locker number?"},
+        {"class": "needs", "kind": "lexical", "text": "Which floor was my locker on?"},
+        {"class": "needs", "kind": "lexical", "text": "Locker 214 or 241?"},
+        {"class": "needs", "kind": "paraphrase", "text": "Where do I keep my stuff when I work out?"},
+        {"class": "related", "text": "How do I clean a gym bag that smells?"}
+      ]
+    },
+    {
+      "id": "en-landlord",
+      "exchange": {"age_days": 45, "user": "Landlord Mr. Okafor agreed to fix the bathroom heater by the end of the month", "answer": "Noted: Mr. Okafor will fix the bathroom heater by the end of the month."},
+      "hard_distractors": [
+        {"age_days": 10, "user": "The kitchen heater makes a clicking noise", "answer": "Worth mentioning to maintenance."},
+        {"age_days": 70, "user": "Mr. Okafor raised the rent by 3 percent", "answer": "Noted the rent increase."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "Did the landlord say when he'd fix the heater?"},
+        {"class": "needs", "kind": "lexical", "text": "When is Okafor fixing the bathroom heater?"},
+        {"class": "needs", "kind": "lexical", "text": "Bathroom heater repair deadline?"},
+        {"class": "needs", "kind": "paraphrase", "text": "Is someone coming to sort out the warmth in the shower room?"},
+        {"class": "related", "text": "How do I bleed a radiator heater?"}
+      ]
+    },
+    {
+      "id": "en-recipe",
+      "exchange": {"age_days": 28, "user": "Grandma's kimchi stew secret is a spoon of anchovy sauce at the end", "answer": "Noted: grandma adds a spoon of anchovy sauce at the end of kimchi stew."},
+      "hard_distractors": [
+        {"age_days": 9, "user": "Made kimchi fried rice for lunch", "answer": "Nice quick meal."},
+        {"age_days": 55, "user": "Grandma's birthday is in March", "answer": "Noted March for grandma's birthday."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "What's grandma's secret for kimchi stew?"},
+        {"class": "needs", "kind": "lexical", "text": "What sauce goes in at the end of the stew?"},
+        {"class": "needs", "kind": "lexical", "text": "Anchovy sauce, how much did grandma use?"},
+        {"class": "needs", "kind": "paraphrase", "text": "What did my granny put in to make her soup taste so good?"},
+        {"class": "related", "text": "How long does kimchi last in the fridge?"}
+      ]
+    },
+    {
+      "id": "en-laptop",
+      "exchange": {"age_days": 50, "user": "My laptop warranty with Lenovo runs until August 2027", "answer": "Noted: Lenovo laptop warranty until August 2027."},
+      "hard_distractors": [
+        {"age_days": 12, "user": "Laptop battery drains fast lately", "answer": "Check background apps."},
+        {"age_days": 33, "user": "Phone warranty expired last month", "answer": "Consider insurance next time."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "Until when is my laptop warranty?"},
+        {"class": "needs", "kind": "lexical", "text": "Is the Lenovo still under warranty?"},
+        {"class": "needs", "kind": "lexical", "text": "Warranty end date for my laptop?"},
+        {"class": "needs", "kind": "paraphrase", "text": "How long is my computer covered for repairs?"},
+        {"class": "related", "text": "How do I check laptop battery health?"}
+      ]
+    },
+    {
+      "id": "en-parking",
+      "exchange": {"age_days": 65, "user": "Parking at the office moved to level B3, spot 57", "answer": "Office parking: level B3, spot 57."},
+      "hard_distractors": [
+        {"age_days": 11, "user": "Parking downtown costs too much", "answer": "Transit might be cheaper."},
+        {"age_days": 38, "user": "The office moved the meeting rooms to level 5", "answer": "Noted the new meeting floor."}
+      ],
+      "probes": [
+        {"class": "needs", "kind": "lexical", "text": "Where's my parking spot at the office?"},
+        {"class": "needs", "kind": "lexical", "text": "Was it B3 spot 57?"},
+        {"class": "needs", "kind": "lexical", "text": "Which level do I park on at work?"},
+        {"class": "needs", "kind": "paraphrase", "text": "Where do I leave the car at work?"},
+        {"class": "related", "text": "Is parking cheaper with a monthly pass?"}
+      ]
+    }
+  ],
+  "unrelated": [
+    "내일 비 와?",
+    "ㅇㅋ 고마워",
+    "좋은 아침!",
+    "이메일 초안 좀 써줘: 다음 주 회의 일정 변경 안내",
+    "48000원에 15% 팁이면 얼마야?",
+    "파이썬 리스트 정렬하는 법 알려줘",
+    "오늘 할 일 정리해줘",
+    "요즘 볼만한 영화 추천해줘",
+    "피곤하다",
+    "주말에 뭐 하지",
+    "번역해줘: 감사합니다",
+    "운동 루틴 짜줘",
+    "Thanks!",
+    "What's 18 times 24?",
+    "Write a haiku about autumn",
+    "Explain recursion simply",
+    "Good night",
+    "Summarize today's news",
+    "Give me a pun about cats",
+    "Convert 5 miles to km",
+    "What's a good name for a goldfish?",
+    "Help me write a cover letter opening",
+    "Is it rainy in London today?",
+    "Tell me a fun fact"
+  ]
+}
