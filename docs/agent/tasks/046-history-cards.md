@@ -55,6 +55,51 @@ usability problem.
   and SQLite FTS5 with trigram.
 - The thresholds frozen from the corpus.
 
+#### Phase 0 rules, registered before the selector existed (2026-11-14)
+
+- **Probes.** The probes are `eval/history-cards/probes-v1.json`: 16 targets,
+  8 Korean and 8 English. Each target has:
+  - two hard distractors written in the target's own vocabulary;
+  - three needs-history probes that share at least one search form with the
+    target (*lexical*);
+  - one needs-history probe that shares none (*paraphrase*, an honest miss
+    for any lexical selector);
+  - one *related* probe that touches the topic but does not need the old
+    exchange.
+
+  On top of these come 24 *unrelated* probes. The benchmark checks the
+  lexical and paraphrase labels mechanically.
+- **Split.** Probes alternate between the tuning half and the held-out half,
+  in file order. Gates are read once, on the held-out half, after the
+  parameters are frozen.
+- **Background.**
+  - 2,000 generated distractor exchanges over 90 days, for recall and firing;
+  - 10,000 exchanges, for latency;
+  - the 16 most recent exchanges stand in for the thread window and are
+    never carded.
+- **Gates (held-out half).**
+  - Lexical Recall@5 of at least 0.90.
+  - A false-fire rate on unrelated probes of at most 10%.
+  - Selection p95 of at most 5 ms at 10,000 exchanges, in a release build on
+    the Raspberry Pi.
+- **Reported, not gated.**
+  - Recall@5 over *all* needs-history probes, paraphrases included.
+  - Recall@3 and MRR.
+  - The fire rate on related probes, which is the cost term `p`.
+  - Tokens per firing.
+  - Index build time and resident memory at 10,000 exchanges.
+  - The SQLite FTS5 comparison.
+- **Why paraphrases are reported, not gated.** They are unreachable by
+  construction for a lexical selector, and they are what the `history.recall`
+  search tier exists for. The spec's bar of "Recall@5 at least 0.90" did not
+  say whether they count. This registration settles that before any result
+  exists, and still reports the combined figure.
+- **Tuning rule.** On the tuning half, choose the parameters with the highest
+  lexical Recall@5 whose false-fire rate is at most 10%. Ties go to the lower
+  related fire rate, then the fewer tokens.
+- **Failure.** If a held-out gate fails, the result is reported, the corpus
+  is not changed, and no integration is built on it.
+
 ### Phase 1 (live, OpenCode Go)
 
 - A suite-v3 history family at 10 repetitions per case, run in four arms:
