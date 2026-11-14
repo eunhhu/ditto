@@ -486,25 +486,41 @@ impl DittoKernel {
                 }
             },
         };
-        let compiled = ContextCompiler::default()
-            .compile_with_closure(
+        // Keys learned from earlier searches (ADR 0050): read as of the
+        // turn's input, so replay checks them against the same journal.
+        let learned = if run.scope.agent_run {
+            self.active_learned_keys(&run.scope.session_id, input_event.seq, run.accepted_at)
+                .map_err(TurnRunError::Kernel)?
+        } else {
+            Vec::new()
+        };
+        let compile = |candidates: Vec<ContextCandidate>| {
+            ContextCompiler::default().compile_with_closure(
                 ContextSelection::CompleteSet,
                 &turn_signature(text),
-                context_candidates,
+                candidates,
                 None,
                 run.accepted_at,
                 super::memory::MAX_POINTER_MEMORIES,
             )
-            .map_err(|error| match context_compile_reason(&error) {
-                Some(reason) => self.fail_with(run, reason, error.to_string(), None, None),
-                None => self.fail(
-                    run,
-                    TurnFailureCode::ContextCompilation,
-                    error.to_string(),
-                    None,
-                    None,
-                ),
-            })?;
+        };
+        let mut compiled = compile(context_candidates.clone());
+        if let Ok(first) = &compiled {
+            let picks = crate::learning::inclusions(&learned, text, first, &context_candidates);
+            if !picks.is_empty() {
+                compiled = compile(crate::learning::mark(context_candidates, &picks));
+            }
+        }
+        let compiled = compiled.map_err(|error| match context_compile_reason(&error) {
+            Some(reason) => self.fail_with(run, reason, error.to_string(), None, None),
+            None => self.fail(
+                run,
+                TurnFailureCode::ContextCompilation,
+                error.to_string(),
+                None,
+                None,
+            ),
+        })?;
         // The prefetched attachment rides with the compilation rather than
         // competing for its budget, so a turn that carries an attachment cannot
         // push a memory the turn needs out of the selection (ADR 0041).
@@ -1978,6 +1994,15 @@ impl DittoKernel {
             },
             None,
         )?;
+        if run.scope.agent_run {
+            // What the turn taught (ADR 0050). A failure here means nothing
+            // was learned; the answer is already journaled and stands.
+            let _ = self.learn_from_turn(
+                &run.scope.session_id,
+                &run.scope.task_id,
+                &run.scope.turn_id,
+            );
+        }
         Ok(outcome)
     }
 

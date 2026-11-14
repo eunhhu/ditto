@@ -342,7 +342,7 @@ fn source_text<'a>(source: &'a EventRecord, session: &str) -> Result<&'a str, Ke
     Ok(text)
 }
 
-fn validate_session(session: &str) -> Result<(), KernelError> {
+pub(crate) fn validate_session(session: &str) -> Result<(), KernelError> {
     if session.len() > ditto_retrieval::MAX_RETRIEVAL_IDENTIFIER_BYTES {
         return Err(invalid("memory session is not canonical"));
     }

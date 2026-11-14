@@ -27,6 +27,7 @@ mod context_admission;
 mod context_retrieval;
 mod conversation;
 pub mod instructions;
+mod learning;
 mod memory;
 mod recurrence;
 mod schedule;
@@ -66,6 +67,9 @@ pub struct KernelConfig {
     /// The search service `web.browse` uses; `None` never offers searching
     /// (ADR 0033).
     pub web_search: Option<ditto_web_fetch::search::SearchEndpoint>,
+    /// Learn retrieval keys from the model's own searches and use them
+    /// (ADR 0050). On by default; the Task 017 runner turns it off.
+    pub learning: bool,
 }
 
 impl KernelConfig {
@@ -77,6 +81,7 @@ impl KernelConfig {
             artifact_max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             web_fetch: Some(ditto_web_fetch::FetchPolicy::public_only()),
             web_search: None,
+            learning: true,
         }
     }
 }
@@ -152,6 +157,9 @@ struct KernelInner {
     web_search: Option<ditto_web_fetch::search::SearchEndpoint>,
     tool_contracts: turn::ToolContracts,
     thread_reuse: Mutex<turn::ThreadReuse>,
+    learning: bool,
+    /// Orders every read-then-append of learned keys, so a chain never forks.
+    learning_gate: Mutex<()>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -217,6 +225,8 @@ impl DittoKernel {
                 web_search: config.web_search,
                 tool_contracts: Default::default(),
                 thread_reuse: Default::default(),
+                learning: config.learning,
+                learning_gate: Mutex::new(()),
             }),
         })
     }

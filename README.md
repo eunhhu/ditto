@@ -20,6 +20,7 @@ See [docs/product.md](docs/product.md) for the product intent and [docs/architec
 - **Model runs**: provider-neutral model IR with an OpenAI Responses adapter and an OpenAI-compatible `/chat/completions` adapter (local models via Ollama, hosted ones via a key). Durable retry identity, cancellation and restart inspection.
 - **Conversation threads** and an interactive `ditto chat`; up to four answers may run at once in one session.
 - **Two model tools**: `memory.manage` (search / remember / forget) and `web.browse` (read a linked or found page, search through a SearXNG-compatible service), on one journaled tool lifecycle with hard per-answer limits. Memory search folds Korean particles (`냉장고에` finds `냉장고`) and ranks rare shared words first.
+- **Learning from its own searches** (ADR 0050): when a memory the context left out is found by a search in two differently worded turns, Ditto keeps the user's words as a retrieval key, and the next matching question gets the memory without a search. No model call; every key is listed with its evidence and can be undone (`ditto learning list|retire`, `GET /v1/learning`).
 - **Profiles, standing instructions and skills**: a daemon serves one profile (a data directory); the profile's standing instructions are journaled and pinned to every request; skills are `SKILL.md` documents under `<profile>/skills/` whose one-line headers lead the request and whose bodies the model reads with `skill.read` on demand.
 - **Bounded local sorting** of an attached file through a one-shot process lease with independent verification.
 - **Schedules**: one-shot future requests and finite fixed-interval repeats with durable claims, visible expiry/missed states and no automatic retry.
@@ -109,6 +110,8 @@ cargo run -p ditto-cli -- instructions set --text "Answer in Korean."
 cargo run -p ditto-cli -- instructions show        # or: clear
 cargo run -p ditto-cli -- skills list --profile work
 cargo run -p ditto-cli -- skills show photo-triage --profile work
+cargo run -p ditto-cli -- learning list --human   # what Ditto learned, with evidence
+cargo run -p ditto-cli -- learning retire KEY_ID  # undo one key
 ```
 
 Open `http://127.0.0.1:8787/` for the web app. For Telegram, create a bot with @BotFather and run the gateway next to the daemon:
@@ -143,6 +146,7 @@ Coding-agent instructions start at [`AGENTS.md`](AGENTS.md) and [`docs/agent/NEX
 | `POST` | `/v1/commands/memory`, `/v1/commands/memory/forget` · `GET /v1/memories` | Memory |
 | `POST` | `/v1/commands/run`, `/v1/commands/run/cancel` · `GET /v1/runs` | Model runs |
 | `GET` · `PUT` | `/v1/instructions` | The profile's standing instructions |
+| `GET` · `POST` | `/v1/learning` · `/v1/commands/learning/retire` | Learned retrieval keys and the undo |
 | `POST` | `/v1/commands/schedule`, `/v1/commands/schedule/cancel` · `GET /v1/schedules`, `/v1/schedules/pending` | One-shot schedules (loopback only) |
 | `POST` | `/v1/commands/repeat`, `/v1/commands/repeat/cancel` · `GET /v1/repeats`, `/v1/repeats/active` | Repeats (loopback only) |
 | `POST` | `/v1/commands/sort`, `/v1/commands/sort/cancel` · `GET /v1/sorts` | Local sort (loopback only) |
@@ -155,7 +159,7 @@ Contracts are specified in [`docs/specs/`](docs/specs) and decisions in [`docs/a
 
 ```
 apps/
-  cli/          ditto-cli: commands, chat, memory, runs, schedules, sorts, profiles, instructions, skills, telegram gateway
+  cli/          ditto-cli: commands, chat, memory, runs, schedules, sorts, profiles, instructions, skills, learning, telegram gateway
   daemon/       ditto-daemon: HTTP API, embedded web app, scheduler, baseline harness
 crates/
   kernel/               composition root: admission, runs, scheduler, tool lifecycle
@@ -191,6 +195,7 @@ All daemon flags can also be set through environment variables.
 | `OPENAI_API_KEY` | daemon | Key for `--provider openai` |
 | `DITTO_DISABLE_WEB_FETCH` | daemon | Never read web pages |
 | `DITTO_SEARCH_URL` | daemon | SearXNG-compatible search service; without it there is no web search |
+| `DITTO_DISABLE_LEARNING` | daemon | Neither learn nor use retrieval keys (the Task 017 runner sets it) |
 | `DITTO_API` | cli | Daemon base URL (default `http://127.0.0.1:8787`) |
 | `DITTO_TELEGRAM_BOT_TOKEN`, `DITTO_TELEGRAM_ALLOWED_USERS` | cli `telegram` | Bot token and comma-separated allowed user IDs |
 | `RUST_LOG` | daemon | Tracing filter (default `ditto=info`) |

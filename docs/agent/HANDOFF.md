@@ -31,13 +31,18 @@ only after code and checks establish a new fact.
     - It amends the housekeeping invariant in `AGENTS.md`, allowing a
       bounded, detector-woken retrospection.
     - It amends ADR 0034: one contract until 1.0.
-  - None of that plan is implemented yet.
+  - Its first learning loop, retrieval keys (Task 045, ADR 0050), is
+    implemented. Nothing else in the plan is.
 
 ## Repository state (2026-11-14)
 
 - **main** is `9b4944b`: PR #33, the review fixes, merged by the user on
   2026-11-13. CI ran `./scripts/agent-check.sh` and the MSRV check green on
   that commit.
+- **Unmerged branches:** `dev/north-star-learning-plan` holds the plan and
+  ADR 0049, documents only. `dev/task-045-learned-keys` is stacked on it and
+  holds Task 045 (turn contract 21). Both are pushed with no PR yet. The
+  sections below describe the code on `dev/task-045-learned-keys`.
 - **origin** also keeps the merged branch `dev/review-fixes-2026-11-13`, which
   has not been deleted, and the tag `archive/codex-scaffold` for the unmerged
   early scaffold. The merged `dev/task-037-eval-suite` was deleted on
@@ -150,6 +155,30 @@ only after code and checks establish a new fact.
     - a shared word weighs `1/n` by how many searched memories contain it.
 
     The compiler's own selection keeps exact words.
+- **Learned retrieval keys** (ADR 0050, Task 045). This is the first learning
+  loop, and it makes no model call.
+  - **Detector.** After an ordinary agent turn finishes, a deterministic
+    detector reads the turn's events. It looks for one user-asserted memory
+    that the compilation left out, that a `memory.manage` search found, and
+    that shares a word with the answer. It ignores any turn that read a page,
+    a file or an attachment.
+  - **Words and promotion.** The user's rare request words become a candidate
+    key (`improvement.candidate_created`). A second, differently worded
+    episode within 30 days promotes it (`improvement.promoted`, 90 days). The
+    promotion is refused when the key would match more than 2 of the last 50
+    requests.
+  - **Use.** A promoted key that matches a later request (two of its words, or
+    its only word) brings its memory into a compilation that left it out.
+    - The receipt names the key, and replay checks it against the journal.
+    - At most two keys apply per turn.
+    - Use renews a key monthly.
+  - **Control.**
+    - `ditto learning list|retire` and `GET /v1/learning` /
+      `POST /v1/commands/learning/retire` show and undo keys. An undone key's
+      memory is not learned back.
+    - The web app's "Why?" view labels learned inclusions.
+    - `--disable-learning` turns the loop off, and the Task 017 runner passes
+      it.
 - **Standing instructions and skills.**
   - `instructions.recorded` is the profile's one instruction document: at most
     2,000 characters, and superseded by the next one. A turn pins the document
@@ -227,7 +256,7 @@ only after code and checks establish a new fact.
     It journals versioned transitions before publication and replays without
     provider, artifact or network I/O. Agent tool calls share one
     `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
-  - There is one turn contract, **version 20**, until 1.0 (ADRs 0034, 0049). Replay rejects
+  - There is one turn contract, **version 21**, until 1.0 (ADRs 0034, 0049). Replay rejects
     turns recorded under any other version, while status and thread history
     still read their answers. The contract carries:
     - typed failure reasons (ADR 0021);
@@ -299,8 +328,12 @@ only after code and checks establish a new fact.
   Those figures are recorded in
   [Task 043](tasks/043-requests-per-turn.md), but the report is gone and
   cannot be re-checked.
-- **Contract 20 is unmeasured.** No campaign has run it, and it changes how
-  memory search ranks.
+- **Contracts 20 and 21 are unmeasured.** No campaign has run either one.
+  Contract 20 changes how memory search ranks, and contract 21 adds learned
+  keys. One campaign cannot separate the two.
+  - The Task 017 runner turns learning off, so suite v1 cannot show a
+    learning gain at all.
+  - Measuring one needs a learning-curve profile that does not exist yet.
 - **Task 042 probes** on the memory two-hop case: base 10/10 answers with
   Recall@5 18/20, and both variants were `KEEP_BASE`. That family is saturated
   for wording edits.
@@ -315,6 +348,34 @@ only after code and checks establish a new fact.
 - **Last browser end-to-end run** (Task 036): 34/34 passed, with RSS 11.6 MB
   idle and at most 17.2 MB with four runs at once. The review session of
   2026-11-13 did not re-run it, and the gate does not run it either.
+
+## Latest slice: Task 045, learned retrieval keys (branch `dev/task-045-learned-keys`)
+
+- [Task 045](tasks/045-learned-retrieval-keys.md) and ADR 0050, turn contract
+  21.
+- **Code.**
+  - `crates/kernel/src/learning.rs`: the detector, chains, compile inclusion,
+    replay check and ledger.
+  - `crates/context`: `search_vocabulary` and `search_form_set`.
+  - `crates/event-store`: `recent_finished_agent_turns`.
+  - `crates/protocol`: `improvement.retired` and the ledger types.
+  - Daemon and CLI: the routes and `ditto learning`.
+  - Web: the "Why?" label.
+  - The runner passes `--disable-learning`.
+- **Tests.**
+  - Kernel lib: 52 (6 new detector tests).
+  - `read_only_turn`: 120. Four are new:
+    - two differently worded misses teach a key, and the third turn holds the
+      memory in its first request with no search; all four turns replay;
+    - an undone key stops applying and is not learned back;
+    - a turn that called `web.browse` teaches nothing;
+    - receipts citing a missing, other-session or retired key do not replay.
+  - Daemon: 16 plus 8 ignored (1 new route test).
+  - `ditto-context` 62, `ditto-event-store` 21, `ditto-cli` 23,
+    `test-personal-quality.py` 22, `test-eval-task017.py` 43, web 12.
+  - No existing test's expected value was edited.
+- **Not shown.** No live provider turn has used a key, and no campaign has
+  measured one.
 
 ## Review fixes (2026-11-13, PR #33, merged)
 

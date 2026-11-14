@@ -4,6 +4,7 @@ use ditto_protocol::{CapabilitySearchQuery, EventQuery, SubmitInputCommand};
 use serde_json::Value;
 mod chat;
 mod instructions;
+mod learning;
 mod memory;
 mod presentation;
 mod profiles;
@@ -54,6 +55,11 @@ enum Command {
     Instructions {
         #[command(subcommand)]
         command: instructions::InstructionsCommand,
+    },
+    /// What Ditto learned from its own searches, and the undo (ADR 0050).
+    Learning {
+        #[command(subcommand)]
+        command: learning::LearningCommand,
     },
     /// Read a profile's skills: the header catalogue, or one body.
     Skills {
@@ -162,6 +168,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     match cli.command {
         Command::Instructions { command } => instructions::run(&client, view, command).await?,
+        Command::Learning { command } => learning::run(&client, view, command).await?,
         Command::Skills { command } => skills::run(command, view).await?,
         Command::Profile { command } => profiles::run(command, view).await?,
         Command::Repeat(args) => repeats::create(&client, view, args).await?,

@@ -420,6 +420,15 @@ impl<'turn, 'snapshot> ReplayProjector<'turn, 'snapshot> {
             self.input_recorded_at,
         )?;
         self.validate_context_sources(&context, context_event)?;
+        crate::learning::validate_cited_keys(
+            self.snapshot,
+            &self.session_id,
+            &context.compiled,
+            &self.input_text,
+            self.events[0].seq,
+            self.input_recorded_at,
+        )
+        .map_err(replay_invalid)?;
         self.validate_prefetched_nodes(&context)?;
         let history = self.conversation_history(&context)?;
         let latest = latest_user_text(

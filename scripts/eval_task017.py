@@ -444,8 +444,10 @@ class Daemon:
         self.starts = 0
 
     def start(self) -> float:
+        # Learned retrieval keys (ADR 0050) are off: suite v1's budgets were
+        # frozen on a system that does not learn between repetitions.
         cmd = [str(self.binary), *self.model_args, "--data-dir", str(self.data), "--capabilities-dir", str(self.caps),
-               "--bind", f"127.0.0.1:{self.port}"]
+               "--bind", f"127.0.0.1:{self.port}", "--disable-learning"]
         if self.trace:
             cmd = ["strace", "-f", "-qq", "--seccomp-bpf", "-tt", "-y", "-s", "4096", "-e", "trace=openat,execve", "-e", "signal=none",
                    "-o", f"{self.trace_path}.{self.starts}", "--", *cmd]
