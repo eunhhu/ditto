@@ -507,9 +507,10 @@ with `{ "text": ... }` records a new one (201) or refuses an overlong one
 
 ## Kernel artifact-read turns
 
-The kernel owns the durable read-only turn state machine. Until the first
-release there is one turn contract, the current payload version, and replay
-rejects turns recorded under any other ([ADR 0034](../adr/0034-one-turn-contract.md));
+The kernel owns the durable read-only turn state machine. Until 1.0 there is
+one turn contract, the current payload version, and replay rejects turns
+recorded under any other ([ADR 0034](../adr/0034-one-turn-contract.md),
+[ADR 0049](../adr/0049-learned-behavior-decisions.md));
 the version notes below record how the contract was reached. Clients cannot select its
 actors, kinds, correlations, or spans. The fixed mapping is:
 

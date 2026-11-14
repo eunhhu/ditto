@@ -1,5 +1,17 @@
 # Task 039: The improvement compiler's first evidence-gated slice
 
+> **Amended 2026-11-14 by [ADR 0049](../../adr/0049-learned-behavior-decisions.md).**
+>
+> - **Contract item 4.** A patch that widens no effect and can be undone now
+>   applies on its own as an expiring candidate shown in the learning ledger.
+>   Only a patch that widens a capability, effect or resource still needs an
+>   approval event.
+> - **Drafting** (contract item 3 and the first risk) may also run as a
+>   retrospection that a detector wakes, within ADR 0049's ceiling. It is no
+>   longer only an operator command.
+>
+> The rest of this spec stands.
+
 Why: [comparison-2026-11.md](../../design/comparison-2026-11.md) ranks this first.
 The user's stated fear is self-improvement that gets less efficient over time,
 and the improvement compiler is the designed answer
