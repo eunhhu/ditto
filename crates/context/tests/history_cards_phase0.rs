@@ -380,7 +380,7 @@ fn background(rng: &mut Lcg) -> (String, String) {
 /// The planted targets and distractors plus `size` background exchanges,
 /// oldest first, and the turn ids of the most recent `WINDOW` (never carded).
 fn corpus(probes: &Probes, size: usize) -> (Vec<HistoryExchange>, HashSet<String>) {
-    let mut rng = Lcg(0x5eed_046);
+    let mut rng = Lcg(0x05ee_d046);
     let mut exchanges = Vec::with_capacity(size + 64);
     for target in &probes.targets {
         exchanges.push(HistoryExchange {
