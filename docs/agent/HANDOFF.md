@@ -439,18 +439,19 @@ A review of main found the problems below, and each commit fixes one of them:
 
 ## Last full gate
 
-`./scripts/agent-check.sh` **exited 0** on `97ab79a`, the Task 045 fix commit
-on `dev/task-045-learned-keys`. It ran on 2026-11-14 on the Raspberry Pi 5 and
-took 6 min 45 s of wall clock. The log is kept at
-`target/task045/agent-check-2.log` (SHA-256
-`276802f808015b3f04a236c5f3a311daf9cfb38947c7301882dbdd17d6d75e5a`). The
-first Task 045 run, on `42e1d5d`, also exited 0 (653 workspace tests,
-`target/task045/agent-check.log`).
+`./scripts/agent-check.sh` **exited 0** on `0b2f684`, the Task 046 Phase 0
+branch. It contains Task 045. It ran on 2026-11-14 on the Raspberry Pi 5 and
+took 12 min 49 s of wall clock. The log is kept at
+`target/task046/agent-check.log` (SHA-256
+`02095b0a8d592a93a89fec5dbb4ffbd8bb52e6950904e68fc904680a6ca6990f`).
+
+The Task 045 runs exited 0 on `97ab79a` (659 workspace tests,
+`target/task045/agent-check-2.log`) and on `42e1d5d` (653).
 
 | Part of the gate | Result |
 | --- | --- |
 | canary, fmt, clippy `-D warnings` | passed |
-| workspace tests | 659 passed, 8 ignored |
+| workspace tests | 663 passed, 9 ignored (the Phase 0 report is the ninth) |
 | built-CLI scenarios | the seven ignored ones, run one by one: 7 passed |
 | `test-personal-baseline.py` | 8 OK |
 | `test-personal-quality.py` | 22 OK |
