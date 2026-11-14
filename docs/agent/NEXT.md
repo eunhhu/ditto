@@ -3,9 +3,8 @@
 Work in order unless the user explicitly changes priorities. Complete one task
 file's exit criteria before moving the marker.
 
-Checked against the code on 2026-11-13: main `756f256` plus branch
-`dev/review-fixes-2026-11-13` (turn contract 20; see
-[HANDOFF](HANDOFF.md)).
+Checked against the code on 2026-11-13: main `9b4944b` (PR #33, turn contract
+20; see [HANDOFF](HANDOFF.md)).
 
 ## Active
 
@@ -36,6 +35,30 @@ Checked against the code on 2026-11-13: main `756f256` plus branch
 
 Items 2–5 keep the order recorded with the
 [comparison](../design/comparison-2026-11.md) on 2026-11-06.
+
+## Proposed order from the north star (not confirmed)
+
+On 2026-11-13 the user named self-improvement as the headline result, with
+everything inspectable and controllable ([product](../product.md), "North
+star"). [The plan](../design/self-improvement-plan-2026-11.md) proposes this
+dependency order. It is a proposal: the Active list above stays in force until
+the user confirms an order and answers the plan's five decisions.
+
+1. Real use and journaled feedback signals. No task file yet.
+2. A learned layer of journaled profile documents. This widens
+   [044](tasks/044-platform-surface.md) P2.
+3. The first learning loop, retrieval keys from the model's own searches. It
+   needs no model call, and it is the retrieval bridge
+   [043](tasks/043-requests-per-turn.md) left open. It overlaps the
+   retrieval-miss detector of
+   [039](tasks/039-improvement-compiler-first-slice.md).
+4. A search over past conversations, and workspaces. No task file yet.
+5. Forgetting as a policy: usage accounting, expiry, the rest of
+   [038](tasks/038-korean-and-ranked-memory-search.md), and erasure (ADR
+   first).
+6. A glass-box console with a learning ledger. No task file yet.
+7. Tools that act and events that wake, with
+   [040](tasks/040-durable-work-items.md) and 044 P4.
 
 ## Parallel tracks
 

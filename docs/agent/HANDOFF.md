@@ -20,16 +20,24 @@ only after code and checks establish a new fact.
   current assistant, and for a comparison with Hermes, OpenMausBot and
   Harness² ([comparison-2026-11](../design/comparison-2026-11.md)). No parity
   claim is made.
+- On 2026-11-13 the user named the north star: a secretary-type, always-on
+  harness whose headline result is self-improvement, with everything
+  inspectable and controllable ([product intent](../product.md), "North
+  star").
+  - [The plan](../design/self-improvement-plan-2026-11.md) records where the
+    code stands against it, a proposed build order and five decisions the
+    user still has to make.
+  - None of that plan is implemented.
 
-## Repository state (2026-11-13)
+## Repository state (2026-11-14)
 
-- **main** is `756f256` (PR #32), pushed. CI ran `./scripts/agent-check.sh` and
-  the MSRV check green on that commit. origin also keeps the merged branch
-  `dev/task-037-eval-suite`, which has not been deleted, and the tag
-  `archive/codex-scaffold` for the unmerged early scaffold.
-- **Branch `dev/review-fixes-2026-11-13`** carries the fixes from a codebase
-  review on top of main. It is local and not pushed. Its result is in
-  "Review fixes" below.
+- **main** is `9b4944b`: PR #33, the review fixes, merged by the user on
+  2026-11-13. CI ran `./scripts/agent-check.sh` and the MSRV check green on
+  that commit.
+- **origin** also keeps the merged branch `dev/review-fixes-2026-11-13`, which
+  has not been deleted, and the tag `archive/codex-scaffold` for the unmerged
+  early scaffold. The merged `dev/task-037-eval-suite` was deleted on
+  2026-11-13.
 - **Tasks 038–041** are specs. Only 038's search half is implemented.
   - [Task 042](tasks/042-harness-only-self-improvement.md): only
     `scripts/probe_variant.py` and its tests exist.
@@ -52,9 +60,11 @@ only after code and checks establish a new fact.
   Every campaign number in the task files is therefore a documented summary,
   not checkable evidence. [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
   now states where a campaign must live before it is cited.
-- `target/` holds 38 GB on a 235 GB SD card that is 77% full. It also holds
-  the `target/task0xx` measurement directories that the earlier evidence names,
-  so it has not been cleaned.
+- On 2026-11-13 `target/debug` (37 GB of build cache) was removed at the
+  user's request. `target/` is now 848 MB, and the SD card went from 77% to
+  60% full. `target/release` and the measurement directories the earlier
+  evidence names (`target/task0xx`, `target/review-2026-11-13`,
+  `target/web-e2e`) were kept. Do not run `cargo clean` there.
 
 ## Current system
 
@@ -302,7 +312,7 @@ only after code and checks establish a new fact.
   idle and at most 17.2 MB with four runs at once. The review session of
   2026-11-13 did not re-run it, and the gate does not run it either.
 
-## Review fixes (2026-11-13, branch `dev/review-fixes-2026-11-13`)
+## Review fixes (2026-11-13, PR #33, merged)
 
 A review of main found the problems below, and each commit fixes one of them:
 
@@ -336,9 +346,12 @@ A review of main found the problems below, and each commit fixes one of them:
   `instructions.recorded`, prefetch origin), the architecture version history,
   the README (profiles, instructions, skills), the ADR 0041 status, ADR 0045's
   ingress decision, the Task 044 file and the campaign-evidence rule.
-- **Full gate:** see "Gate on the review branch" below.
+- **Full gate:** see "Last full gate" below.
 
-## Gate on the review branch
+## Last full gate
+
+CI ran the same script green on the PR's last commit `3e789fe` and on the
+merge commit `9b4944b`. The local run below is the one with a kept log.
 
 `./scripts/agent-check.sh` **exited 0** on `1652636` (2026-11-13, Raspberry
 Pi 5, 9 min 53 s wall clock). The host load average was about 4–5 from other

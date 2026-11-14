@@ -17,6 +17,31 @@ used to deliver it. Developer integrations can support the product, but do not
 make an agent-building framework the primary user proposition. Personal use is
 not limited to software development or server administration.
 
+## North star (2026-11-13)
+
+On 2026-11-13 the user restated the goal and ranked it:
+
+> ditto는 인간의 사용성과 체감성능, 알잘딱을 세계 최고로 사용하기 위한 비서형,
+> 24/7, 에이전트 하네스야. 가장 크게 기술적으로 성과를 띄워야할 건,
+> 자가학습/자가개선이야. post training을 따로 시킨급으로 맥락과 연혁 참조와
+> context switching, injecting, forgeting등이 효율적이고 성능집약적으로
+> 작동해야함. 그걸 블랙박스 없이 전부 인간이 조회/제어가 가능해야하고.
+
+- **Product:** a secretary-type agent harness that is always on, and best in
+  the world on usability, perceived speed and doing the right thing unasked.
+- **Headline technical result:** self-learning and self-improvement.
+- **Quality bar:** history reference, context switching, injection and
+  forgetting that work as if the model had been post-trained, at low cost.
+- **Hard constraint:** no black box. A person can inspect and control all of
+  it.
+
+This ranks self-improvement and context handling above feature breadth, and
+makes inspectability a requirement. It is an intent, not a result: as of this
+date no learning loop exists in code and no learning gain has been measured.
+The plan that follows from it, and the decisions it still needs from the user,
+are in
+[design/self-improvement-plan-2026-11](design/self-improvement-plan-2026-11.md).
+
 ## Zero cost and zero overhead
 
 The user further confirmed **zero cost, zero overhead** as a primary design
