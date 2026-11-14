@@ -8,57 +8,51 @@ Checked against the code on 2026-11-13: main `9b4944b` (PR #33, turn contract
 
 ## Active
 
-1. **Measure contract 20 and close the `answer` gate.** This is a
-   [Task 017](tasks/017-evaluation-outcomes.md) campaign 17 over suite v1, under
-   `budgets-v3`, with `--agent-check-exit 0`. Three things make it necessary:
-   - campaign 16's files are gone ([Task 043](tasks/043-requests-per-turn.md),
-     "Evidence");
-   - contract 20 changes how memory search ranks;
-   - the `answer` gate needs the owner's 20% second review on a campaign whose
-     files still exist.
+On 2026-11-14 the owner answered the plan's five decisions
+([ADR 0049](../adr/0049-learned-behavior-decisions.md)). The owner did not
+separately confirm the order. This list follows
+[the plan](../design/self-improvement-plan-2026-11.md), with decision 4 applied.
 
-   Store the run as [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
-   requires. It is a paid run (campaign 16 spent $0.1013), so it starts when the
-   owner says so. The 2026-11-13 review proposed putting it first; the owner has
-   not confirmed that order yet.
-2. [038](tasks/038-korean-and-ranked-memory-search.md) Korean memory search.
-   The search half is implemented in turn contract 20. What remains is
-   `eval/task017/suite-v2.json` (P6, P7, X5, P8), its paid calibration, Korean
-   Recall@5 ≥ 0.90 over 80 attempts, and the correction record (`ditto memory
-   history`, `restore`, `until`).
-3. [039](tasks/039-improvement-compiler-first-slice.md) The improvement
-   compiler's first evidence-gated slice. Spec only.
-4. [041](tasks/041-hermes-baseline.md) A measured Hermes baseline on the same
-   memory workload. Spec only.
-5. [040](tasks/040-durable-work-items.md) A durable work item for a long
-   delegated task. After the first release, ADR first.
+1. **The first learning loop: retrieval keys learned from the model's own
+   searches.** This covers plan steps 1–3 as one vertical slice:
+   - a detector over events the journal already holds;
+   - a learned layer that holds one kind, the retrieval key;
+   - the compiler using active keys;
+   - a ledger with undo.
 
-Items 2–5 keep the order recorded with the
-[comparison](../design/comparison-2026-11.md) on 2026-11-06.
+   It needs no model call. It is the retrieval bridge
+   [043](tasks/043-requests-per-turn.md) left open, and the retrieval-miss
+   detector of [039](tasks/039-improvement-compiler-first-slice.md). Its task
+   file and ADR come before code.
+2. **A credential-free read-only connector** (the files of a granted
+   directory), moved up by decision 4. No task file yet.
+3. A search over past conversations, and workspaces. No task file yet.
+4. Forgetting as a policy: usage accounting, expiry, the rest of
+   [038](tasks/038-korean-and-ranked-memory-search.md) (history, restore,
+   `until`, suite-v2), and erasure (ADR first).
+5. A glass-box console with the learning ledger, and the "what if" re-run.
+   Until 1.0 the re-run covers only current-contract turns. No task file yet.
+6. The credential boundary (ADR), read-only calendar and mail, then effects
+   with hand-off approval, events that wake, and
+   [040](tasks/040-durable-work-items.md).
 
-## Proposed order from the north star (not confirmed)
+**Waiting on the owner's go:** campaign 17, a
+[Task 017](tasks/017-evaluation-outcomes.md) run over suite v1 under
+`budgets-v3` with `--agent-check-exit 0`. It is paid (campaign 16 spent
+$0.1013).
+- It would measure contract 20, and any contract after it.
+- It would give the `answer` gate's 20% second review files that still exist.
+  Campaign 16's are gone ([Task 043](tasks/043-requests-per-turn.md),
+  "Evidence").
+- It must be stored as [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
+  requires.
 
-On 2026-11-13 the user named self-improvement as the headline result, with
-everything inspectable and controllable ([product](../product.md), "North
-star"). [The plan](../design/self-improvement-plan-2026-11.md) proposes this
-dependency order. It is a proposal: the Active list above stays in force until
-the user confirms an order and answers the plan's five decisions.
+Each contract change before that campaign stacks on an unmeasured one, so one
+campaign cannot separate their effects.
 
-1. Real use and journaled feedback signals. No task file yet.
-2. A learned layer of journaled profile documents. This widens
-   [044](tasks/044-platform-surface.md) P2.
-3. The first learning loop, retrieval keys from the model's own searches. It
-   needs no model call, and it is the retrieval bridge
-   [043](tasks/043-requests-per-turn.md) left open. It overlaps the
-   retrieval-miss detector of
-   [039](tasks/039-improvement-compiler-first-slice.md).
-4. A search over past conversations, and workspaces. No task file yet.
-5. Forgetting as a policy: usage accounting, expiry, the rest of
-   [038](tasks/038-korean-and-ranked-memory-search.md), and erasure (ADR
-   first).
-6. A glass-box console with a learning ledger. No task file yet.
-7. Tools that act and events that wake, with
-   [040](tasks/040-durable-work-items.md) and 044 P4.
+Still specs, now after the list above:
+- [039](tasks/039-improvement-compiler-first-slice.md)'s other detectors;
+- [041](tasks/041-hermes-baseline.md), a measured Hermes baseline.
 
 ## Parallel tracks
 

@@ -38,9 +38,16 @@ On 2026-11-13 the user restated the goal and ranked it:
 This ranks self-improvement and context handling above feature breadth, and
 makes inspectability a requirement. It is an intent, not a result: as of this
 date no learning loop exists in code and no learning gain has been measured.
-The plan that follows from it, and the decisions it still needs from the user,
-are in
+The plan that follows from it is
 [design/self-improvement-plan-2026-11](design/self-improvement-plan-2026-11.md).
+On 2026-11-14 the user decided its five open questions
+([ADR 0049](adr/0049-learned-behavior-decisions.md)):
+
+- learned changes that widen nothing apply on their own, with undo;
+- gains are claimed per family against Task 042's bar;
+- retrospection is allowed within a small stated ceiling;
+- a credential-free read-only connector moves up;
+- the turn contract freezes at 1.0, and until then the better design wins.
 
 ## Zero cost and zero overhead
 

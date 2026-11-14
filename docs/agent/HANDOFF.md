@@ -25,9 +25,13 @@ only after code and checks establish a new fact.
   inspectable and controllable ([product intent](../product.md), "North
   star").
   - [The plan](../design/self-improvement-plan-2026-11.md) records where the
-    code stands against it, a proposed build order and five decisions the
-    user still has to make.
-  - None of that plan is implemented.
+    code stands against it and the build order NEXT now follows.
+  - On 2026-11-14 the user answered its five decisions; ADR 0049 records
+    them.
+    - It amends the housekeeping invariant in `AGENTS.md`, allowing a
+      bounded, detector-woken retrospection.
+    - It amends ADR 0034: one contract until 1.0.
+  - None of that plan is implemented yet.
 
 ## Repository state (2026-11-14)
 
@@ -223,7 +227,7 @@ only after code and checks establish a new fact.
     It journals versioned transitions before publication and replays without
     provider, artifact or network I/O. Agent tool calls share one
     `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
-  - There is one turn contract, **version 20** (ADR 0034). Replay rejects
+  - There is one turn contract, **version 20**, until 1.0 (ADRs 0034, 0049). Replay rejects
     turns recorded under any other version, while status and thread history
     still read their answers. The contract carries:
     - typed failure reasons (ADR 0021);

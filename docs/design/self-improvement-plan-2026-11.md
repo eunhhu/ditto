@@ -4,9 +4,12 @@ Written 2026-11-14 at the owner's request ("개선법 문서로 기록하고 com
 from an analysis done on 2026-11-13 against main `9b4944b` (turn contract 20).
 
 **This is a plan, not an implementation.** Nothing in "What to build" exists in
-code. It proposes an order; [NEXT](../agent/NEXT.md) still owns the order, and
-the owner has not confirmed this one. The decisions it needs are listed under
-"Decisions for the owner".
+code. [NEXT](../agent/NEXT.md) owns the order.
+
+On 2026-11-14 the owner answered the five decisions listed at the end. They are
+recorded in [ADR 0049](../adr/0049-learned-behavior-decisions.md), and the
+order below is the one NEXT now follows. Decision 4 moves a credential-free
+read-only connector up to right after step 3.
 
 ## The north star
 
@@ -318,6 +321,18 @@ As of this date no learning gain has been measured on Ditto, and contract 20
 itself is unmeasured.
 
 ## Decisions for the owner
+
+**Answered on 2026-11-14** ([ADR 0049](../adr/0049-learned-behavior-decisions.md)):
+
+| # | Answer | As applied |
+| --- | --- | --- |
+| 1 | 알아서 | The proposal: a change that widens nothing and can be undone applies on its own. Rollback is manual for now, plus automatic retirement on a forgotten target or on expiry. |
+| 2 | 그렇게 하자. | Claims are per family, against Task 042's bar. |
+| 3 | 회고 방식에 많지 않은 비용이 든다면 허가할게. | Retrospection is allowed when a detector wakes it: at most 3 requests and 8,000 input tokens per run, 2 runs per profile per day. The ceiling is ADR 0049's number, not the owner's. |
+| 4 | 추천대로 | No recommendation had been written, so ADR 0049 makes one: a credential-free read-only connector (granted local files) comes right after step 3, then the credential ADR and read-only calendar and mail. |
+| 5 | 턴계약은 1.0때 고정. 그 전까진 better way가 있다면 무조건 그 방식으로 연구하고 적용도 해보고 하는 식 | One contract until 1.0, then frozen. Until then the better design wins, still ADR-first and still under Task 042's evidence bar. |
+
+The questions as they were put:
 
 1. **Approval or hand-off for a learned change.** Task 039 requires an approval
    event before any patch applies. The owner's standing preference is hand-off

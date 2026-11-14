@@ -2,7 +2,9 @@
 
 Status: accepted on 2026-10-01 for Task 033. Amends
 [ADR 0009](0009-read-only-artifact-turn-loop.md) and every later ADR that kept
-an earlier turn payload version replayable.
+an earlier turn payload version replayable. Amended on 2026-11-14 by
+[ADR 0049](0049-learned-behavior-decisions.md): "the first release" means 1.0,
+and until then a better design replaces the contract.
 
 ## Context
 
