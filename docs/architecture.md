@@ -309,10 +309,12 @@ Version 17 pins the profile's standing instructions after the core
 instructions and records them in `context.compiled` (ADR 0045); version 18
 offers `skill.read` and records its manifest in `capabilities.selected`, and
 version 19 leads the request with the skill catalogue, recorded in
-`context.compiled` (ADR 0046). Version 20, the current contract, lets the
-memory search fold Korean particles, match single Hangul syllables and weigh
-rare shared words (ADR 0029, Task 038); the compiler's own selection is
-unchanged.
+`context.compiled` (ADR 0046). Version 20 lets the memory search fold Korean
+particles, match single Hangul syllables and weigh rare shared words (ADR 0029,
+Task 038). Version 21, the current contract, lets a retrieval key learned from
+the model's own searches bring a memory the first compilation left out into
+the capsule, citing the key in its receipt (ADR 0050). This is the first
+learning loop, and it makes no model call.
 Runs, sorts and the scheduler journal from blocking threads, and daemon
 handlers run kernel calls on the blocking pool, so no async runtime thread
 waits on SQLite; debug builds reject journal access on those threads.

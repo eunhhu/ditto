@@ -25,7 +25,7 @@ const STRINGS = {
     failed: 'No answer', interrupted: 'Stopped', usedMemories: 'Memories sent to the model',
     history: 'Earlier exchanges included', tools: 'Tools used', none: 'None', excluded: 'Memories left out',
     status: 'Status', reasonRelevance: 'matched your words', reasonComplete: 'all memories fit, so all were sent',
-    reasonPinned: 'pinned', model: 'Model requests', running: 'running', events: 'events',
+    reasonPinned: 'pinned', reasonLearned: 'brought in by a key Ditto learned from your earlier wording', model: 'Model requests', running: 'running', events: 'events',
     every: 'every', left: 'left', hours: 'h', earlier: 'an earlier exchange',
     invalid: 'invalid', disputed_or_expired: 'disputed or expired', irrelevant: 'unrelated to the question',
     token_budget: 'over the context budget',
@@ -60,7 +60,7 @@ const STRINGS = {
     failed: '답변 없음', interrupted: '중단됨', usedMemories: '모델에 보낸 기억',
     history: '포함된 이전 대화', tools: '사용한 도구', none: '없음', excluded: '제외된 기억',
     status: '상태', reasonRelevance: '질문 단어와 일치', reasonComplete: '기억 전체가 예산에 들어가 모두 전송',
-    reasonPinned: '고정', model: '모델 요청 수', running: '실행 중', events: '이벤트',
+    reasonPinned: '고정', reasonLearned: '이전에 쓰신 표현에서 Ditto가 배운 키로 포함', model: '모델 요청 수', running: '실행 중', events: '이벤트',
     every: '주기', left: '남음', hours: '시간', earlier: '이전 대화',
     invalid: '유효하지 않음', disputed_or_expired: '이의 제기 또는 만료', irrelevant: '질문과 무관',
     token_budget: '문맥 예산 초과',
@@ -648,7 +648,8 @@ async function inspect(taskId) {
   if (context) {
     const receipt = context.payload.compiled.receipt;
     const reasons = new Map(receipt.included.map((entry) => [entry.node_id, entry.reason]));
-    const label = (reason) => ({ 'task-relevance': t('reasonRelevance'), 'complete-set': t('reasonComplete'), 'user-pinned': t('reasonPinned') })[reason] || reason;
+    const label = (reason) => ({ 'task-relevance': t('reasonRelevance'), 'complete-set': t('reasonComplete'), 'user-pinned': t('reasonPinned') })[reason]
+      || (String(reason).startsWith('policy-required: learned key ') ? t('reasonLearned') : reason);
     // Version 7 records the compiled nodes only; the capsule derives from them.
     const used = (context.payload.capsule || context.payload.compiled).nodes;
     section(t('usedMemories'), used.map((node) => [node.summary, label(reasons.get(node.id))]));

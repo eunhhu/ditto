@@ -507,9 +507,10 @@ with `{ "text": ... }` records a new one (201) or refuses an overlong one
 
 ## Kernel artifact-read turns
 
-The kernel owns the durable read-only turn state machine. Until the first
-release there is one turn contract, the current payload version, and replay
-rejects turns recorded under any other ([ADR 0034](../adr/0034-one-turn-contract.md));
+The kernel owns the durable read-only turn state machine. Until 1.0 there is
+one turn contract, the current payload version, and replay rejects turns
+recorded under any other ([ADR 0034](../adr/0034-one-turn-contract.md),
+[ADR 0049](../adr/0049-learned-behavior-decisions.md));
 the version notes below record how the contract was reached. Clients cannot select its
 actors, kinds, correlations, or spans. The fixed mapping is:
 
@@ -708,6 +709,63 @@ Hangul syllables as words, folds the 25 listed Korean particles when two
 characters remain, and weighs a shared word by its rarity among the searched
 memories. It also removes stray spaces from the prefetched sort's note to the
 model. No event or payload shape changes.
+
+Version 21 ([ADR 0050](../adr/0050-learned-retrieval-keys.md)) lets a learned
+retrieval key bring in a memory the first compilation left out.
+- The turn compiles again with that memory `policy-required`, and its receipt
+  reason is `policy-required: learned key <promotion event id>`. At most two
+  keys apply per turn.
+- The keys a turn may use are the session's promotions recorded at or before
+  its input event, unexpired at acceptance, whose words the request matches.
+- Replay checks each cited key against the snapshot and rejects a receipt that
+  cites:
+  - a missing promotion;
+  - a promotion from another session;
+  - a promotion that was superseded, expired or aimed at another node;
+  - a promotion whose words the request does not match.
+
+## Learned retrieval keys
+
+A retrieval key ([ADR 0050](../adr/0050-learned-retrieval-keys.md)) is a chain
+of session-scoped, task-free events correlated to the session and linked by
+`supersedes`:
+
+| Kind | Actor | Causation | Meaning |
+| --- | --- | --- | --- |
+| `improvement.candidate_created` | system | the teaching turn's latest event before its terminal | One episode of evidence, or a refused promotion with `blocked` |
+| `improvement.promoted` | system | the teaching or using turn's latest event before its terminal | Active until `expires_at`; also a renewal by use |
+| `improvement.retired` | user | none | The user's undo |
+
+The version-1 payload has these fields:
+
+- `kind: "retrieval_key"`;
+- `target`, the memory's node id;
+- `words`, at most six;
+- `evidence`, at most eight entries of `{ turn_id, input_event_id,
+  request_words }`;
+- `supersedes`;
+- `expires_at` (promotions);
+- `blocked` (candidates);
+- `reason` (retirements).
+
+The detector appends these events when an ordinary agent turn's answer is
+final, before the turn's `turn.finished`, without a model call. A daemon started with `--disable-learning` neither
+appends them nor uses a key.
+
+`GET /v1/learning?session_id=…` returns `{ session_id, keys }`. Each key has
+these fields, derived from the journal:
+
+- `key_id` (the chain's first event) and `event_id` (its latest);
+- `state`: `candidate`, `blocked`, `active`, `expired`, `inert` (the memory
+  is gone) or `retired`;
+- `target` and `target_text`;
+- `words`, `evidence` (turn ids), `expires_at` and `blocked`;
+- `uses`, the number of turns whose receipts cite one of the chain's
+  promotions.
+
+`POST /v1/commands/learning/retire` with `{ session_id, key_id }` appends
+`improvement.retired` and returns the key. It refuses an unknown key, an
+already-retired one and unknown fields.
 
 `conversation.reset` (user, `{ "version": 1 }`, session-scoped, no task or
 correlation) starts a new thread: later agent runs replay only finished

@@ -2595,6 +2595,27 @@ fn singular(token: &str) -> String {
     token.to_owned()
 }
 
+/// The memory search's words of `input`, each with the forms it matches by
+/// (ADR 0029), in word order. Learned retrieval keys (ADR 0050) use the same
+/// words and the same folding, so a key matches exactly when a search would.
+pub fn search_vocabulary(input: &str) -> Vec<(String, Vec<String>)> {
+    search_words(input)
+        .into_iter()
+        .map(|word| {
+            let forms = search_forms(&word);
+            (word, forms)
+        })
+        .collect()
+}
+
+/// Every form the search words of `input` match by.
+pub fn search_form_set(input: &str) -> HashSet<String> {
+    search_words(input)
+        .iter()
+        .flat_map(|word| search_forms(word))
+        .collect()
+}
+
 /// The words a memory search matches on: the complete-set words, plus single
 /// Hangul syllables, because many Korean nouns are one syllable (집, 차, 키) and
 /// dropping them would leave a Korean question with nothing to match.

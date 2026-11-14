@@ -20,16 +20,37 @@ only after code and checks establish a new fact.
   current assistant, and for a comparison with Hermes, OpenMausBot and
   Harness² ([comparison-2026-11](../design/comparison-2026-11.md)). No parity
   claim is made.
+- On 2026-11-13 the user named the north star: a secretary-type, always-on
+  harness whose headline result is self-improvement, with everything
+  inspectable and controllable ([product intent](../product.md), "North
+  star").
+  - [The plan](../design/self-improvement-plan-2026-11.md) records where the
+    code stands against it and the build order NEXT now follows.
+  - On 2026-11-14 the user answered its five decisions; ADR 0049 records
+    them.
+    - It amends the housekeeping invariant in `AGENTS.md`, allowing a
+      bounded, detector-woken retrospection.
+    - It amends ADR 0034: one contract until 1.0.
+  - Its first learning loop, retrieval keys (Task 045, ADR 0050), is
+    implemented. Nothing else in the plan is.
 
-## Repository state (2026-11-13)
+## Repository state (2026-11-14)
 
-- **main** is `756f256` (PR #32), pushed. CI ran `./scripts/agent-check.sh` and
-  the MSRV check green on that commit. origin also keeps the merged branch
-  `dev/task-037-eval-suite`, which has not been deleted, and the tag
-  `archive/codex-scaffold` for the unmerged early scaffold.
-- **Branch `dev/review-fixes-2026-11-13`** carries the fixes from a codebase
-  review on top of main. It is local and not pushed. Its result is in
-  "Review fixes" below.
+- **main** is `9b4944b`: PR #33, the review fixes, merged by the user on
+  2026-11-13. CI ran `./scripts/agent-check.sh` and the MSRV check green on
+  that commit.
+- **Branches of 2026-11-14:**
+  - `dev/north-star-learning-plan` holds the plan and ADR 0049, and changes
+    documents only.
+  - `dev/task-045-learned-keys` is stacked on it and holds Task 045 (turn
+    contract 21).
+  - Both were pushed that day without a PR. Check `gh pr list` and
+    `git log origin/main` for where they stand.
+  - The sections below describe the code on `dev/task-045-learned-keys`.
+- **origin** also keeps the merged branch `dev/review-fixes-2026-11-13`, which
+  has not been deleted, and the tag `archive/codex-scaffold` for the unmerged
+  early scaffold. The merged `dev/task-037-eval-suite` was deleted on
+  2026-11-13.
 - **Tasks 038–041** are specs. Only 038's search half is implemented.
   - [Task 042](tasks/042-harness-only-self-improvement.md): only
     `scripts/probe_variant.py` and its tests exist.
@@ -52,9 +73,11 @@ only after code and checks establish a new fact.
   Every campaign number in the task files is therefore a documented summary,
   not checkable evidence. [QUALITY-GATES](QUALITY-GATES.md) "Campaign evidence"
   now states where a campaign must live before it is cited.
-- `target/` holds 38 GB on a 235 GB SD card that is 77% full. It also holds
-  the `target/task0xx` measurement directories that the earlier evidence names,
-  so it has not been cleaned.
+- On 2026-11-13 `target/debug` (37 GB of build cache) was removed at the
+  user's request. `target/` is now 848 MB, and the SD card went from 77% to
+  60% full. `target/release` and the measurement directories the earlier
+  evidence names (`target/task0xx`, `target/review-2026-11-13`,
+  `target/web-e2e`) were kept. Do not run `cargo clean` there.
 
 ## Current system
 
@@ -136,6 +159,31 @@ only after code and checks establish a new fact.
     - a shared word weighs `1/n` by how many searched memories contain it.
 
     The compiler's own selection keeps exact words.
+- **Learned retrieval keys** (ADR 0050, Task 045). This is the first learning
+  loop, and it makes no model call.
+  - **Detector.** When an ordinary agent turn's answer is final, before its
+    terminal event, a deterministic
+    detector reads the turn's events. It looks for one user-asserted memory
+    that the compilation left out, that a `memory.manage` search found, and
+    that shares a word with the answer. It ignores any turn that read a page,
+    a file or an attachment.
+  - **Words and promotion.** The user's rare request words become a candidate
+    key (`improvement.candidate_created`). A second, differently worded
+    episode within 30 days promotes it (`improvement.promoted`, 90 days). The
+    promotion is refused when the key would match more than 2 of the last 50
+    requests.
+  - **Use.** A promoted key that matches a later request (two of its words, or
+    its only word) brings its memory into a compilation that left it out.
+    - The receipt names the key, and replay checks it against the journal.
+    - At most two keys apply per turn.
+    - Use renews a key monthly.
+  - **Control.**
+    - `ditto learning list|retire` and `GET /v1/learning` /
+      `POST /v1/commands/learning/retire` show and undo keys. An undone key's
+      memory is not learned back.
+    - The web app's "Why?" view labels learned inclusions.
+    - `--disable-learning` turns the loop off, and the Task 017 runner passes
+      it.
 - **Standing instructions and skills.**
   - `instructions.recorded` is the profile's one instruction document: at most
     2,000 characters, and superseded by the next one. A turn pins the document
@@ -213,7 +261,7 @@ only after code and checks establish a new fact.
     It journals versioned transitions before publication and replays without
     provider, artifact or network I/O. Agent tool calls share one
     `tool.requested`/`tool.started`/`tool.output` lifecycle (ADR 0036).
-  - There is one turn contract, **version 20** (ADR 0034). Replay rejects
+  - There is one turn contract, **version 21**, until 1.0 (ADRs 0034, 0049). Replay rejects
     turns recorded under any other version, while status and thread history
     still read their answers. The contract carries:
     - typed failure reasons (ADR 0021);
@@ -285,8 +333,12 @@ only after code and checks establish a new fact.
   Those figures are recorded in
   [Task 043](tasks/043-requests-per-turn.md), but the report is gone and
   cannot be re-checked.
-- **Contract 20 is unmeasured.** No campaign has run it, and it changes how
-  memory search ranks.
+- **Contracts 20 and 21 are unmeasured.** No campaign has run either one.
+  Contract 20 changes how memory search ranks, and contract 21 adds learned
+  keys. One campaign cannot separate the two.
+  - The Task 017 runner turns learning off, so suite v1 cannot show a
+    learning gain at all.
+  - Measuring one needs a learning-curve profile that does not exist yet.
 - **Task 042 probes** on the memory two-hop case: base 10/10 answers with
   Recall@5 18/20, and both variants were `KEEP_BASE`. That family is saturated
   for wording edits.
@@ -302,7 +354,43 @@ only after code and checks establish a new fact.
   idle and at most 17.2 MB with four runs at once. The review session of
   2026-11-13 did not re-run it, and the gate does not run it either.
 
-## Review fixes (2026-11-13, branch `dev/review-fixes-2026-11-13`)
+## Latest slice: Task 045, learned retrieval keys (branch `dev/task-045-learned-keys`)
+
+- [Task 045](tasks/045-learned-retrieval-keys.md) and ADR 0050, turn contract
+  21.
+- **Code.**
+  - `crates/kernel/src/learning.rs`: the detector, chains, compile inclusion,
+    replay check and ledger.
+  - `crates/context`: `search_vocabulary` and `search_form_set`.
+  - `crates/event-store`: `recent_finished_agent_turns`.
+  - `crates/protocol`: `improvement.retired` and the ledger types.
+  - Daemon and CLI: the routes and `ditto learning`.
+  - Web: the "Why?" label.
+  - The runner passes `--disable-learning`.
+- **Tests.**
+  - Kernel lib: 57 (11 new detector tests: target choice, rare words, the
+    six-word cap and one word per folded form, external and inferred
+    refusals, distinct episodes, the breadth block, re-asks not counted as
+    breadth, lapses, renewal, every ledger state).
+  - `read_only_turn`: 121. Five are new, and they passed 25 runs in a row:
+    - two differently worded misses teach a key, and the third turn holds the
+      memory in its first request with no search; all four turns replay;
+    - an undone key stops applying and is not learned back;
+    - a turn that called `web.browse` teaches nothing;
+    - receipts citing a missing, other-session or retired key do not replay;
+    - a forgotten memory's key goes `inert` and its turn replays.
+  - Daemon: 16 plus 8 ignored (1 new route test).
+  - `ditto-context` 62, `ditto-event-store` 21, `ditto-cli` 23,
+    `test-personal-quality.py` 22, `test-eval-task017.py` 43, web 12.
+  - No existing test's expected value was edited.
+  - Live: against a provider-less daemon, `ditto learning list` printed an
+    empty ledger, `retire` of an unknown key exited 1, and a retire carrying
+    an `actor` field got 422. The browser end-to-end run passed 34 of 34
+    (`target/task045/web-e2e.log`).
+- **Not shown.** No live provider turn has used a key, and no campaign has
+  measured one.
+
+## Review fixes (2026-11-13, PR #33, merged)
 
 A review of main found the problems below, and each commit fixes one of them:
 
@@ -336,20 +424,22 @@ A review of main found the problems below, and each commit fixes one of them:
   `instructions.recorded`, prefetch origin), the architecture version history,
   the README (profiles, instructions, skills), the ADR 0041 status, ADR 0045's
   ingress decision, the Task 044 file and the campaign-evidence rule.
-- **Full gate:** see "Gate on the review branch" below.
+- **Full gate:** see "Last full gate" below.
 
-## Gate on the review branch
+## Last full gate
 
-`./scripts/agent-check.sh` **exited 0** on `1652636` (2026-11-13, Raspberry
-Pi 5, 9 min 53 s wall clock). The host load average was about 4–5 from other
-work when it started. The log is kept at
-`target/review-2026-11-13/agent-check.log` (SHA-256
-`2e0bcfd3ba179772e12c6f3b624b1f46b3d3545cf0937c36f0221af146ac3871`).
+`./scripts/agent-check.sh` **exited 0** on `97ab79a`, the Task 045 fix commit
+on `dev/task-045-learned-keys`. It ran on 2026-11-14 on the Raspberry Pi 5 and
+took 6 min 45 s of wall clock. The log is kept at
+`target/task045/agent-check-2.log` (SHA-256
+`276802f808015b3f04a236c5f3a311daf9cfb38947c7301882dbdd17d6d75e5a`). The
+first Task 045 run, on `42e1d5d`, also exited 0 (653 workspace tests,
+`target/task045/agent-check.log`).
 
 | Part of the gate | Result |
 | --- | --- |
 | canary, fmt, clippy `-D warnings` | passed |
-| workspace tests | 642 passed, 8 ignored |
+| workspace tests | 659 passed, 8 ignored |
 | built-CLI scenarios | the seven ignored ones, run one by one: 7 passed |
 | `test-personal-baseline.py` | 8 OK |
 | `test-personal-quality.py` | 22 OK |
@@ -358,15 +448,11 @@ work when it started. The log is kept at
 | web renderer checks | 12 cases passed |
 | offline baseline and five-case corpus | passed |
 
-Changes after that commit:
+Only documents changed after that commit; the canary passed on them.
 
-- `90c1b9d` changed only documents. The canary passed on it.
-- The next commit strengthens one install test, so that it also checks that
-  `install` refuses a directory holding another id.
-  - `cargo test -p ditto-capability --lib install`: 10 passed (the 9 install
-    tests plus one catalogue test the filter matches).
-  - clippy on `ditto-capability` passed.
-  - The full gate was not re-run for that test-only change.
+The previous local gate ran on `1652636` (PR #33's branch, 642 workspace
+tests). Its log is `target/review-2026-11-13/agent-check.log`. CI ran the
+gate green on PR #33's last commit and on main `9b4944b`.
 
 Not run in this session:
 
@@ -426,6 +512,11 @@ Not run in this session:
   reproduced.
 - **Evaluation runner.** It does not report requests per turn, and schedule
   gate aggregation counts attempts rather than turns (Task 043).
+- **Learned keys.**
+  - There is no Korean function-word list, so a Korean question word (어디)
+    can become a key word when it is rare among the memories. The two-word
+    rule and the breadth check bound the effect.
+  - The same question asked on two different days counts as one episode.
 - **Skills.** `skill.read` has run only against the scripted-model
   integration suite, with no live provider turn.
 
@@ -480,6 +571,10 @@ Not run in this session:
   caching.
 - **Excluded-context receipts.** Legacy receipts have no independent encoded
   payload ceiling. Add one before accepting them as a new durable wire input.
+- **Learning reads are bounded.** Key chains and use counts read at most
+  10,000 events of each `improvement.*` kind and of `context.compiled`. Past
+  that, later events (a retirement included) are not read. Add a
+  session-scoped index before a profile gets near it.
 - **Completion admission.** Generic model-task completion admission is a
   high-water check followed by an append, not an atomic verifier/admission
   transaction.

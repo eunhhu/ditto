@@ -360,6 +360,33 @@ impl EventStore {
         rows.map(|row| row?.try_into()).collect()
     }
 
+    /// The session's latest finished agent-run turns (task `run_*`) before
+    /// `before_seq`, across conversation resets, newest first, at most `limit`.
+    /// The learning detector's breadth check reads them (ADR 0050).
+    pub fn recent_finished_agent_turns(
+        &self,
+        session: &str,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<EventRecord>, EventStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare_cached(
+            "SELECT seq, event_id, recorded_at, session_id, task_id, actor, kind,
+                    payload_json, causation_id, correlation_id, span_id
+             FROM events INDEXED BY events_conversation
+             WHERE session_id = ?1 AND seq < ?2
+               AND kind IN ('conversation.reset', 'turn.finished')
+               AND kind = 'turn.finished' AND task_id GLOB 'run_*'
+             ORDER BY seq DESC LIMIT ?3",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![session, before_seq, limit],
+            raw_event_record_from_row,
+        )?;
+        rows.map(|row| row?.try_into()).collect()
+    }
+
     /// The session's `conversation.reset` and `turn.finished` events after
     /// `after_seq` and before `before_seq`, oldest first, at most `limit`.
     pub fn conversation_events_between(

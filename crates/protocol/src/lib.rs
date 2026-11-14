@@ -154,8 +154,12 @@ pub mod event_kind {
     pub const TASK_COMPLETED: &str = "task.completed";
     pub const TASK_BLOCKED: &str = "task.blocked";
     pub const TASK_CANCEL_REQUESTED: &str = "task.cancel_requested";
+    /// A learned change with one episode of evidence, not yet used (ADR 0050).
     pub const IMPROVEMENT_CANDIDATE_CREATED: &str = "improvement.candidate_created";
+    /// A learned change in use: a second distinct episode, or a renewal.
     pub const IMPROVEMENT_PROMOTED: &str = "improvement.promoted";
+    /// A learned change the user undid; it supersedes the change's latest event.
+    pub const IMPROVEMENT_RETIRED: &str = "improvement.retired";
     pub const MODEL_REQUESTED: &str = "model.requested";
     pub const MODEL_OUTPUT: &str = "model.output";
     pub const TURN_FINISHED: &str = "turn.finished";
@@ -458,6 +462,69 @@ pub struct RememberInputResponse {
     pub event_id: String,
     pub event_seq: i64,
     pub outcome: MemoryWriteOutcome,
+}
+
+/// The learning ledger of one session (ADR 0050).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearningQuery {
+    pub session_id: String,
+}
+
+/// Undo one learned change. The kernel records it as the user's act.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetireLearnedCommand {
+    pub session_id: String,
+    /// The learned change's id: the event that started it.
+    pub key_id: String,
+}
+
+/// Where a learned change stands, derived from the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearnedState {
+    /// One episode of evidence; not used.
+    Candidate,
+    /// A promotion was refused; the reason is in `blocked`.
+    Blocked,
+    /// In use.
+    Active,
+    /// Not renewed before its expiry.
+    Expired,
+    /// Its memory was forgotten or replaced, so it can no longer apply.
+    Inert,
+    /// The user undid it.
+    Retired,
+}
+
+/// One learned retrieval key as the ledger shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearnedKey {
+    pub key_id: String,
+    /// The chain's latest event; receipts cite promotion events.
+    pub event_id: String,
+    pub state: LearnedState,
+    /// The memory it brings into context.
+    pub target: String,
+    /// The memory's current text, while it is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_text: Option<String>,
+    pub words: Vec<String>,
+    /// The turns whose misses taught it, oldest first.
+    pub evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
+    /// Turns whose compilation it changed.
+    pub uses: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningLedger {
+    pub session_id: String,
+    pub keys: Vec<LearnedKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
